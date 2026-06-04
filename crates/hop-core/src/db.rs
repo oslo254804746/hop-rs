@@ -1,12 +1,15 @@
 use std::{path::Path, time::Duration};
 
-use sqlx::{sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions}, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    SqlitePool,
+};
 
 use crate::{
     errors::HopCoreError,
     models::{
-        new_id, Asset, AssetRow, AuthorizedKey, Credential, KnownHost, NewAsset, NewAuthorizedKey,
-        NewCredential, NewKnownHost, NewSession, Session, Setting,
+        new_id, validate_tcp_port, Asset, AssetRow, AuthorizedKey, Credential, KnownHost, NewAsset,
+        NewAuthorizedKey, NewCredential, NewKnownHost, NewSession, Session, Setting,
     },
     Result,
 };
@@ -35,7 +38,10 @@ impl HopDb {
         Self::connect_with_options(options, 1).await
     }
 
-    async fn connect_with_options(options: SqliteConnectOptions, max_connections: u32) -> Result<Self> {
+    async fn connect_with_options(
+        options: SqliteConnectOptions,
+        max_connections: u32,
+    ) -> Result<Self> {
         let pool = SqlitePoolOptions::new()
             .max_connections(max_connections)
             .connect_with(options)
@@ -68,7 +74,9 @@ impl HopDb {
         .bind(new_key.fingerprint)
         .execute(&self.pool)
         .await?;
-        self.get_authorized_key_by_id(&id).await?.ok_or_else(|| HopCoreError::Database(sqlx::Error::RowNotFound))
+        self.get_authorized_key_by_id(&id)
+            .await?
+            .ok_or_else(|| HopCoreError::Database(sqlx::Error::RowNotFound))
     }
 
     pub async fn list_authorized_keys(&self) -> Result<Vec<AuthorizedKey>> {
@@ -84,7 +92,10 @@ impl HopDb {
         .map_err(Into::into)
     }
 
-    pub async fn get_active_authorized_key_by_fingerprint(&self, fingerprint: &str) -> Result<Option<AuthorizedKey>> {
+    pub async fn get_active_authorized_key_by_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> Result<Option<AuthorizedKey>> {
         sqlx::query_as::<_, AuthorizedKey>(
             r#"
             SELECT id, name, public_key, fingerprint, is_active, created_at
@@ -163,7 +174,9 @@ impl HopDb {
         .bind(credential.passphrase_enc)
         .execute(&self.pool)
         .await?;
-        self.get_credential(&id).await?.ok_or_else(|| HopCoreError::Database(sqlx::Error::RowNotFound))
+        self.get_credential(&id)
+            .await?
+            .ok_or_else(|| HopCoreError::Database(sqlx::Error::RowNotFound))
     }
 
     pub async fn list_credentials(&self) -> Result<Vec<Credential>> {
@@ -228,6 +241,7 @@ impl HopDb {
 
     pub async fn add_asset(&self, asset: NewAsset) -> Result<Asset> {
         let id = new_id();
+        let port = validate_tcp_port(asset.port)?;
         let tags = serde_json::to_string(&asset.tags)?;
         sqlx::query(
             r#"
@@ -238,16 +252,19 @@ impl HopDb {
         .bind(&id)
         .bind(asset.name)
         .bind(asset.hostname)
-        .bind(asset.port)
+        .bind(i64::from(port))
         .bind(asset.description)
         .bind(tags)
         .bind(asset.credential_id)
         .execute(&self.pool)
         .await?;
-        self.get_asset_by_id(&id).await?.ok_or_else(|| HopCoreError::Database(sqlx::Error::RowNotFound))
+        self.get_asset_by_id(&id)
+            .await?
+            .ok_or_else(|| HopCoreError::Database(sqlx::Error::RowNotFound))
     }
 
     pub async fn update_asset(&self, id: &str, asset: NewAsset) -> Result<()> {
+        let port = validate_tcp_port(asset.port)?;
         let tags = serde_json::to_string(&asset.tags)?;
         sqlx::query(
             r#"
@@ -264,7 +281,7 @@ impl HopDb {
         )
         .bind(asset.name)
         .bind(asset.hostname)
-        .bind(asset.port)
+        .bind(i64::from(port))
         .bind(asset.description)
         .bind(tags)
         .bind(asset.credential_id)
@@ -292,7 +309,10 @@ impl HopDb {
         )
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(Asset::try_from).collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.into_iter()
+            .map(Asset::try_from)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub async fn get_asset_by_id(&self, id: &str) -> Result<Option<Asset>> {
@@ -323,8 +343,14 @@ impl HopDb {
         row.map(Asset::try_from).transpose().map_err(Into::into)
     }
 
-    pub async fn find_proxy_asset(&self, host_to_connect: &str, port: i64) -> Result<Option<Asset>> {
-        let normalized_name = host_to_connect.strip_suffix(".hop").unwrap_or(host_to_connect);
+    pub async fn find_proxy_asset(
+        &self,
+        host_to_connect: &str,
+        port: i64,
+    ) -> Result<Option<Asset>> {
+        let normalized_name = host_to_connect
+            .strip_suffix(".hop")
+            .unwrap_or(host_to_connect);
 
         let row = sqlx::query_as::<_, AssetRow>(
             r#"
@@ -362,7 +388,9 @@ impl HopDb {
         .bind(session.client_ip)
         .execute(&self.pool)
         .await?;
-        self.get_session(&id).await?.ok_or_else(|| HopCoreError::Database(sqlx::Error::RowNotFound))
+        self.get_session(&id)
+            .await?
+            .ok_or_else(|| HopCoreError::Database(sqlx::Error::RowNotFound))
     }
 
     pub async fn finish_session(&self, id: &str, status: &str, error: Option<&str>) -> Result<()> {
@@ -412,7 +440,12 @@ impl HopDb {
         .map_err(Into::into)
     }
 
-    pub async fn get_known_host(&self, hostname: &str, port: i64, key_type: &str) -> Result<Option<KnownHost>> {
+    pub async fn get_known_host(
+        &self,
+        hostname: &str,
+        port: i64,
+        key_type: &str,
+    ) -> Result<Option<KnownHost>> {
         sqlx::query_as::<_, KnownHost>(
             r#"
             SELECT hostname, port, key_type, fingerprint, first_seen
@@ -465,10 +498,11 @@ impl HopDb {
     }
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<String>> {
-        let setting = sqlx::query_as::<_, Setting>("SELECT key, value FROM settings WHERE key = ?1")
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await?;
+        let setting =
+            sqlx::query_as::<_, Setting>("SELECT key, value FROM settings WHERE key = ?1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(setting.map(|setting| setting.value))
     }
 
@@ -525,13 +559,25 @@ mod tests {
     async fn authorized_key_crud_respects_active_flag() {
         let db = HopDb::in_memory().await.unwrap();
         let key = db
-            .add_authorized_key(NewAuthorizedKey::new("laptop", "ssh-ed25519 AAAA test", "SHA256:abc"))
+            .add_authorized_key(NewAuthorizedKey::new(
+                "laptop",
+                "ssh-ed25519 AAAA test",
+                "SHA256:abc",
+            ))
             .await
             .unwrap();
 
-        assert!(db.get_active_authorized_key_by_fingerprint("SHA256:abc").await.unwrap().is_some());
+        assert!(db
+            .get_active_authorized_key_by_fingerprint("SHA256:abc")
+            .await
+            .unwrap()
+            .is_some());
         db.set_authorized_key_active(&key.id, false).await.unwrap();
-        assert!(db.get_active_authorized_key_by_fingerprint("SHA256:abc").await.unwrap().is_none());
+        assert!(db
+            .get_active_authorized_key_by_fingerprint("SHA256:abc")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -558,20 +604,56 @@ mod tests {
         let listed = db.list_assets().await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].tags, vec!["prod", "web"]);
-        assert_eq!(db.get_asset_by_name("web-prod-01").await.unwrap().unwrap().id, inserted.id);
-        assert_eq!(db.get_credential(&credential.id).await.unwrap().unwrap().username, "deploy");
+        assert_eq!(
+            db.get_asset_by_name("web-prod-01")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            inserted.id
+        );
+        assert_eq!(
+            db.get_credential(&credential.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .username,
+            "deploy"
+        );
     }
 
     #[tokio::test]
     async fn proxy_asset_allowlist_matches_only_design_rules() {
         let db = HopDb::in_memory().await.unwrap();
-        db.add_asset(NewAsset::new("web-prod-01", "10.0.1.10", 2222)).await.unwrap();
+        db.add_asset(NewAsset::new("web-prod-01", "10.0.1.10", 2222))
+            .await
+            .unwrap();
 
-        assert!(db.find_proxy_asset("10.0.1.10", 2222).await.unwrap().is_some());
-        assert!(db.find_proxy_asset("web-prod-01", 22).await.unwrap().is_some());
-        assert!(db.find_proxy_asset("web-prod-01.hop", 22).await.unwrap().is_some());
-        assert!(db.find_proxy_asset("10.0.1.10", 22).await.unwrap().is_none());
-        assert!(db.find_proxy_asset("unlisted.internal", 22).await.unwrap().is_none());
+        assert!(db
+            .find_proxy_asset("10.0.1.10", 2222)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(db
+            .find_proxy_asset("web-prod-01", 22)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(db
+            .find_proxy_asset("web-prod-01.hop", 22)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(db
+            .find_proxy_asset("10.0.1.10", 22)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(db
+            .find_proxy_asset("unlisted.internal", 22)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -590,7 +672,9 @@ mod tests {
             .await
             .unwrap();
 
-        db.finish_session(&session.id, "failed", Some("rejected")).await.unwrap();
+        db.finish_session(&session.id, "failed", Some("rejected"))
+            .await
+            .unwrap();
         let finished = db.get_session(&session.id).await.unwrap().unwrap();
         assert_eq!(finished.status, "failed");
         assert_eq!(finished.error.as_deref(), Some("rejected"));

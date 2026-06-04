@@ -4,7 +4,10 @@ use hop_core::{Asset, HopDb, MasterKey, NewSession};
 use russh::{server::Handle, ChannelId, ChannelMsg};
 use tokio::sync::{mpsc, Mutex};
 
-use super::{client, server::{AuthInfo, ChannelState, PtySize}};
+use super::{
+    client,
+    server::{start_tui_session, AuthInfo, ChannelState, PtySize},
+};
 use crate::tui::TuiResources;
 
 pub type SharedChannels = Arc<Mutex<HashMap<ChannelId, ChannelState>>>;
@@ -113,7 +116,12 @@ async fn run_managed_bridge(
     if let Some(session_id) = session_id {
         let _ = match &result {
             Ok(_) => options.db.finish_session(&session_id, "ok", None).await,
-            Err(err) => options.db.finish_session(&session_id, "failed", Some(&err.to_string())).await,
+            Err(err) => {
+                options
+                    .db
+                    .finish_session(&session_id, "failed", Some(&err.to_string()))
+                    .await
+            }
         };
     }
 
@@ -122,20 +130,53 @@ async fn run_managed_bridge(
             Ok(_) => "\r\nTarget session ended. Returning to Hop...\r\n",
             Err(err) => {
                 let msg = format!("\r\nTarget connection failed: {err}\r\nReturning to Hop...\r\n");
-                let _ = options.handle.data(options.channel_id, msg.into_bytes()).await;
+                let _ = options
+                    .handle
+                    .data(options.channel_id, msg.into_bytes())
+                    .await;
                 ""
             }
         };
         if !message.is_empty() {
-            let _ = options.handle.data(options.channel_id, message.as_bytes().to_vec()).await;
+            let _ = options
+                .handle
+                .data(options.channel_id, message.as_bytes().to_vec())
+                .await;
         }
-        let _ = tui.render();
-        channels.lock().await.insert(options.channel_id, ChannelState::Tui(tui));
+        let should_return = channels.lock().await.contains_key(&options.channel_id);
+        if should_return {
+            match start_tui_session(&options.db, &options.auth, options.client_ip.clone()).await {
+                Ok(audit) => {
+                    let _ = tui.render();
+                    channels.lock().await.insert(
+                        options.channel_id,
+                        ChannelState::Tui {
+                            tui: Box::new(tui),
+                            audit,
+                        },
+                    );
+                }
+                Err(err) => {
+                    let _ = options
+                        .handle
+                        .data(
+                            options.channel_id,
+                            format!("\r\nFailed to reopen Hop TUI: {err}\r\n").into_bytes(),
+                        )
+                        .await;
+                    let _ = options.handle.eof(options.channel_id).await;
+                    let _ = options.handle.close(options.channel_id).await;
+                }
+            }
+        }
     } else {
         if let Err(err) = &result {
             let _ = options
                 .handle
-                .data(options.channel_id, format!("\r\nhop-connect failed: {err}\r\n").into_bytes())
+                .data(
+                    options.channel_id,
+                    format!("\r\nhop-connect failed: {err}\r\n").into_bytes(),
+                )
                 .await;
         }
         let _ = options.handle.eof(options.channel_id).await;

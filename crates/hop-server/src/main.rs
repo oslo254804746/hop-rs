@@ -10,7 +10,11 @@ use hop_core::{load_or_create_master_key, AuthType, HopConfig, HopDb, MasterKey}
 use tracing::info;
 
 #[derive(Debug, Parser)]
-#[command(name = "hop-server", version, about = "Hop lightweight SSH jump server")]
+#[command(
+    name = "hop-server",
+    version,
+    about = "Hop lightweight SSH jump server"
+)]
 struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
@@ -48,8 +52,12 @@ enum KeyCommand {
         public_key_file: Option<PathBuf>,
     },
     List,
-    Deactivate { id: String },
-    Activate { id: String },
+    Deactivate {
+        id: String,
+    },
+    Activate {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -86,7 +94,9 @@ enum CredentialCommand {
         passphrase: Option<String>,
     },
     List,
-    Delete { id: String },
+    Delete {
+        id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -106,7 +116,9 @@ enum AssetCommand {
         credential_id: Option<String>,
     },
     List,
-    Delete { id: String },
+    Delete {
+        id: String,
+    },
 }
 
 #[tokio::main]
@@ -133,8 +145,12 @@ async fn main() -> Result<()> {
                     public_key_file,
                 } => admin::local_cli::add_key(&db, name, public_key, public_key_file).await,
                 KeyCommand::List => admin::local_cli::list_keys(&db).await,
-                KeyCommand::Deactivate { id } => admin::local_cli::set_key_active(&db, &id, false).await,
-                KeyCommand::Activate { id } => admin::local_cli::set_key_active(&db, &id, true).await,
+                KeyCommand::Deactivate { id } => {
+                    admin::local_cli::set_key_active(&db, &id, false).await
+                }
+                KeyCommand::Activate { id } => {
+                    admin::local_cli::set_key_active(&db, &id, true).await
+                }
             }
         }
         Command::Credential { command } => {
@@ -161,7 +177,9 @@ async fn main() -> Result<()> {
                     .await
                 }
                 CredentialCommand::List => admin::local_cli::list_credentials(&db).await,
-                CredentialCommand::Delete { id } => admin::local_cli::delete_credential(&db, &id).await,
+                CredentialCommand::Delete { id } => {
+                    admin::local_cli::delete_credential(&db, &id).await
+                }
             }
         }
         Command::Asset { command } => {
@@ -174,7 +192,18 @@ async fn main() -> Result<()> {
                     description,
                     tags,
                     credential_id,
-                } => admin::local_cli::add_asset(&db, name, hostname, port, description, tags, credential_id).await,
+                } => {
+                    admin::local_cli::add_asset(
+                        &db,
+                        name,
+                        hostname,
+                        port,
+                        description,
+                        tags,
+                        credential_id,
+                    )
+                    .await
+                }
                 AssetCommand::List => admin::local_cli::list_assets(&db).await,
                 AssetCommand::Delete { id } => admin::local_cli::delete_asset(&db, &id).await,
             }
@@ -199,13 +228,43 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
 
 async fn open_runtime(config_path: Option<PathBuf>) -> Result<(HopDb, HopConfig, Arc<MasterKey>)> {
     let config = match config_path {
-        Some(path) => HopConfig::load(Some(&path)).with_context(|| format!("load config {}", path.display()))?,
+        Some(path) => HopConfig::load(Some(&path))
+            .with_context(|| format!("load config {}", path.display()))?,
         None => HopConfig::load(None)?,
     };
-    if config.server.admin_bind != "127.0.0.1:8080" && config.server.admin_bind.starts_with("0.0.0.0") {
-        bail!("admin_bind is configured on 0.0.0.0; MVP default is localhost/internal only");
-    }
+    validate_admin_bind(&config)?;
     let db = HopDb::connect(&config.database.path).await?;
     let master_key = Arc::new(load_or_create_master_key(&config.security.secret_key_file)?);
     Ok((db, config, master_key))
+}
+
+fn validate_admin_bind(config: &HopConfig) -> Result<()> {
+    let admin_bind = config.admin_bind_addr()?;
+    if !admin_bind.ip().is_loopback() {
+        bail!("admin_bind must use a loopback address for MVP Admin Web: {admin_bind}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admin_bind_must_be_loopback() {
+        let mut config = HopConfig::default();
+        assert!(validate_admin_bind(&config).is_ok());
+
+        config.server.admin_bind = "[::1]:8080".to_string();
+        assert!(validate_admin_bind(&config).is_ok());
+
+        config.server.admin_bind = "0.0.0.0:8080".to_string();
+        assert!(validate_admin_bind(&config).is_err());
+
+        config.server.admin_bind = "[::]:8080".to_string();
+        assert!(validate_admin_bind(&config).is_err());
+
+        config.server.admin_bind = "192.168.1.10:8080".to_string();
+        assert!(validate_admin_bind(&config).is_err());
+    }
 }

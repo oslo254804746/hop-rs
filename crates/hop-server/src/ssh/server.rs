@@ -14,8 +14,7 @@ use crate::tui::{TuiAction, TuiResources};
 
 use super::{
     bridge::{self, BridgeControl, ManagedBridgeOptions, SharedChannels},
-    host_key,
-    proxy,
+    host_key, proxy,
     routes::{parse_exec_command, ExecCommand},
 };
 
@@ -33,13 +32,37 @@ pub struct PtySize {
 
 impl Default for PtySize {
     fn default() -> Self {
-        Self { width: 80, height: 24 }
+        Self {
+            width: 80,
+            height: 24,
+        }
     }
 }
 
 pub enum ChannelState {
-    Tui(TuiResources),
-    Managed { control: BridgeControl },
+    Tui {
+        tui: Box<TuiResources>,
+        audit: ActiveTuiSession,
+    },
+    Managed {
+        control: BridgeControl,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ActiveTuiSession {
+    id: String,
+}
+
+impl ActiveTuiSession {
+    pub(crate) fn new(id: String) -> Self {
+        Self { id }
+    }
+
+    pub(crate) async fn finish(self, db: &HopDb, status: &str, error: Option<&str>) -> Result<()> {
+        db.finish_session(&self.id, status, error).await?;
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -49,8 +72,14 @@ pub struct HopSshServer {
     master_key: Arc<MasterKey>,
 }
 
-pub async fn serve_ssh(bind: SocketAddr, config: HopConfig, db: HopDb, master_key: Arc<MasterKey>) -> Result<()> {
-    let host_key = host_key::load_or_generate(&config.ssh.host_key_file, &config.ssh.host_key_type)?;
+pub async fn serve_ssh(
+    bind: SocketAddr,
+    config: HopConfig,
+    db: HopDb,
+    master_key: Arc<MasterKey>,
+) -> Result<()> {
+    let host_key =
+        host_key::load_or_generate(&config.ssh.host_key_file, &config.ssh.host_key_type)?;
     let russh_config = server::Config {
         inactivity_timeout: Some(Duration::from_secs(3600)),
         auth_rejection_time: Duration::from_secs(1),
@@ -66,7 +95,9 @@ pub async fn serve_ssh(bind: SocketAddr, config: HopConfig, db: HopDb, master_ke
     };
     let listener = TcpListener::bind(bind).await?;
     info!(%bind, "ssh server listening");
-    server.run_on_socket(Arc::new(russh_config), &listener).await?;
+    server
+        .run_on_socket(Arc::new(russh_config), &listener)
+        .await?;
     Ok(())
 }
 
@@ -109,6 +140,11 @@ impl HopSshHandler {
         self.ptys.get(&channel).copied().unwrap_or_default()
     }
 
+    async fn start_tui_session(&self) -> Result<ActiveTuiSession> {
+        let auth = self.auth_info().context("missing authenticated key")?;
+        start_tui_session(&self.db, &auth, self.client_ip.clone()).await
+    }
+
     async fn start_managed(
         &mut self,
         channel_id: ChannelId,
@@ -138,6 +174,25 @@ impl HopSshHandler {
     }
 }
 
+pub(crate) async fn start_tui_session(
+    db: &HopDb,
+    auth: &AuthInfo,
+    client_ip: Option<String>,
+) -> Result<ActiveTuiSession> {
+    let session = db
+        .start_session(NewSession {
+            key_finger: auth.fingerprint.clone(),
+            key_name: Some(auth.name.clone()),
+            mode: "tui".to_string(),
+            asset_name: None,
+            target_host: None,
+            target_port: None,
+            client_ip,
+        })
+        .await?;
+    Ok(ActiveTuiSession::new(session.id))
+}
+
 impl server::Handler for HopSshHandler {
     type Error = anyhow::Error;
 
@@ -145,7 +200,11 @@ impl server::Handler for HopSshHandler {
         Ok(Some(self.config.ssh.banner.clone()))
     }
 
-    async fn auth_publickey_offered(&mut self, _user: &str, public_key: &PublicKey) -> Result<server::Auth, Self::Error> {
+    async fn auth_publickey_offered(
+        &mut self,
+        _user: &str,
+        public_key: &PublicKey,
+    ) -> Result<server::Auth, Self::Error> {
         let fingerprint = key_fingerprint(public_key);
         if self
             .db
@@ -159,7 +218,11 @@ impl server::Handler for HopSshHandler {
         }
     }
 
-    async fn auth_publickey(&mut self, _user: &str, public_key: &PublicKey) -> Result<server::Auth, Self::Error> {
+    async fn auth_publickey(
+        &mut self,
+        _user: &str,
+        public_key: &PublicKey,
+    ) -> Result<server::Auth, Self::Error> {
         let fingerprint = key_fingerprint(public_key);
         match self
             .db
@@ -177,7 +240,11 @@ impl server::Handler for HopSshHandler {
         }
     }
 
-    async fn channel_open_session(&mut self, _channel: Channel<Msg>, _session: &mut Session) -> Result<bool, Self::Error> {
+    async fn channel_open_session(
+        &mut self,
+        _channel: Channel<Msg>,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
         Ok(true)
     }
 
@@ -213,17 +280,25 @@ impl server::Handler for HopSshHandler {
             {
                 let _ = self
                     .db
-                    .finish_session(&session.id, "failed", Some("target not in assets allowlist"))
+                    .finish_session(
+                        &session.id,
+                        "failed",
+                        Some("target not in assets allowlist"),
+                    )
                     .await;
             }
-            warn!(host_to_connect, port_to_connect, "rejected proxy target outside allowlist");
+            warn!(
+                host_to_connect,
+                port_to_connect, "rejected proxy target outside allowlist"
+            );
             return Ok(false);
         };
 
         let db = self.db.clone();
         let client_ip = self.client_ip.clone();
         tokio::spawn(async move {
-            if let Err(err) = proxy::bridge_direct_tcpip(channel, db, auth, asset, client_ip).await {
+            if let Err(err) = proxy::bridge_direct_tcpip(channel, db, auth, asset, client_ip).await
+            {
                 warn!(?err, "proxy bridge failed");
             }
         });
@@ -252,29 +327,34 @@ impl server::Handler for HopSshHandler {
         Ok(())
     }
 
-    async fn shell_request(&mut self, channel: ChannelId, session: &mut Session) -> Result<(), Self::Error> {
+    async fn shell_request(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
         let assets = self.db.list_assets().await?;
         let size = self.pty_size(channel);
-        let mut tui = TuiResources::new(session.handle(), channel, size.width, size.height, assets)?;
+        let mut tui =
+            TuiResources::new(session.handle(), channel, size.width, size.height, assets)?;
         tui.render()?;
-        self.channels.lock().await.insert(channel, ChannelState::Tui(tui));
-        self.db
-            .start_session(NewSession {
-                key_finger: self.auth.as_ref().map(|a| a.fingerprint.clone()).unwrap_or_default(),
-                key_name: self.auth.as_ref().map(|a| a.name.clone()),
-                mode: "tui".to_string(),
-                asset_name: None,
-                target_host: None,
-                target_port: None,
-                client_ip: self.client_ip.clone(),
-            })
-            .await
-            .ok();
+        let audit = self.start_tui_session().await?;
+        self.channels.lock().await.insert(
+            channel,
+            ChannelState::Tui {
+                tui: Box::new(tui),
+                audit,
+            },
+        );
         Ok(())
     }
 
-    async fn exec_request(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
         let command = match parse_exec_command(data) {
             Ok(command) => command,
@@ -323,55 +403,108 @@ impl server::Handler for HopSshHandler {
                     session.close(channel)?;
                     return Ok(());
                 }
-                self.start_managed(channel, session.handle(), asset, None).await?;
+                self.start_managed(channel, session.handle(), asset, None)
+                    .await?;
             }
         }
         Ok(())
     }
 
-    async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
         let mut connect: Option<(Asset, TuiResources)> = None;
+        let mut finish_tui: Option<(ActiveTuiSession, &'static str, Option<String>)> = None;
         let mut close = false;
         {
             let mut channels = self.channels.lock().await;
-            if let Some(state) = channels.get_mut(&channel) {
+            let action = if let Some(state) = channels.get_mut(&channel) {
                 match state {
-                    ChannelState::Tui(tui) => match tui.handle_bytes(data)? {
-                        TuiAction::None => {}
-                        TuiAction::Quit => close = true,
-                        TuiAction::Connect(asset) => {
-                            if asset.credential_id.is_none() {
-                                let _ = session.data(channel, b"\r\nAsset has no managed credential; use ProxyJump instead.\r\n".to_vec());
-                            } else if let Some(ChannelState::Tui(tui)) = channels.remove(&channel) {
-                                connect = Some((asset, tui));
-                            }
-                        }
-                    },
+                    ChannelState::Tui { tui, .. } => Some(tui.handle_bytes(data)?),
                     ChannelState::Managed { control } => {
                         let _ = control.input.send(data.to_vec());
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            match action {
+                Some(TuiAction::None) | None => {}
+                Some(TuiAction::Quit) => {
+                    if let Some(ChannelState::Tui { audit, .. }) = channels.remove(&channel) {
+                        finish_tui = Some((audit, "ok", None));
+                    }
+                    close = true;
+                }
+                Some(TuiAction::Connect(asset)) => {
+                    if asset.credential_id.is_none() {
+                        let _ = session.data(
+                            channel,
+                            b"\r\nAsset has no managed credential; use ProxyJump instead.\r\n"
+                                .to_vec(),
+                        );
+                    } else if let Some(ChannelState::Tui { tui, audit }) = channels.remove(&channel)
+                    {
+                        finish_tui = Some((audit, "connected", None));
+                        connect = Some((asset, *tui));
                     }
                 }
             }
+        }
+        if let Some((audit, status, error)) = finish_tui {
+            let _ = audit.finish(&self.db, status, error.as_deref()).await;
         }
         if close {
             session.eof(channel)?;
             session.close(channel)?;
         }
         if let Some((asset, tui)) = connect {
-            self.start_managed(channel, session.handle(), asset, Some(tui)).await?;
+            self.start_managed(channel, session.handle(), asset, Some(tui))
+                .await?;
         }
         Ok(())
     }
 
-    async fn channel_eof(&mut self, channel: ChannelId, _session: &mut Session) -> Result<(), Self::Error> {
-        if let Some(ChannelState::Managed { control }) = self.channels.lock().await.get(&channel) {
-            let _ = control.input.send(Vec::new());
+    async fn channel_eof(
+        &mut self,
+        channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let mut finish_tui = None;
+        {
+            let mut channels = self.channels.lock().await;
+            match channels.get(&channel) {
+                Some(ChannelState::Managed { control }) => {
+                    let _ = control.input.send(Vec::new());
+                }
+                Some(ChannelState::Tui { .. }) => {
+                    if let Some(ChannelState::Tui { audit, .. }) = channels.remove(&channel) {
+                        finish_tui = Some(audit);
+                    }
+                }
+                None => {}
+            }
+        }
+        if let Some(audit) = finish_tui {
+            let _ = audit.finish(&self.db, "ok", None).await;
         }
         Ok(())
     }
 
-    async fn channel_close(&mut self, channel: ChannelId, _session: &mut Session) -> Result<(), Self::Error> {
-        self.channels.lock().await.remove(&channel);
+    async fn channel_close(
+        &mut self,
+        channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let state = self.channels.lock().await.remove(&channel);
+        if let Some(ChannelState::Tui { audit, .. }) = state {
+            let _ = audit.finish(&self.db, "ok", None).await;
+        }
         Ok(())
     }
 
@@ -392,7 +525,7 @@ impl server::Handler for HopSshHandler {
         let mut channels = self.channels.lock().await;
         if let Some(state) = channels.get_mut(&channel) {
             match state {
-                ChannelState::Tui(tui) => {
+                ChannelState::Tui { tui, .. } => {
                     tui.resize(size.width, size.height)?;
                 }
                 ChannelState::Managed { control } => {
@@ -406,4 +539,37 @@ impl server::Handler for HopSshHandler {
 
 fn key_fingerprint(key: &PublicKey) -> String {
     format!("{}", key.fingerprint(HashAlg::Sha256))
+}
+
+#[cfg(test)]
+mod tests {
+    use hop_core::NewSession;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn active_tui_session_finish_marks_record_done() {
+        let db = HopDb::in_memory().await.unwrap();
+        let session = db
+            .start_session(NewSession {
+                key_finger: "SHA256:test".to_string(),
+                key_name: Some("tester".to_string()),
+                mode: "tui".to_string(),
+                asset_name: None,
+                target_host: None,
+                target_port: None,
+                client_ip: None,
+            })
+            .await
+            .unwrap();
+
+        ActiveTuiSession::new(session.id.clone())
+            .finish(&db, "ok", None)
+            .await
+            .unwrap();
+
+        let finished = db.get_session(&session.id).await.unwrap().unwrap();
+        assert_eq!(finished.status, "ok");
+        assert!(finished.ended_at.is_some());
+    }
 }

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::errors::HopCoreError;
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AuthorizedKey {
     pub id: String,
@@ -19,7 +21,11 @@ pub struct NewAuthorizedKey {
 }
 
 impl NewAuthorizedKey {
-    pub fn new(name: impl Into<String>, public_key: impl Into<String>, fingerprint: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        public_key: impl Into<String>,
+        fingerprint: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             public_key: public_key.into(),
@@ -205,4 +211,90 @@ pub struct Setting {
 
 pub fn new_id() -> String {
     Uuid::new_v4().to_string()
+}
+
+pub fn validate_tcp_port(port: i64) -> crate::Result<u16> {
+    match u16::try_from(port) {
+        Ok(port) if port > 0 => Ok(port),
+        _ => Err(HopCoreError::Validation(format!(
+            "tcp port must be between 1 and 65535, got {port}"
+        ))),
+    }
+}
+
+pub fn validate_credential_material(
+    auth_type: &AuthType,
+    password_enc: Option<&str>,
+    private_key_enc: Option<&str>,
+    passphrase_enc: Option<&str>,
+) -> crate::Result<()> {
+    let has_password = has_secret(password_enc);
+    let has_private_key = has_secret(private_key_enc);
+    let has_passphrase = has_secret(passphrase_enc);
+
+    match auth_type {
+        AuthType::Password if !has_password => Err(HopCoreError::Validation(
+            "password auth requires a password".to_string(),
+        )),
+        AuthType::Key if !has_private_key => Err(HopCoreError::Validation(
+            "key auth requires a private key".to_string(),
+        )),
+        AuthType::KeyWithPassphrase if !has_private_key || !has_passphrase => {
+            Err(HopCoreError::Validation(
+                "key+passphrase auth requires a private key and passphrase".to_string(),
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn has_secret(value: Option<&str>) -> bool {
+    value.map(|value| !value.trim().is_empty()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_tcp_port_accepts_only_real_tcp_ports() {
+        assert_eq!(validate_tcp_port(1).unwrap(), 1);
+        assert_eq!(validate_tcp_port(22).unwrap(), 22);
+        assert_eq!(validate_tcp_port(65_535).unwrap(), 65_535);
+
+        assert!(validate_tcp_port(0).is_err());
+        assert!(validate_tcp_port(-1).is_err());
+        assert!(validate_tcp_port(65_536).is_err());
+    }
+
+    #[test]
+    fn validate_credential_material_requires_auth_specific_secrets() {
+        assert!(validate_credential_material(&AuthType::Password, Some("enc"), None, None).is_ok());
+        assert!(validate_credential_material(&AuthType::Password, None, None, None).is_err());
+
+        assert!(validate_credential_material(&AuthType::Key, None, Some("enc"), None).is_ok());
+        assert!(validate_credential_material(&AuthType::Key, None, None, None).is_err());
+
+        assert!(validate_credential_material(
+            &AuthType::KeyWithPassphrase,
+            None,
+            Some("enc"),
+            Some("enc")
+        )
+        .is_ok());
+        assert!(validate_credential_material(
+            &AuthType::KeyWithPassphrase,
+            None,
+            Some("enc"),
+            None
+        )
+        .is_err());
+        assert!(validate_credential_material(
+            &AuthType::KeyWithPassphrase,
+            None,
+            None,
+            Some("enc")
+        )
+        .is_err());
+    }
 }

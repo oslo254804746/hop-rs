@@ -2,7 +2,8 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{bail, Context, Result};
 use hop_core::{
-    encrypt_envelope, new_id, AuthType, HopDb, MasterKey, NewAsset, NewAuthorizedKey, NewCredential,
+    encrypt_envelope, new_id, validate_credential_material, validate_tcp_port, AuthType, HopDb,
+    MasterKey, NewAsset, NewAuthorizedKey, NewCredential,
 };
 use russh::keys::{parse_public_key_base64, ssh_key::HashAlg, PublicKeyBase64};
 
@@ -20,10 +21,17 @@ pub fn parse_public_key_line(line: &str) -> Result<(String, String)> {
     Ok((canonical, fingerprint))
 }
 
-pub async fn add_key(db: &HopDb, name: String, public_key: Option<String>, public_key_file: Option<PathBuf>) -> Result<()> {
+pub async fn add_key(
+    db: &HopDb,
+    name: String,
+    public_key: Option<String>,
+    public_key_file: Option<PathBuf>,
+) -> Result<()> {
     let key_text = match (public_key, public_key_file) {
         (Some(key), None) => key,
-        (None, Some(path)) => fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?,
+        (None, Some(path)) => {
+            fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?
+        }
         (Some(_), Some(_)) => bail!("choose either --public-key or --public-key-file, not both"),
         (None, None) => bail!("--public-key or --public-key-file is required"),
     };
@@ -50,7 +58,10 @@ pub async fn list_keys(db: &HopDb) -> Result<()> {
 
 pub async fn set_key_active(db: &HopDb, id: &str, active: bool) -> Result<()> {
     db.set_authorized_key_active(id, active).await?;
-    println!("key {id} {}", if active { "activated" } else { "deactivated" });
+    println!(
+        "key {id} {}",
+        if active { "activated" } else { "deactivated" }
+    );
     Ok(())
 }
 
@@ -67,29 +78,40 @@ pub async fn add_credential(
 ) -> Result<()> {
     let id = new_id();
     let password_enc = match password {
-        Some(value) => Some(encrypt_envelope(master_key, &format!("{id}:password"), value.as_bytes())?),
+        Some(value) => Some(encrypt_envelope(
+            master_key,
+            &format!("{id}:password"),
+            value.as_bytes(),
+        )?),
         None => None,
     };
     let private_key_enc = match private_key_file {
         Some(path) => {
-            let value = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-            Some(encrypt_envelope(master_key, &format!("{id}:private_key"), value.as_bytes())?)
+            let value =
+                fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+            Some(encrypt_envelope(
+                master_key,
+                &format!("{id}:private_key"),
+                value.as_bytes(),
+            )?)
         }
         None => None,
     };
     let passphrase_enc = match passphrase {
-        Some(value) => Some(encrypt_envelope(master_key, &format!("{id}:passphrase"), value.as_bytes())?),
+        Some(value) => Some(encrypt_envelope(
+            master_key,
+            &format!("{id}:passphrase"),
+            value.as_bytes(),
+        )?),
         None => None,
     };
 
-    match auth_type {
-        AuthType::Password if password_enc.is_none() => bail!("password auth requires --password"),
-        AuthType::Key if private_key_enc.is_none() => bail!("key auth requires --private-key-file"),
-        AuthType::KeyWithPassphrase if private_key_enc.is_none() || passphrase_enc.is_none() => {
-            bail!("key+passphrase auth requires --private-key-file and --passphrase")
-        }
-        _ => {}
-    }
+    validate_credential_material(
+        &auth_type,
+        password_enc.as_deref(),
+        private_key_enc.as_deref(),
+        passphrase_enc.as_deref(),
+    )?;
 
     let inserted = db
         .add_credential(NewCredential {
@@ -102,7 +124,10 @@ pub async fn add_credential(
             passphrase_enc,
         })
         .await?;
-    println!("added credential {}\t{}\t{}", inserted.id, inserted.auth_type, inserted.name);
+    println!(
+        "added credential {}\t{}\t{}",
+        inserted.id, inserted.auth_type, inserted.name
+    );
     Ok(())
 }
 
@@ -131,6 +156,7 @@ pub async fn add_asset(
     tags: Vec<String>,
     credential_id: Option<String>,
 ) -> Result<()> {
+    validate_tcp_port(port)?;
     let asset = db
         .add_asset(NewAsset {
             name,
@@ -141,7 +167,10 @@ pub async fn add_asset(
             credential_id,
         })
         .await?;
-    println!("added asset {}\t{}\t{}:{}", asset.id, asset.name, asset.hostname, asset.port);
+    println!(
+        "added asset {}\t{}\t{}:{}",
+        asset.id, asset.name, asset.hostname, asset.port
+    );
     Ok(())
 }
 
@@ -172,7 +201,8 @@ mod tests {
 
     #[test]
     fn parse_public_key_line_returns_sha256_fingerprint() {
-        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ test";
+        let key =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ test";
         let (canonical, fingerprint) = parse_public_key_line(key).unwrap();
         assert!(canonical.starts_with("ssh-ed25519 "));
         assert!(fingerprint.starts_with("SHA256:"));

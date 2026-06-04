@@ -1,10 +1,15 @@
-use std::{fs, net::SocketAddr, path::{Path, PathBuf}, time::Duration};
+use std::{
+    fs,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{errors::HopCoreError, Result};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HopConfig {
     pub server: ServerConfig,
@@ -14,18 +19,6 @@ pub struct HopConfig {
     pub runtime: RuntimeConfig,
 }
 
-impl Default for HopConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            database: DatabaseConfig::default(),
-            ssh: SshConfig::default(),
-            security: SecurityConfig::default(),
-            runtime: RuntimeConfig::default(),
-        }
-    }
-}
-
 impl HopConfig {
     pub fn load(path: Option<&Path>) -> Result<Self> {
         match path {
@@ -33,7 +26,10 @@ impl HopConfig {
                 let raw = fs::read_to_string(path)?;
                 toml::from_str(&raw).map_err(|err| HopCoreError::Config(err.to_string()))
             }
-            Some(path) => Err(HopCoreError::Config(format!("config file not found: {}", path.display()))),
+            Some(path) => Err(HopCoreError::Config(format!(
+                "config file not found: {}",
+                path.display()
+            ))),
             None => Ok(Self::default()),
         }
     }

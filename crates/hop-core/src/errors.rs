@@ -10,6 +10,9 @@ pub enum HopCoreError {
     #[error("config error: {0}")]
     Config(String),
 
+    #[error("validation error: {0}")]
+    Validation(String),
+
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 

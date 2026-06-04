@@ -1,11 +1,17 @@
 use anyhow::{Context, Result};
-use hop_core::{Asset, HopDb, NewSession};
+use hop_core::{validate_tcp_port, Asset, HopDb, NewSession};
 use russh::{server, Channel};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 use super::server::AuthInfo;
 
-pub async fn bridge_direct_tcpip(channel: Channel<server::Msg>, db: HopDb, auth: AuthInfo, asset: Asset, client_ip: Option<String>) -> Result<()> {
+pub async fn bridge_direct_tcpip(
+    channel: Channel<server::Msg>,
+    db: HopDb,
+    auth: AuthInfo,
+    asset: Asset,
+    client_ip: Option<String>,
+) -> Result<()> {
     let session = db
         .start_session(NewSession {
             key_finger: auth.fingerprint,
@@ -19,7 +25,8 @@ pub async fn bridge_direct_tcpip(channel: Channel<server::Msg>, db: HopDb, auth:
         .await?;
 
     let result = async {
-        let stream = TcpStream::connect((asset.hostname.as_str(), asset.port as u16))
+        let port = validate_tcp_port(asset.port)?;
+        let stream = TcpStream::connect((asset.hostname.as_str(), port))
             .await
             .with_context(|| format!("connect {}:{}", asset.hostname, asset.port))?;
         let (mut tcp_read, mut tcp_write) = stream.into_split();
@@ -42,7 +49,10 @@ pub async fn bridge_direct_tcpip(channel: Channel<server::Msg>, db: HopDb, auth:
 
     match &result {
         Ok(_) => db.finish_session(&session.id, "ok", None).await?,
-        Err(err) => db.finish_session(&session.id, "failed", Some(&err.to_string())).await?,
+        Err(err) => {
+            db.finish_session(&session.id, "failed", Some(&err.to_string()))
+                .await?
+        }
     }
     result
 }

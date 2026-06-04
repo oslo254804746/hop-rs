@@ -9,7 +9,8 @@ use axum::{
     Router,
 };
 use hop_core::{
-    encrypt_envelope, new_id, AuthType, HopDb, MasterKey, NewAsset, NewAuthorizedKey, NewCredential,
+    encrypt_envelope, new_id, validate_credential_material, validate_tcp_port, AuthType, HopDb,
+    MasterKey, NewAsset, NewAuthorizedKey, NewCredential,
 };
 use serde::Deserialize;
 use tokio::net::TcpListener;
@@ -18,8 +19,7 @@ use tracing::info;
 
 use super::{
     auth::{clear_cookie, cookie_token, require_login, session_cookie, AdminSessions},
-    bootstrap,
-    html,
+    bootstrap, html,
     local_cli::parse_public_key_line,
 };
 
@@ -55,7 +55,10 @@ pub async fn serve_admin(bind: SocketAddr, db: HopDb, master_key: Arc<MasterKey>
         .route("/keys/{id}/activate", post(activate_key))
         .route("/keys/{id}/delete", post(delete_key))
         .route("/known-hosts", get(known_hosts))
-        .route("/known-hosts/{hostname}/{port}/delete", post(delete_known_host))
+        .route(
+            "/known-hosts/{hostname}/{port}/delete",
+            post(delete_known_host),
+        )
         .route("/sessions", get(sessions))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -82,7 +85,8 @@ async fn index(State(state): State<AdminState>, headers: HeaderMap) -> Response 
     let credentials = state.db.list_credentials().await.unwrap_or_default();
     let keys = state.db.list_authorized_keys().await.unwrap_or_default();
     let sessions = state.db.list_sessions(10).await.unwrap_or_default();
-    Html(html::overview(assets.len(), credentials.len(), keys.len(), sessions.len()).into_string()).into_response()
+    Html(html::overview(assets.len(), credentials.len(), keys.len(), sessions.len()).into_string())
+        .into_response()
 }
 
 async fn login_page() -> Html<String> {
@@ -144,12 +148,19 @@ struct AssetForm {
     credential_id: Option<String>,
 }
 
-async fn create_asset(State(state): State<AdminState>, headers: HeaderMap, Form(form): Form<AssetForm>) -> Response {
+async fn create_asset(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Form(form): Form<AssetForm>,
+) -> Response {
     if let Some(resp) = guard(&headers, &state).await {
         return resp;
     }
     let tags = parse_tags(form.tags);
     let credential_id = form.credential_id.filter(|value| !value.trim().is_empty());
+    if validate_tcp_port(form.port).is_err() {
+        return Redirect::to("/assets").into_response();
+    }
     let _ = state
         .db
         .add_asset(NewAsset {
@@ -164,7 +175,11 @@ async fn create_asset(State(state): State<AdminState>, headers: HeaderMap, Form(
     Redirect::to("/assets").into_response()
 }
 
-async fn edit_asset(State(state): State<AdminState>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+async fn edit_asset(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
     if let Some(resp) = guard(&headers, &state).await {
         return resp;
     }
@@ -186,6 +201,9 @@ async fn update_asset(
     }
     let tags = parse_tags(form.tags);
     let credential_id = form.credential_id.filter(|value| !value.trim().is_empty());
+    if validate_tcp_port(form.port).is_err() {
+        return Redirect::to("/assets").into_response();
+    }
     let _ = state
         .db
         .update_asset(
@@ -203,7 +221,11 @@ async fn update_asset(
     Redirect::to("/assets").into_response()
 }
 
-async fn delete_asset(State(state): State<AdminState>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+async fn delete_asset(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
     if let Some(resp) = guard(&headers, &state).await {
         return resp;
     }
@@ -241,9 +263,25 @@ async fn create_credential(
         return Redirect::to("/credentials").into_response();
     };
     let id = new_id();
-    let password_enc = encrypt_optional(&state.master_key, &id, "password", form.password).ok().flatten();
-    let private_key_enc = encrypt_optional(&state.master_key, &id, "private_key", form.private_key).ok().flatten();
-    let passphrase_enc = encrypt_optional(&state.master_key, &id, "passphrase", form.passphrase).ok().flatten();
+    let password_enc = encrypt_optional(&state.master_key, &id, "password", form.password)
+        .ok()
+        .flatten();
+    let private_key_enc = encrypt_optional(&state.master_key, &id, "private_key", form.private_key)
+        .ok()
+        .flatten();
+    let passphrase_enc = encrypt_optional(&state.master_key, &id, "passphrase", form.passphrase)
+        .ok()
+        .flatten();
+    if validate_credential_material(
+        &auth_type,
+        password_enc.as_deref(),
+        private_key_enc.as_deref(),
+        passphrase_enc.as_deref(),
+    )
+    .is_err()
+    {
+        return Redirect::to("/credentials").into_response();
+    }
     let _ = state
         .db
         .add_credential(NewCredential {
@@ -259,7 +297,11 @@ async fn create_credential(
     Redirect::to("/credentials").into_response()
 }
 
-async fn edit_credential(State(state): State<AdminState>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+async fn edit_credential(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
     if let Some(resp) = guard(&headers, &state).await {
         return resp;
     }
@@ -296,6 +338,16 @@ async fn update_credential(
         .ok()
         .flatten()
         .or(existing.passphrase_enc);
+    if validate_credential_material(
+        &auth_type,
+        password_enc.as_deref(),
+        private_key_enc.as_deref(),
+        passphrase_enc.as_deref(),
+    )
+    .is_err()
+    {
+        return Redirect::to("/credentials").into_response();
+    }
     let _ = state
         .db
         .update_credential(
@@ -314,9 +366,21 @@ async fn update_credential(
     Redirect::to("/credentials").into_response()
 }
 
-fn encrypt_optional(master_key: &MasterKey, id: &str, field: &str, value: Option<String>) -> anyhow::Result<Option<String>> {
-    match value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty()) {
-        Some(value) => Ok(Some(encrypt_envelope(master_key, &format!("{id}:{field}"), value.as_bytes())?)),
+fn encrypt_optional(
+    master_key: &MasterKey,
+    id: &str,
+    field: &str,
+    value: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    match value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => Ok(Some(encrypt_envelope(
+            master_key,
+            &format!("{id}:{field}"),
+            value.as_bytes(),
+        )?)),
         None => Ok(None),
     }
 }
@@ -330,7 +394,11 @@ fn parse_tags(tags: Option<String>) -> Vec<String> {
         .collect()
 }
 
-async fn delete_credential(State(state): State<AdminState>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+async fn delete_credential(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
     if let Some(resp) = guard(&headers, &state).await {
         return resp;
     }
@@ -352,7 +420,11 @@ struct KeyForm {
     public_key: String,
 }
 
-async fn create_key(State(state): State<AdminState>, headers: HeaderMap, Form(form): Form<KeyForm>) -> Response {
+async fn create_key(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Form(form): Form<KeyForm>,
+) -> Response {
     if let Some(resp) = guard(&headers, &state).await {
         return resp;
     }
@@ -365,7 +437,11 @@ async fn create_key(State(state): State<AdminState>, headers: HeaderMap, Form(fo
     Redirect::to("/keys").into_response()
 }
 
-async fn edit_key(State(state): State<AdminState>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+async fn edit_key(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
     if let Some(resp) = guard(&headers, &state).await {
         return resp;
     }
@@ -387,13 +463,20 @@ async fn update_key(
     if let Ok((public_key, fingerprint)) = parse_public_key_line(&form.public_key) {
         let _ = state
             .db
-            .update_authorized_key(&id, NewAuthorizedKey::new(form.name, public_key, fingerprint))
+            .update_authorized_key(
+                &id,
+                NewAuthorizedKey::new(form.name, public_key, fingerprint),
+            )
             .await;
     }
     Redirect::to("/keys").into_response()
 }
 
-async fn deactivate_key(State(state): State<AdminState>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+async fn deactivate_key(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
     if let Some(resp) = guard(&headers, &state).await {
         return resp;
     }
@@ -401,7 +484,11 @@ async fn deactivate_key(State(state): State<AdminState>, headers: HeaderMap, Pat
     Redirect::to("/keys").into_response()
 }
 
-async fn activate_key(State(state): State<AdminState>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+async fn activate_key(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
     if let Some(resp) = guard(&headers, &state).await {
         return resp;
     }
@@ -409,7 +496,11 @@ async fn activate_key(State(state): State<AdminState>, headers: HeaderMap, Path(
     Redirect::to("/keys").into_response()
 }
 
-async fn delete_key(State(state): State<AdminState>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+async fn delete_key(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
     if let Some(resp) = guard(&headers, &state).await {
         return resp;
     }
@@ -439,7 +530,10 @@ async fn delete_known_host(
     if let Some(resp) = guard(&headers, &state).await {
         return resp;
     }
-    let _ = state.db.delete_known_host(&hostname, port, &form.key_type).await;
+    let _ = state
+        .db
+        .delete_known_host(&hostname, port, &form.key_type)
+        .await;
     Redirect::to("/known-hosts").into_response()
 }
 
