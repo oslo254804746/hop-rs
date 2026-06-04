@@ -161,8 +161,29 @@ async fn run_managed_bridge(
         let should_return = channels.lock().await.contains_key(&options.channel_id);
         if should_return {
             match start_tui_session(&options.db, &options.auth, options.client_ip.clone()).await {
-                Ok(audit) => {
-                    if let Err(err) = tui.resume_after_target() {
+                Ok(audit) => match tui.resume_after_target() {
+                    Ok(output) => {
+                        if options
+                            .handle
+                            .data(options.channel_id, output)
+                            .await
+                            .is_ok()
+                        {
+                            channels.lock().await.insert(
+                                options.channel_id,
+                                ChannelState::Tui {
+                                    tui: Box::new(tui),
+                                    audit,
+                                },
+                            );
+                        } else {
+                            let error = "ssh channel closed while reopening Hop TUI";
+                            let _ = audit.finish(&options.db, "failed", Some(error)).await;
+                            let _ = options.handle.eof(options.channel_id).await;
+                            let _ = options.handle.close(options.channel_id).await;
+                        }
+                    }
+                    Err(err) => {
                         let error = err.to_string();
                         let _ = audit.finish(&options.db, "failed", Some(&error)).await;
                         let _ = options
@@ -174,16 +195,8 @@ async fn run_managed_bridge(
                             .await;
                         let _ = options.handle.eof(options.channel_id).await;
                         let _ = options.handle.close(options.channel_id).await;
-                    } else {
-                        channels.lock().await.insert(
-                            options.channel_id,
-                            ChannelState::Tui {
-                                tui: Box::new(tui),
-                                audit,
-                            },
-                        );
                     }
-                }
+                },
                 Err(err) => {
                     let _ = options
                         .handle

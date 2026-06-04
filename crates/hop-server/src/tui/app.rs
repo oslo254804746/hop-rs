@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::io::Write;
 
 use anyhow::Result;
 use hop_core::Asset;
@@ -16,7 +17,6 @@ use ratatui::{
     layout::Rect,
     TerminalOptions, Viewport,
 };
-use russh::{server::Handle, ChannelId};
 
 use super::{
     backend::{SshTerminal, TerminalHandle},
@@ -32,24 +32,14 @@ pub enum TuiAction {
 
 pub struct TuiResources {
     pub terminal: SshTerminal,
+    output: TerminalHandle,
     pub app: TuiApp,
     pub input: InputAdapter,
 }
 
 impl TuiResources {
-    pub fn new(
-        handle: Handle,
-        channel_id: ChannelId,
-        width: u16,
-        height: u16,
-        assets: Vec<Asset>,
-    ) -> Result<Self> {
-        Self::from_terminal_handle(
-            TerminalHandle::start(handle, channel_id),
-            width,
-            height,
-            assets,
-        )
+    pub fn new(width: u16, height: u16, assets: Vec<Asset>) -> Result<Self> {
+        Self::from_terminal_handle(TerminalHandle::new(), width, height, assets)
     }
 
     fn from_terminal_handle(
@@ -58,6 +48,7 @@ impl TuiResources {
         height: u16,
         assets: Vec<Asset>,
     ) -> Result<Self> {
+        let output = handle.clone();
         let backend = ratatui::backend::CrosstermBackend::new(handle);
         let terminal = ratatui::Terminal::with_options(
             backend,
@@ -72,12 +63,13 @@ impl TuiResources {
         )?;
         Ok(Self {
             terminal,
+            output,
             app: TuiApp::new(assets),
             input: InputAdapter::default(),
         })
     }
 
-    pub fn enter_screen(&mut self) -> Result<()> {
+    pub fn enter_screen(&mut self) -> Result<Vec<u8>> {
         execute!(
             self.terminal.backend_mut(),
             EnterAlternateScreen,
@@ -90,21 +82,24 @@ impl TuiResources {
         self.render()
     }
 
-    pub fn leave_screen(&mut self) -> Result<()> {
+    pub fn leave_screen(&mut self) -> Result<Vec<u8>> {
         execute!(
             self.terminal.backend_mut(),
+            Clear(ClearType::All),
+            MoveTo(0, 0),
             ResetColor,
             Show,
             LeaveAlternateScreen
         )?;
-        Ok(())
+        self.terminal.backend_mut().flush()?;
+        Ok(self.take_output()?)
     }
 
-    pub fn resume_after_target(&mut self) -> Result<()> {
+    pub fn resume_after_target(&mut self) -> Result<Vec<u8>> {
         self.enter_screen()
     }
 
-    pub fn resize(&mut self, width: u16, height: u16) -> Result<()> {
+    pub fn resize(&mut self, width: u16, height: u16) -> Result<Vec<u8>> {
         self.terminal.resize(Rect {
             x: 0,
             y: 0,
@@ -114,12 +109,12 @@ impl TuiResources {
         self.render()
     }
 
-    pub fn render(&mut self) -> Result<()> {
+    pub fn render(&mut self) -> Result<Vec<u8>> {
         self.terminal.draw(|frame| views::draw(frame, &self.app))?;
-        Ok(())
+        Ok(self.take_output()?)
     }
 
-    pub fn handle_bytes(&mut self, bytes: &[u8]) -> Result<TuiAction> {
+    pub fn handle_bytes(&mut self, bytes: &[u8]) -> Result<(TuiAction, Vec<u8>)> {
         let mut action = TuiAction::None;
         for input in self.input.parse(bytes) {
             action = self.app.handle_input(input);
@@ -127,8 +122,13 @@ impl TuiResources {
                 break;
             }
         }
-        self.render()?;
-        Ok(action)
+        let output = self.render()?;
+        Ok((action, output))
+    }
+
+    fn take_output(&mut self) -> std::io::Result<Vec<u8>> {
+        self.terminal.backend_mut().flush()?;
+        Ok(self.output.take_output())
     }
 }
 
@@ -248,7 +248,6 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc::{self, unbounded_channel};
 
     fn asset(name: &str) -> Asset {
         Asset {
@@ -264,29 +263,19 @@ mod tests {
         }
     }
 
-    fn test_tui() -> (TuiResources, mpsc::UnboundedReceiver<Vec<u8>>) {
-        let (tx, rx) = unbounded_channel();
-        let handle = TerminalHandle::new_for_test(tx);
+    fn test_tui() -> TuiResources {
+        let handle = TerminalHandle::new_for_test();
         let tui =
             TuiResources::from_terminal_handle(handle, 80, 24, vec![asset("web-prod-01")]).unwrap();
-        (tui, rx)
-    }
-
-    fn drain(rx: &mut mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<u8> {
-        let mut output = Vec::new();
-        while let Ok(mut data) = rx.try_recv() {
-            output.append(&mut data);
-        }
-        output
+        tui
     }
 
     #[test]
     fn enter_screen_switches_to_clean_alternate_screen() {
-        let (mut tui, mut rx) = test_tui();
+        let mut tui = test_tui();
 
-        tui.enter_screen().unwrap();
+        let output = tui.enter_screen().unwrap();
 
-        let output = drain(&mut rx);
         assert!(output
             .windows(b"\x1b[?1049h".len())
             .any(|w| w == b"\x1b[?1049h"));
@@ -296,16 +285,21 @@ mod tests {
 
     #[test]
     fn leave_screen_restores_main_screen_for_target_session() {
-        let (mut tui, mut rx) = test_tui();
+        let mut tui = test_tui();
         tui.enter_screen().unwrap();
-        drain(&mut rx);
 
-        tui.leave_screen().unwrap();
+        let output = tui.leave_screen().unwrap();
 
-        let output = drain(&mut rx);
         assert!(output
             .windows(b"\x1b[?25h".len())
             .any(|w| w == b"\x1b[?25h"));
+        assert!(output.windows(b"\x1b[2J".len()).any(|w| w == b"\x1b[2J"));
+        assert!(
+            output.windows(b"\x1b[H".len()).any(|w| w == b"\x1b[H")
+                || output
+                    .windows(b"\x1b[1;1H".len())
+                    .any(|w| w == b"\x1b[1;1H")
+        );
         assert!(output
             .windows(b"\x1b[?1049l".len())
             .any(|w| w == b"\x1b[?1049l"));
@@ -313,13 +307,11 @@ mod tests {
 
     #[test]
     fn resume_after_target_forces_full_redraw() {
-        let (mut tui, mut rx) = test_tui();
+        let mut tui = test_tui();
         tui.enter_screen().unwrap();
-        drain(&mut rx);
 
-        tui.resume_after_target().unwrap();
+        let output = tui.resume_after_target().unwrap();
 
-        let output = drain(&mut rx);
         assert!(output
             .windows(b"\x1b[?1049h".len())
             .any(|w| w == b"\x1b[?1049h"));
