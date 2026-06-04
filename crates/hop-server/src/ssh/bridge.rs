@@ -18,6 +18,21 @@ pub struct BridgeControl {
     pub resize: mpsc::UnboundedSender<PtySize>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_session_mode_distinguishes_tui_connects() {
+        assert_eq!(managed_session_mode(ManagedSessionMode::Tui), "tui-connect");
+        assert_eq!(
+            managed_session_mode(ManagedSessionMode::Exec),
+            "exec-connect"
+        );
+        assert_eq!(managed_session_mode(ManagedSessionMode::Direct), "direct");
+    }
+}
+
 pub struct ManagedBridgeOptions {
     pub db: HopDb,
     pub master_key: Arc<MasterKey>,
@@ -27,8 +42,16 @@ pub struct ManagedBridgeOptions {
     pub channel_id: ChannelId,
     pub handle: Handle,
     pub pty: PtySize,
+    pub session_mode: ManagedSessionMode,
     pub return_to_tui: Option<(SharedChannels, TuiResources)>,
     pub connect_timeout: std::time::Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedSessionMode {
+    Tui,
+    Exec,
+    Direct,
 }
 
 pub fn spawn_managed_bridge(options: ManagedBridgeOptions) -> BridgeControl {
@@ -41,22 +64,11 @@ pub fn spawn_managed_bridge(options: ManagedBridgeOptions) -> BridgeControl {
     }
 }
 
-fn managed_session_mode(return_to_tui: bool) -> &'static str {
-    if return_to_tui {
-        "tui-connect"
-    } else {
-        "exec-connect"
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn managed_session_mode_distinguishes_tui_connects() {
-        assert_eq!(managed_session_mode(true), "tui-connect");
-        assert_eq!(managed_session_mode(false), "exec-connect");
+fn managed_session_mode(mode: ManagedSessionMode) -> &'static str {
+    match mode {
+        ManagedSessionMode::Tui => "tui-connect",
+        ManagedSessionMode::Exec => "exec-connect",
+        ManagedSessionMode::Direct => "direct",
     }
 }
 
@@ -71,7 +83,7 @@ async fn run_managed_bridge(
         .start_session(NewSession {
             key_finger: options.auth.fingerprint.clone(),
             key_name: Some(options.auth.name.clone()),
-            mode: managed_session_mode(should_return_to_tui).to_string(),
+            mode: managed_session_mode(options.session_mode).to_string(),
             asset_name: Some(options.asset.name.clone()),
             target_host: Some(options.asset.hostname.clone()),
             target_port: Some(options.asset.port),

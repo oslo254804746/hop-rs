@@ -7,7 +7,7 @@ use ratatui::{
     Frame,
 };
 
-use super::app::TuiApp;
+use super::app::{AssetListItem, TuiApp};
 
 pub fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
     let status_height = if app.searching || !app.query.is_empty() {
@@ -108,6 +108,7 @@ fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
 
 fn draw_assets(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
     let filtered = app.filtered_assets();
+    let grouped = app.grouped_items();
     let available_lines = area.height as usize;
     let visible_count = visible_asset_count(area.height);
 
@@ -128,20 +129,47 @@ fn draw_assets(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
     };
 
     let mut lines: Vec<Line<'_>> = Vec::new();
-    for (idx, asset) in filtered.iter().skip(scroll_offset).enumerate() {
-        if lines.len() >= available_lines {
-            break;
-        }
-        let actual_idx = idx + scroll_offset;
-        let is_selected = actual_idx == selected;
-        let (line1, line2) = asset_lines(asset, is_selected, area.width);
-        lines.push(line1);
-        if lines.len() < available_lines {
-            lines.push(line2);
+    let mut asset_idx = 0usize;
+    for item in grouped {
+        match item {
+            AssetListItem::Group(label) => {
+                if asset_idx >= scroll_offset && lines.len() < available_lines {
+                    lines.push(group_line(&label, area.width));
+                }
+            }
+            AssetListItem::Asset(asset) => {
+                let actual_idx = asset_idx;
+                asset_idx += 1;
+                if actual_idx < scroll_offset {
+                    continue;
+                }
+                if lines.len() >= available_lines {
+                    break;
+                }
+                let is_selected = actual_idx == selected;
+                let (line1, line2) = asset_lines(&asset, is_selected, area.width);
+                lines.push(line1);
+                if lines.len() < available_lines {
+                    lines.push(line2);
+                }
+            }
         }
     }
 
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn group_line(label: &str, width: u16) -> Line<'static> {
+    let content = format!(
+        "  {}",
+        truncate_to_width(label, width.saturating_sub(2) as usize)
+    );
+    Line::from(Span::styled(
+        content,
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 fn draw_empty_assets(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {

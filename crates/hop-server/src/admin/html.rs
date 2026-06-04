@@ -1,14 +1,21 @@
 use hop_core::{Asset, AuthorizedKey, Credential, KnownHost, Session};
 use maud::{html, Markup, DOCTYPE};
 
-pub fn layout(title: &str, body_content: Markup) -> Markup {
+use super::{
+    i18n::{L10n, Locale},
+    transfer::ImportSummary,
+};
+
+pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Markup {
+    let alternate = t.locale.alternate();
+    let language_href = language_switch_href(alternate, active);
     html! {
         (DOCTYPE)
-        html lang="en" {
+        html lang=(t.locale.code()) {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
-                title { (title) " - Hop Admin" }
+                title { (title) " - " (t.app_title) }
                 style {
                     r#"
                     :root {
@@ -149,6 +156,22 @@ pub fn layout(title: &str, body_content: Markup) -> Markup {
                         border-radius: 999px;
                         background: #62d6cb;
                         box-shadow: 0 0 0 4px rgba(98, 214, 203, 0.14);
+                    }
+
+                    .language-switch {
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        gap: 10px;
+                        margin-top: 12px;
+                        padding-top: 12px;
+                        border-top: 1px solid rgba(255, 255, 255, 0.1);
+                    }
+
+                    .language-switch a {
+                        color: #62d6cb;
+                        font-weight: 780;
+                        text-decoration: none;
                     }
 
                     .content-shell { min-width: 0; }
@@ -445,6 +468,28 @@ pub fn layout(title: &str, body_content: Markup) -> Markup {
                         gap: 7px;
                     }
 
+                    .filter-row {
+                        display: flex;
+                        align-items: center;
+                        flex-wrap: wrap;
+                        gap: 8px;
+                    }
+
+                    .checkbox-cell {
+                        width: 42px;
+                        text-align: center;
+                    }
+
+                    .checkbox-cell input {
+                        width: 18px;
+                        min-height: 18px;
+                    }
+
+                    .import-summary {
+                        display: grid;
+                        gap: 8px;
+                    }
+
                     .tag, .status-pill {
                         display: inline-flex;
                         align-items: center;
@@ -543,31 +588,36 @@ pub fn layout(title: &str, body_content: Markup) -> Markup {
                             div.brand-mark { "H" }
                             div {
                                 strong { "Hop" }
-                                span { "Admin Console" }
+                                span { (t.admin_console) }
                             }
                         }
-                        nav.nav aria-label="Primary" {
-                            (nav_link("/", "Overview", title == "Overview"))
-                            (nav_link("/assets", "Assets", title == "Assets" || title == "Edit Asset"))
-                            (nav_link("/credentials", "Credentials", title == "Credentials" || title == "Edit Credential"))
-                            (nav_link("/keys", "Keys", title == "Keys" || title == "Authorized Keys" || title == "Edit Key"))
-                            (nav_link("/known-hosts", "Known Hosts", title == "Known Hosts"))
-                            (nav_link("/sessions", "Sessions", title == "Sessions"))
+                        nav.nav aria-label=(t.nav_primary) {
+                            (nav_link("/", t.nav_overview, active == "overview"))
+                            (nav_link("/assets", t.nav_assets, active == "assets"))
+                            (nav_link("/credentials", t.nav_credentials, active == "credentials"))
+                            (nav_link("/keys", t.nav_keys, active == "keys"))
+                            (nav_link("/known-hosts", t.nav_known_hosts, active == "known-hosts"))
+                            (nav_link("/sessions", t.nav_sessions, active == "sessions"))
+                            (nav_link("/import", t.nav_import_export, active == "import"))
                         }
                         div.sidebar-footer {
                             span.status-dot {}
-                            "Loopback admin"
-                            small { "Keep this surface behind a local tunnel or trusted management network." }
+                            (t.loopback_admin)
+                            small { (t.loopback_note) }
+                            div.language-switch {
+                                span { (t.language_label) ": " (t.locale.label()) }
+                                a href=(language_href) { (t.switch_language_to) " " (alternate.label()) }
+                            }
                         }
                     }
                     div.content-shell {
                         header.topbar {
                             div {
-                                p.eyebrow { "Hop Admin Web" }
+                                p.eyebrow { (t.admin_web) }
                                 h1 { (title) }
                             }
-                            @if title != "Login" {
-                                a.ghost-button href="/logout" { "Logout" }
+                            @if active != "login" {
+                                a.ghost-button href="/logout" { (t.logout) }
                             }
                         }
                         main.workspace { (body_content) }
@@ -578,16 +628,18 @@ pub fn layout(title: &str, body_content: Markup) -> Markup {
     }
 }
 
-pub fn login(error: Option<&str>) -> Markup {
+pub fn login(t: &L10n, error: Option<&str>) -> Markup {
     layout(
-        "Login",
+        t.login_title,
+        "login",
+        t,
         html! {
             div.login-wrap {
                 section.panel {
                     div.panel-header {
                         div {
-                            h2 { "Admin Login" }
-                            p { "Sign in to manage assets, trusted keys, credentials, and recent SSH activity." }
+                            h2 { (t.login_heading) }
+                            p { (t.login_intro) }
                         }
                     }
                     @if let Some(error) = error {
@@ -595,11 +647,11 @@ pub fn login(error: Option<&str>) -> Markup {
                     }
                     form method="post" action="/login" {
                         label.field {
-                            "Password"
+                            (t.login_password)
                             input type="password" name="password" required;
                         }
                         div.button-row {
-                            button type="submit" { "Login" }
+                            button type="submit" { (t.login_button) }
                         }
                     }
                 }
@@ -609,162 +661,236 @@ pub fn login(error: Option<&str>) -> Markup {
 }
 
 pub fn overview(
+    t: &L10n,
     asset_count: usize,
     credential_count: usize,
     key_count: usize,
     session_count: usize,
 ) -> Markup {
     layout(
-        "Overview",
+        t.overview_title,
+        "overview",
+        t,
         html! {
             div.page-intro {
-                h2 { "Operational snapshot" }
-                p { "A compact view of the surfaces Hop currently protects and the administrative data available to the SSH service." }
+                h2 { (t.overview_heading) }
+                p { (t.overview_intro) }
             }
             div.metric-grid {
                 div.metric {
-                    span.metric-label { "Managed assets" }
+                    span.metric-label { (t.overview_assets_label) }
                     strong.metric-value { (asset_count) }
-                    span.metric-note { "Targets available to TUI and allowlist checks" }
+                    span.metric-note { (t.overview_assets_note) }
                 }
                 div.metric {
-                    span.metric-label { "Stored credentials" }
+                    span.metric-label { (t.overview_credentials_label) }
                     strong.metric-value { (credential_count) }
-                    span.metric-note { "Encrypted target connection material" }
+                    span.metric-note { (t.overview_credentials_note) }
                 }
                 div.metric {
-                    span.metric-label { "Authorized keys" }
+                    span.metric-label { (t.overview_keys_label) }
                     strong.metric-value { (key_count) }
-                    span.metric-note { "SSH identities allowed into Hop" }
+                    span.metric-note { (t.overview_keys_note) }
                 }
                 div.metric {
-                    span.metric-label { "Recent sessions" }
+                    span.metric-label { (t.overview_sessions_label) }
                     strong.metric-value { (session_count) }
-                    span.metric-note { "Latest activity retained for review" }
+                    span.metric-note { (t.overview_sessions_note) }
                 }
             }
             section.panel {
                 div.panel-header {
                     div {
-                        h2 { "Admin scope" }
-                        p { "This web surface is intentionally focused on inventory, credential custody, trust records, and session review." }
+                        h2 { (t.overview_scope_heading) }
+                        p { (t.overview_scope_intro) }
                     }
                 }
-                p.fine-print { "Keep the Admin Web listener bound to loopback and use an SSH tunnel for remote administration." }
+                p.fine-print { (t.overview_scope_note) }
             }
         },
     )
 }
 
-pub fn assets(items: &[Asset], credentials: &[Credential], csrf_token: &str) -> Markup {
+pub fn assets(
+    t: &L10n,
+    items: &[Asset],
+    credentials: &[Credential],
+    csrf_token: &str,
+    selected_tag: Option<&str>,
+    all_tags: &[String],
+) -> Markup {
     layout(
-        "Assets",
+        t.assets_title,
+        "assets",
+        t,
         html! {
             div.page-intro {
-                h2 { "Asset inventory" }
-                p { "Define SSH targets that users can find in the TUI or reach through the ProxyJump allowlist." }
+                h2 { (t.assets_heading) }
+                p { (t.assets_intro) }
             }
             section.panel {
                 div.panel-header {
                     div {
-                        h2 { "Add asset" }
-                        p { "Create a named target with optional tags and a managed credential." }
+                        h2 { (t.assets_filter_heading) }
+                        p { (t.assets_filter_intro) }
+                    }
+                }
+                div.filter-row {
+                    a class=(if selected_tag.is_none() { "button" } else { "ghost-button" }) href="/assets" {
+                        (t.assets_filter_all)
+                    }
+                    @for tag in all_tags {
+                        a class=(if selected_tag == Some(tag.as_str()) { "button" } else { "ghost-button" })
+                          href=(format!("/assets?tag={}", url_query_value(tag))) {
+                            (tag)
+                        }
+                    }
+                }
+            }
+            section.panel {
+                div.panel-header {
+                    div {
+                        h2 { (t.assets_export_heading) }
+                        p { (t.assets_export_intro) }
+                    }
+                }
+                div.button-row {
+                    a.button href="/assets/export?format=csv" { (t.export_csv) }
+                    a.button href="/assets/export?format=json" { (t.export_json) }
+                    a.ghost-button href="/import" { (t.import_open) }
+                }
+            }
+            section.panel {
+                div.panel-header {
+                    div {
+                        h2 { (t.assets_add_heading) }
+                        p { (t.assets_add_intro) }
                     }
                 }
                 form method="post" action="/assets" {
                     (csrf_field(csrf_token))
                     div.grid {
                         label.field {
-                            "Name"
+                            (t.field_name)
                             input name="name" required;
                         }
                         label.field {
-                            "Hostname"
+                            (t.field_hostname)
                             input name="hostname" required;
                         }
                         label.field {
-                            "Port"
+                            (t.field_port)
                             input name="port" type="number" value="22" required;
                         }
                         label.field {
-                            "Tags"
-                            input name="tags" placeholder="prod, web";
+                            (t.field_tags)
+                            input name="tags" placeholder="prod, web" list="asset-tags-list";
                         }
                         label.field {
-                            "Credential"
+                            (t.field_credential)
                             select name="credential_id" {
-                                option value="" { "Proxy only / no managed credential" }
+                                option value="" { (t.proxy_only) }
                                 @for credential in credentials {
                                     option value=(credential.id) { (credential.name) " (" (credential.username) ")" }
                                 }
                             }
                         }
                         label.field.field-wide {
-                            "Description"
+                            (t.field_description)
                             textarea name="description" {}
                         }
                     }
+                    datalist id="asset-tags-list" {
+                        @for tag in all_tags {
+                            option value=(tag) {}
+                        }
+                    }
                     div.button-row {
-                        button type="submit" { "Save asset" }
+                        button type="submit" { (t.save_asset) }
                     }
                 }
             }
             section.panel {
                 div.panel-header {
                     div {
-                        h2 { "Existing assets" }
-                        p { "Review address, routing tags, and whether Hop can use a stored credential for managed connections." }
+                        h2 { (t.assets_existing_heading) }
+                        p { (t.assets_existing_intro) }
                     }
                 }
-                div.table-wrap {
-                    table.data-table {
-                        thead {
-                            tr { th { "Name" } th { "Target" } th { "Tags" } th { "Credential" } th { "Action" } }
-                        }
-                        tbody {
-                            @if items.is_empty() {
-                                tr.empty-row { td colspan="5" { "No assets have been added yet." } }
-                            }
-                            @for asset in items {
+                form method="post" action="/assets/bulk-tags" {
+                    (csrf_field(csrf_token))
+                    div.table-wrap {
+                        table.data-table {
+                            thead {
                                 tr {
-                                    td {
-                                        div.primary-cell {
-                                            (asset.name)
-                                            @if let Some(description) = &asset.description {
-                                                span.subtle { (description) }
+                                    th.checkbox-cell {}
+                                    th { (t.field_name) }
+                                    th { (t.target_column) }
+                                    th { (t.field_tags) }
+                                    th { (t.field_credential) }
+                                    th { (t.field_action) }
+                                }
+                            }
+                            tbody {
+                                @if items.is_empty() {
+                                    tr.empty-row { td colspan="6" { (t.no_assets) } }
+                                }
+                                @for asset in items {
+                                    tr {
+                                        td.checkbox-cell {
+                                            input type="checkbox" name="asset_ids" value=(asset.id);
+                                        }
+                                        td {
+                                            div.primary-cell {
+                                                (asset.name)
+                                                @if let Some(description) = &asset.description {
+                                                    span.subtle { (description) }
+                                                }
                                             }
                                         }
-                                    }
-                                    td.mono { (asset.hostname) ":" (asset.port) }
-                                    td {
-                                        div.tag-list {
-                                            @if asset.tags.is_empty() {
-                                                span.status-pill.neutral { "untagged" }
-                                            }
-                                            @for tag in &asset.tags {
-                                                span.tag { (tag) }
+                                        td.mono { (asset.hostname) ":" (asset.port) }
+                                        td {
+                                            div.tag-list {
+                                                @if asset.tags.is_empty() {
+                                                    span.status-pill.neutral { (t.untagged) }
+                                                }
+                                                @for tag in &asset.tags {
+                                                    a.tag href=(format!("/assets?tag={}", url_query_value(tag))) { (tag) }
+                                                }
                                             }
                                         }
-                                    }
-                                    td {
-                                        @if let Some(credential_id) = &asset.credential_id {
-                                            span.status-pill { (credential_id) }
-                                        } @else {
-                                            span.status-pill.neutral { "proxy only" }
+                                        td {
+                                            @if let Some(credential_id) = &asset.credential_id {
+                                                span.status-pill { (credential_id) }
+                                            } @else {
+                                                span.status-pill.neutral { (t.proxy_only) }
+                                            }
                                         }
-                                    }
-                                    td {
-                                        div.action-row {
-                                            a class="button" href=(format!("/assets/{}/edit", asset.id)) { "Edit" }
-                                            form method="post" action=(format!("/assets/{}/delete", asset.id)) {
-                                                (csrf_field(csrf_token))
-                                                button class="danger" type="submit" { "Delete" }
+                                        td {
+                                            div.action-row {
+                                                a class="button" href=(format!("/assets/{}/edit", asset.id)) { (t.edit) }
+                                                button class="danger" type="submit" formaction=(format!("/assets/{}/delete", asset.id)) { (t.delete) }
                                             }
                                         }
                                     }
                                 }
                             }
                         }
+                    }
+                    div.panel-header style="margin-top:18px;" {
+                        div {
+                            h2 { (t.assets_bulk_heading) }
+                            p { (t.assets_bulk_intro) }
+                        }
+                    }
+                    div.grid {
+                        label.field {
+                            (t.assets_bulk_tags_label)
+                            input name="tags" placeholder="prod, web" list="asset-tags-list";
+                        }
+                    }
+                    div.button-row {
+                        button type="submit" { (t.assets_bulk_apply) }
                     }
                 }
             }
@@ -772,44 +898,52 @@ pub fn assets(items: &[Asset], credentials: &[Credential], csrf_token: &str) -> 
     )
 }
 
-pub fn edit_asset(asset: &Asset, credentials: &[Credential], csrf_token: &str) -> Markup {
+pub fn edit_asset(
+    t: &L10n,
+    asset: &Asset,
+    credentials: &[Credential],
+    csrf_token: &str,
+    all_tags: &[String],
+) -> Markup {
     layout(
-        "Edit Asset",
+        t.edit_asset_title,
+        "assets",
+        t,
         html! {
             div.page-intro {
                 h2 { (asset.name) }
-                p { "Update the target address, tags, description, or managed credential attached to this asset." }
+                p { (t.edit_asset_intro) }
             }
             section.panel {
                 div.panel-header {
                     div {
-                        h2 { "Asset details" }
-                        p { "Changes are used by both managed TUI connections and allowlist matching." }
+                        h2 { (t.asset_details_heading) }
+                        p { (t.asset_details_intro) }
                     }
                 }
                 form method="post" action=(format!("/assets/{}", asset.id)) {
                     (csrf_field(csrf_token))
                     div.grid {
                         label.field {
-                            "Name"
+                            (t.field_name)
                             input name="name" value=(asset.name) required;
                         }
                         label.field {
-                            "Hostname"
+                            (t.field_hostname)
                             input name="hostname" value=(asset.hostname) required;
                         }
                         label.field {
-                            "Port"
+                            (t.field_port)
                             input name="port" type="number" value=(asset.port) required;
                         }
                         label.field {
-                            "Tags"
-                            input name="tags" value=(asset.tags.join(",")) placeholder="prod, web";
+                            (t.field_tags)
+                            input name="tags" value=(asset.tags.join(",")) placeholder="prod, web" list="asset-tags-list";
                         }
                         label.field {
-                            "Credential"
+                            (t.field_credential)
                             select name="credential_id" {
-                                option value="" selected[asset.credential_id.is_none()] { "Proxy only / no managed credential" }
+                                option value="" selected[asset.credential_id.is_none()] { (t.proxy_only) }
                                 @for credential in credentials {
                                     option value=(credential.id) selected[asset.credential_id.as_deref() == Some(credential.id.as_str())] {
                                         (credential.name) " (" (credential.username) ")"
@@ -818,13 +952,18 @@ pub fn edit_asset(asset: &Asset, credentials: &[Credential], csrf_token: &str) -
                             }
                         }
                         label.field.field-wide {
-                            "Description"
+                            (t.field_description)
                             textarea name="description" { (asset.description.as_deref().unwrap_or("")) }
                         }
                     }
+                    datalist id="asset-tags-list" {
+                        @for tag in all_tags {
+                            option value=(tag) {}
+                        }
+                    }
                     div.button-row {
-                        button type="submit" { "Save changes" }
-                        a.ghost-button href="/assets" { "Back to assets" }
+                        button type="submit" { (t.save_changes) }
+                        a.ghost-button href="/assets" { (t.back_to_assets) }
                     }
                 }
             }
@@ -832,34 +971,49 @@ pub fn edit_asset(asset: &Asset, credentials: &[Credential], csrf_token: &str) -
     )
 }
 
-pub fn credentials(items: &[Credential], csrf_token: &str) -> Markup {
+pub fn credentials(t: &L10n, items: &[Credential], csrf_token: &str) -> Markup {
     layout(
-        "Credentials",
+        t.credentials_title,
+        "credentials",
+        t,
         html! {
             div.page-intro {
-                h2 { "Credential custody" }
-                p { "Store target-side SSH material for server-managed connections. Secrets are encrypted before they reach SQLite." }
+                h2 { (t.credentials_heading) }
+                p { (t.credentials_intro) }
             }
             section.panel {
                 div.panel-header {
                     div {
-                        h2 { "Add credential" }
-                        p { "Choose the target username and authentication mode, then provide the matching secret material." }
+                        h2 { (t.credentials_export_heading) }
+                        p { (t.credentials_export_intro) }
+                    }
+                }
+                div.button-row {
+                    a.button href="/credentials/export?format=csv" { (t.export_csv) }
+                    a.button href="/credentials/export?format=json" { (t.export_json) }
+                    a.ghost-button href="/import" { (t.import_open) }
+                }
+            }
+            section.panel {
+                div.panel-header {
+                    div {
+                        h2 { (t.credentials_add_heading) }
+                        p { (t.credentials_add_intro) }
                     }
                 }
                 form method="post" action="/credentials" {
                     (csrf_field(csrf_token))
                     div.grid {
                         label.field {
-                            "Name"
+                            (t.field_name)
                             input name="name" required;
                         }
                         label.field {
-                            "Username"
+                            (t.field_username)
                             input name="username" required;
                         }
                         label.field {
-                            "Auth type"
+                            (t.field_auth_type)
                             select name="auth_type" {
                                 option value="password" { "password" }
                                 option value="key" { "key" }
@@ -867,39 +1021,39 @@ pub fn credentials(items: &[Credential], csrf_token: &str) -> Markup {
                             }
                         }
                         label.field {
-                            "Password"
+                            (t.field_password)
                             input type="password" name="password";
                         }
                         label.field {
-                            "Passphrase"
+                            (t.field_passphrase)
                             input type="password" name="passphrase";
                         }
                         label.field.field-wide {
-                            "Private key"
+                            (t.field_private_key)
                             textarea name="private_key" rows="8" {}
                         }
                     }
                     div.button-row {
-                        button type="submit" { "Save credential" }
+                        button type="submit" { (t.save_credential) }
                     }
-                    p.fine-print { "Secrets are encrypted before storage and are never rendered back after save." }
+                    p.fine-print { (t.secret_storage_note) }
                 }
             }
             section.panel {
                 div.panel-header {
                     div {
-                        h2 { "Existing credentials" }
-                        p { "Audit target users, auth modes, and which encrypted secret fields are present." }
+                        h2 { (t.credentials_existing_heading) }
+                        p { (t.credentials_existing_intro) }
                     }
                 }
                 div.table-wrap {
                     table.data-table {
                         thead {
-                            tr { th { "Name" } th { "Username" } th { "Type" } th { "Secrets" } th { "Action" } }
+                            tr { th { (t.field_name) } th { (t.field_username) } th { (t.field_auth_type) } th { (t.secrets_label) } th { (t.field_action) } }
                         }
                         tbody {
                             @if items.is_empty() {
-                                tr.empty-row { td colspan="5" { "No credentials have been stored yet." } }
+                                tr.empty-row { td colspan="5" { (t.no_credentials) } }
                             }
                             @for credential in items {
                                 tr {
@@ -914,7 +1068,7 @@ pub fn credentials(items: &[Credential], csrf_token: &str) -> Markup {
                                     td {
                                         div.secret-list {
                                             @if credential.password_enc.is_none() && credential.private_key_enc.is_none() && credential.passphrase_enc.is_none() {
-                                                span.status-pill.neutral { "none" }
+                                                span.status-pill.neutral { (t.none) }
                                             }
                                             @if credential.password_enc.is_some() {
                                                 span.tag { "password" }
@@ -929,10 +1083,10 @@ pub fn credentials(items: &[Credential], csrf_token: &str) -> Markup {
                                     }
                                     td {
                                         div.action-row {
-                                            a class="button" href=(format!("/credentials/{}/edit", credential.id)) { "Edit" }
+                                            a class="button" href=(format!("/credentials/{}/edit", credential.id)) { (t.edit) }
                                             form method="post" action=(format!("/credentials/{}/delete", credential.id)) {
                                                 (csrf_field(csrf_token))
-                                                button class="danger" type="submit" { "Delete" }
+                                                button class="danger" type="submit" { (t.delete) }
                                             }
                                         }
                                     }
@@ -946,34 +1100,36 @@ pub fn credentials(items: &[Credential], csrf_token: &str) -> Markup {
     )
 }
 
-pub fn edit_credential(credential: &Credential, csrf_token: &str) -> Markup {
+pub fn edit_credential(t: &L10n, credential: &Credential, csrf_token: &str) -> Markup {
     layout(
-        "Edit Credential",
+        t.edit_credential_title,
+        "credentials",
+        t,
         html! {
             div.page-intro {
                 h2 { (credential.name) }
-                p { "Edit identity metadata or replace encrypted secret fields. Blank secret fields keep their existing values." }
+                p { (t.edit_credential_intro) }
             }
             section.panel {
                 div.panel-header {
                     div {
-                        h2 { "Credential details" }
-                        p { "Existing secrets are not rendered back; enter a replacement only when rotating material." }
+                        h2 { (t.credential_details_heading) }
+                        p { (t.credential_details_intro) }
                     }
                 }
                 form method="post" action=(format!("/credentials/{}", credential.id)) {
                     (csrf_field(csrf_token))
                     div.grid {
                         label.field {
-                            "Name"
+                            (t.field_name)
                             input name="name" value=(credential.name) required;
                         }
                         label.field {
-                            "Username"
+                            (t.field_username)
                             input name="username" value=(credential.username) required;
                         }
                         label.field {
-                            "Auth type"
+                            (t.field_auth_type)
                             select name="auth_type" {
                                 option value="password" selected[credential.auth_type == "password"] { "password" }
                                 option value="key" selected[credential.auth_type == "key"] { "key" }
@@ -981,22 +1137,22 @@ pub fn edit_credential(credential: &Credential, csrf_token: &str) -> Markup {
                             }
                         }
                         label.field {
-                            "Replace password"
+                            (t.replace_password)
                             input type="password" name="password";
                         }
                         label.field {
-                            "Replace passphrase"
+                            (t.replace_passphrase)
                             input type="password" name="passphrase";
                         }
                         label.field.field-wide {
-                            "Replace private key"
+                            (t.replace_private_key)
                             textarea name="private_key" rows="8" {}
                         }
                     }
-                    p.fine-print { "Leave secret fields blank to keep existing encrypted values." }
+                    p.fine-print { (t.secret_keep_note) }
                     div.button-row {
-                        button type="submit" { "Save changes" }
-                        a.ghost-button href="/credentials" { "Back to credentials" }
+                        button type="submit" { (t.save_changes) }
+                        a.ghost-button href="/credentials" { (t.back_to_credentials) }
                     }
                 }
             }
@@ -1004,53 +1160,55 @@ pub fn edit_credential(credential: &Credential, csrf_token: &str) -> Markup {
     )
 }
 
-pub fn keys(items: &[AuthorizedKey], csrf_token: &str) -> Markup {
+pub fn keys(t: &L10n, items: &[AuthorizedKey], csrf_token: &str) -> Markup {
     layout(
-        "Keys",
+        t.keys_title,
+        "keys",
+        t,
         html! {
             div.page-intro {
-                h2 { "SSH entry allowlist" }
-                p { "Only active public keys in this list can authenticate to the Hop SSH service." }
+                h2 { (t.keys_heading) }
+                p { (t.keys_intro) }
             }
             section.panel {
                 div.panel-header {
                     div {
-                        h2 { "Add key" }
-                        p { "Paste an OpenSSH public key and give it a human-readable owner label." }
+                        h2 { (t.keys_add_heading) }
+                        p { (t.keys_add_intro) }
                     }
                 }
                 form method="post" action="/keys" {
                     (csrf_field(csrf_token))
                     div.grid {
                         label.field {
-                            "Name"
+                            (t.field_name)
                             input name="name" required;
                         }
                         label.field.field-wide {
-                            "Public key"
+                            (t.field_public_key)
                             textarea name="public_key" rows="4" required {}
                         }
                     }
                     div.button-row {
-                        button type="submit" { "Save key" }
+                        button type="submit" { (t.save_key) }
                     }
                 }
             }
             section.panel {
                 div.panel-header {
                     div {
-                        h2 { "Existing keys" }
-                        p { "Review fingerprints and quickly suspend access without deleting the record." }
+                        h2 { (t.keys_existing_heading) }
+                        p { (t.keys_existing_intro) }
                     }
                 }
                 div.table-wrap {
                     table.data-table {
                         thead {
-                            tr { th { "Name" } th { "Fingerprint" } th { "Status" } th { "Action" } }
+                            tr { th { (t.field_name) } th { (t.field_fingerprint) } th { (t.field_status) } th { (t.field_action) } }
                         }
                         tbody {
                             @if items.is_empty() {
-                                tr.empty-row { td colspan="4" { "No SSH keys have been authorized yet." } }
+                                tr.empty-row { td colspan="4" { (t.no_keys) } }
                             }
                             @for key in items {
                                 tr {
@@ -1058,30 +1216,30 @@ pub fn keys(items: &[AuthorizedKey], csrf_token: &str) -> Markup {
                                         div.primary-cell {
                                             (key.name)
                                             @if let Some(created_at) = &key.created_at {
-                                                span.subtle { "Added " (created_at) }
+                                                span.subtle { (t.key_added_prefix) " " (created_at) }
                                             }
                                         }
                                     }
                                     td.mono { (key.fingerprint) }
                                     td {
                                         @if key.is_active {
-                                            span.status-pill { "active" }
+                                            span.status-pill { (t.active) }
                                         } @else {
-                                            span.status-pill.neutral { "inactive" }
+                                            span.status-pill.neutral { (t.inactive) }
                                         }
                                     }
                                     td {
                                         div.action-row {
-                                            a class="button" href=(format!("/keys/{}/edit", key.id)) { "Edit" }
+                                            a class="button" href=(format!("/keys/{}/edit", key.id)) { (t.edit) }
                                             @if key.is_active {
                                                 form method="post" action=(format!("/keys/{}/deactivate", key.id)) {
                                                     (csrf_field(csrf_token))
-                                                    button class="danger" type="submit" { "Deactivate" }
+                                                    button class="danger" type="submit" { (t.deactivate) }
                                                 }
                                             } @else {
                                                 form method="post" action=(format!("/keys/{}/activate", key.id)) {
                                                     (csrf_field(csrf_token))
-                                                    button type="submit" { "Activate" }
+                                                    button type="submit" { (t.activate) }
                                                 }
                                             }
                                         }
@@ -1096,78 +1254,82 @@ pub fn keys(items: &[AuthorizedKey], csrf_token: &str) -> Markup {
     )
 }
 
-pub fn edit_key(key: &AuthorizedKey, csrf_token: &str) -> Markup {
+pub fn edit_key(t: &L10n, key: &AuthorizedKey, csrf_token: &str) -> Markup {
     layout(
-        "Edit Key",
+        t.edit_key_title,
+        "keys",
+        t,
         html! {
             div.page-intro {
                 h2 { (key.name) }
-                p { "Update the owner label or replace the public key material associated with this allowlist entry." }
+                p { (t.edit_key_intro) }
             }
             section.panel {
                 div.panel-header {
                     div {
-                        h2 { "Key details" }
-                        p { "Fingerprint changes after replacing the public key are reflected when the record is saved." }
+                        h2 { (t.key_details_heading) }
+                        p { (t.key_details_intro) }
                     }
                 }
                 form method="post" action=(format!("/keys/{}", key.id)) {
                     (csrf_field(csrf_token))
                     div.grid {
                         label.field {
-                            "Name"
+                            (t.field_name)
                             input name="name" value=(key.name) required;
                         }
                         label.field.field-wide {
-                            "Public key"
+                            (t.field_public_key)
                             textarea name="public_key" rows="4" required { (key.public_key) }
                         }
                     }
                     div.button-row {
-                        button type="submit" { "Save changes" }
-                        a.ghost-button href="/keys" { "Back to keys" }
+                        button type="submit" { (t.save_changes) }
+                        a.ghost-button href="/keys" { (t.back_to_keys) }
                     }
                 }
             }
             section.panel {
                 div.panel-header {
                     div {
-                        h2 { "Danger zone" }
-                        p { "Deleting this entry immediately removes the key from the SSH allowlist." }
+                        h2 { (t.danger_zone) }
+                        p { (t.delete_key_intro) }
                     }
                 }
                 form method="post" action=(format!("/keys/{}/delete", key.id)) {
                     (csrf_field(csrf_token))
-                    button class="danger" type="submit" { "Delete key" }
+                    button class="danger" type="submit" { (t.delete_key) }
                 }
             }
         },
     )
 }
 
-pub fn known_hosts(items: &[KnownHost], csrf_token: &str) -> Markup {
+pub fn known_hosts(t: &L10n, items: &[KnownHost], csrf_token: &str) -> Markup {
     layout(
-        "Known Hosts",
+        t.known_hosts_title,
+        "known-hosts",
+        t,
         html! {
             div.page-intro {
-                h2 { "TOFU trust records" }
-                p { "Review target host keys accepted by Trust On First Use. Delete a record when a host has been rebuilt or rotated." }
+                h2 { (t.known_hosts_heading) }
+                p { (t.known_hosts_intro) }
             }
             section.panel {
                 div.panel-header {
                     div {
-                        h2 { "Known hosts" }
-                        p { "Each fingerprint is matched on future managed connections from Hop to the target." }
+                        h2 { (t.known_hosts_panel_heading) }
+                        p { (t.known_hosts_panel_intro) }
                     }
                 }
                 div.table-wrap {
                     table.data-table {
                         thead {
-                            tr { th { "Host" } th { "Key type" } th { "Fingerprint" } th { "First seen" } th { "Action" } }
+                            tr { th { (t.host_column) } th { (t.key_type_column) } th { (t.field_fingerprint) } th { (t.first_seen_column) } th { (t.field_action) } }
                         }
                         tbody {
                             @if items.is_empty() {
-                                tr.empty-row { td colspan="5" { "No target host keys have been trusted yet." } }
+                                tr.empty-row { td colspan="5" { (t.no_known_hosts) } }
                             }
                             @for host in items {
                                 tr {
@@ -1185,7 +1347,7 @@ pub fn known_hosts(items: &[KnownHost], csrf_token: &str) -> Markup {
                                             form method="post" action=(format!("/known-hosts/{}/{}/delete", host.hostname, host.port)) {
                                                 (csrf_field(csrf_token))
                                                 input type="hidden" name="key_type" value=(host.key_type);
-                                                button class="danger" type="submit" { "Delete" }
+                                                button class="danger" type="submit" { (t.delete) }
                                             }
                                         }
                                     }
@@ -1199,29 +1361,31 @@ pub fn known_hosts(items: &[KnownHost], csrf_token: &str) -> Markup {
     )
 }
 
-pub fn sessions(items: &[Session]) -> Markup {
+pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
     layout(
-        "Sessions",
+        t.sessions_title,
+        "sessions",
+        t,
         html! {
             div.page-intro {
-                h2 { "Connection activity" }
-                p { "Inspect recent TUI, managed exec, and ProxyJump events recorded by the SSH service." }
+                h2 { (t.sessions_heading) }
+                p { (t.sessions_intro) }
             }
             section.panel {
                 div.panel-header {
                     div {
-                        h2 { "Recent sessions" }
-                        p { "Status and errors are shown without exposing interactive session contents." }
+                        h2 { (t.sessions_recent_heading) }
+                        p { (t.sessions_recent_intro) }
                     }
                 }
                 div.table-wrap {
                     table.data-table {
                         thead {
-                            tr { th { "Started" } th { "Mode" } th { "Key" } th { "Asset" } th { "Target" } th { "Status" } th { "Error" } }
+                            tr { th { (t.started_column) } th { (t.mode_column) } th { (t.key_column) } th { (t.asset_column) } th { (t.target_column) } th { (t.field_status) } th { (t.error_column) } }
                         }
                         tbody {
                             @if items.is_empty() {
-                                tr.empty-row { td colspan="7" { "No sessions have been recorded yet." } }
+                                tr.empty-row { td colspan="7" { (t.no_sessions) } }
                             }
                             @for session in items {
                                 tr {
@@ -1261,36 +1425,82 @@ pub fn sessions(items: &[Session]) -> Markup {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mutating_forms_include_csrf_token() {
-        let rendered = assets(&[], &[], "csrf-123").into_string();
-
-        assert!(rendered.contains(r#"name="csrf_token""#));
-        assert!(rendered.contains(r#"value="csrf-123""#));
-    }
-
-    #[test]
-    fn layout_renders_admin_shell_and_active_navigation() {
-        let rendered = layout("Assets", html! { p { "content" } }).into_string();
-
-        assert!(rendered.contains(r#"class="admin-shell""#));
-        assert!(rendered.contains(r#"aria-current="page""#));
-        assert!(rendered.contains(r#"href="/assets""#));
-    }
-
-    #[test]
-    fn overview_renders_metric_tiles_with_labels() {
-        let rendered = overview(2, 3, 4, 5).into_string();
-
-        assert!(rendered.contains(r#"class="metric-grid""#));
-        assert!(rendered.contains(r#"class="metric-value""#));
-        assert!(rendered.contains("Managed assets"));
-        assert!(rendered.contains("Recent sessions"));
-    }
+pub fn import_export(t: &L10n, csrf_token: &str, summary: Option<&ImportSummary>) -> Markup {
+    layout(
+        t.import_title,
+        "import",
+        t,
+        html! {
+            div.page-intro {
+                h2 { (t.import_heading) }
+                p { (t.import_intro) }
+            }
+            section.panel {
+                div.panel-header {
+                    div {
+                        h2 { (t.import_form_heading) }
+                        p { (t.import_form_intro) }
+                    }
+                }
+                form method="post" action="/import" enctype="multipart/form-data" {
+                    (csrf_field(csrf_token))
+                    div.grid {
+                        label.field {
+                            (t.import_kind)
+                            select name="kind" {
+                                option value="assets" { (t.kind_assets) }
+                                option value="credentials" { (t.kind_credentials) }
+                            }
+                        }
+                        label.field {
+                            (t.import_format)
+                            select name="format" {
+                                option value="csv" { "CSV" }
+                                option value="json" { "JSON" }
+                            }
+                        }
+                        label.field {
+                            (t.import_conflict)
+                            select name="on_conflict" {
+                                option value="skip" { (t.conflict_skip) }
+                                option value="overwrite" { (t.conflict_overwrite) }
+                                option value="error" { (t.conflict_error) }
+                            }
+                        }
+                        label.field.field-wide {
+                            (t.import_file)
+                            input type="file" name="file" required;
+                        }
+                    }
+                    div.button-row {
+                        button type="submit" { (t.import_submit) }
+                    }
+                }
+            }
+            @if let Some(summary) = summary {
+                section.panel {
+                    div.panel-header {
+                        div {
+                            h2 { (t.import_summary) }
+                        }
+                    }
+                    div.import-summary {
+                        p { (t.imported) ": " (summary.imported) }
+                        p { (t.skipped) ": " (summary.skipped) }
+                        p { (t.overwritten) ": " (summary.overwritten) }
+                        @if !summary.errors.is_empty() {
+                            p { (t.errors) ":" }
+                            ul {
+                                @for error in &summary.errors {
+                                    li { (error) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    )
 }
 
 fn nav_link(href: &str, label: &str, active: bool) -> Markup {
@@ -1308,5 +1518,96 @@ fn nav_link(href: &str, label: &str, active: bool) -> Markup {
 fn csrf_field(csrf_token: &str) -> Markup {
     html! {
         input type="hidden" name="csrf_token" value=(csrf_token);
+    }
+}
+
+fn language_switch_href(locale: Locale, active: &str) -> String {
+    format!(
+        "/set-language?lang={}&redirect={}",
+        locale.cookie_value(),
+        url_query_value(active_path(active))
+    )
+}
+
+fn active_path(active: &str) -> &'static str {
+    match active {
+        "overview" => "/",
+        "assets" => "/assets",
+        "credentials" => "/credentials",
+        "keys" => "/keys",
+        "known-hosts" => "/known-hosts",
+        "sessions" => "/sessions",
+        "import" => "/import",
+        "login" => "/login",
+        _ => "/",
+    }
+}
+
+fn url_query_value(value: &str) -> String {
+    let mut output = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                output.push(byte as char);
+            }
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(&mut output, "%{byte:02X}");
+            }
+        }
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::i18n::EN;
+    use super::*;
+
+    #[test]
+    fn mutating_forms_include_csrf_token() {
+        let rendered = assets(&EN, &[], &[], "csrf-123", None, &[]).into_string();
+
+        assert!(rendered.contains(r#"name="csrf_token""#));
+        assert!(rendered.contains(r#"value="csrf-123""#));
+    }
+
+    #[test]
+    fn layout_renders_admin_shell_and_active_navigation() {
+        let rendered =
+            layout(EN.assets_title, "assets", &EN, html! { p { "content" } }).into_string();
+
+        assert!(rendered.contains(r#"class="admin-shell""#));
+        assert!(rendered.contains(r#"aria-current="page""#));
+        assert!(rendered.contains(r#"href="/assets""#));
+        assert!(rendered.contains("/set-language?lang=zh"));
+    }
+
+    #[test]
+    fn overview_renders_metric_tiles_with_labels() {
+        let rendered = overview(&EN, 2, 3, 4, 5).into_string();
+
+        assert!(rendered.contains(r#"class="metric-grid""#));
+        assert!(rendered.contains(r#"class="metric-value""#));
+        assert!(rendered.contains("Managed assets"));
+        assert!(rendered.contains("Recent sessions"));
+    }
+
+    #[test]
+    fn assets_page_renders_tag_filters_and_bulk_editor() {
+        let tags = vec!["prod".to_string(), "web".to_string()];
+        let rendered = assets(&EN, &[], &[], "csrf-123", Some("prod"), &tags).into_string();
+
+        assert!(rendered.contains(r#"href="/assets?tag=prod""#));
+        assert!(rendered.contains(r#"action="/assets/bulk-tags""#));
+        assert!(rendered.contains(r#"list="asset-tags-list""#));
+    }
+
+    #[test]
+    fn import_page_uses_multipart_upload_form() {
+        let rendered = import_export(&EN, "csrf-123", None).into_string();
+
+        assert!(rendered.contains(r#"enctype="multipart/form-data""#));
+        assert!(rendered.contains(r#"type="file""#));
     }
 }

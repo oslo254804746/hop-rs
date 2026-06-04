@@ -1,6 +1,6 @@
 use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use hop_core::{Asset, HopConfig, HopDb, MasterKey, NewSession};
 use russh::{
     keys::{ssh_key::HashAlg, PublicKey},
@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 use crate::tui::{TuiAction, TuiResources};
 
 use super::{
-    bridge::{self, BridgeControl, ManagedBridgeOptions, SharedChannels},
+    bridge::{self, BridgeControl, ManagedBridgeOptions, ManagedSessionMode, SharedChannels},
     host_key, proxy,
     routes::{parse_exec_command, ExecCommand},
 };
@@ -118,6 +118,7 @@ impl server::Server for HopSshServer {
             config: self.config.clone(),
             master_key: self.master_key.clone(),
             auth: None,
+            direct_asset: None,
             client_ip: peer_addr.map(|addr| addr.to_string()),
             channels: Arc::new(Mutex::new(HashMap::new())),
             ptys: HashMap::new(),
@@ -138,6 +139,7 @@ pub struct HopSshHandler {
     config: HopConfig,
     master_key: Arc<MasterKey>,
     auth: Option<AuthInfo>,
+    direct_asset: Option<Asset>,
     client_ip: Option<String>,
     channels: SharedChannels,
     ptys: HashMap<ChannelId, PtySize>,
@@ -157,12 +159,33 @@ impl HopSshHandler {
         start_tui_session(&self.db, &auth, self.client_ip.clone()).await
     }
 
+    async fn resolve_direct_asset_for_key(
+        &self,
+        user: &str,
+        key_name: &str,
+    ) -> Result<Option<Asset>> {
+        let Some(request) = parse_direct_username(user)? else {
+            return Ok(None);
+        };
+        if request.key_owner != key_name {
+            bail!("direct login key owner does not match authorized key name");
+        }
+        let asset = find_direct_asset(&self.db, &request.target)
+            .await?
+            .with_context(|| format!("direct target not found: {}", request.target))?;
+        if asset.credential_id.is_none() {
+            bail!("direct target has no managed credential");
+        }
+        Ok(Some(asset))
+    }
+
     async fn start_managed(
         &mut self,
         channel_id: ChannelId,
         handle: russh::server::Handle,
         asset: Asset,
         tui: Option<TuiResources>,
+        mode: ManagedSessionMode,
     ) -> Result<()> {
         let auth = self.auth_info().context("missing authenticated key")?;
         let options = ManagedBridgeOptions {
@@ -174,6 +197,7 @@ impl HopSshHandler {
             channel_id,
             handle,
             pty: self.pty_size(channel_id),
+            session_mode: mode,
             return_to_tui: tui.map(|tui| (self.channels.clone(), tui)),
             connect_timeout: self.config.connect_timeout(),
         };
@@ -205,6 +229,41 @@ pub(crate) async fn start_tui_session(
     Ok(ActiveTuiSession::new(session.id))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectLoginRequest {
+    key_owner: String,
+    target: String,
+}
+
+fn parse_direct_username(user: &str) -> Result<Option<DirectLoginRequest>> {
+    let Some((key_owner, target)) = user.rsplit_once('@') else {
+        return Ok(None);
+    };
+    let key_owner = key_owner.trim();
+    let target = target.trim();
+    if key_owner.is_empty() || target.is_empty() {
+        bail!("direct username requires <key_owner>@<asset>");
+    }
+    if key_owner.contains(char::is_whitespace) || target.contains(char::is_whitespace) {
+        bail!("direct username cannot contain whitespace");
+    }
+    Ok(Some(DirectLoginRequest {
+        key_owner: key_owner.to_string(),
+        target: target.to_string(),
+    }))
+}
+
+async fn find_direct_asset(db: &HopDb, target: &str) -> Result<Option<Asset>> {
+    if let Some(asset) = db.get_asset_by_name(target).await? {
+        return Ok(Some(asset));
+    }
+    Ok(db
+        .list_assets()
+        .await?
+        .into_iter()
+        .find(|asset| asset.hostname == target))
+}
+
 impl server::Handler for HopSshHandler {
     type Error = anyhow::Error;
 
@@ -214,25 +273,30 @@ impl server::Handler for HopSshHandler {
 
     async fn auth_publickey_offered(
         &mut self,
-        _user: &str,
+        user: &str,
         public_key: &PublicKey,
     ) -> Result<server::Auth, Self::Error> {
         let fingerprint = key_fingerprint(public_key);
-        if self
+        let Some(key) = self
             .db
             .get_active_authorized_key_by_fingerprint(&fingerprint)
             .await?
-            .is_some()
+        else {
+            return Ok(server::Auth::reject());
+        };
+        if self
+            .resolve_direct_asset_for_key(user, &key.name)
+            .await
+            .is_err()
         {
-            Ok(server::Auth::Accept)
-        } else {
-            Ok(server::Auth::reject())
+            return Ok(server::Auth::reject());
         }
+        Ok(server::Auth::Accept)
     }
 
     async fn auth_publickey(
         &mut self,
-        _user: &str,
+        user: &str,
         public_key: &PublicKey,
     ) -> Result<server::Auth, Self::Error> {
         let fingerprint = key_fingerprint(public_key);
@@ -242,10 +306,18 @@ impl server::Handler for HopSshHandler {
             .await?
         {
             Some(key) => {
+                let direct_asset = match self.resolve_direct_asset_for_key(user, &key.name).await {
+                    Ok(asset) => asset,
+                    Err(err) => {
+                        warn!(?err, user, "rejected direct login request");
+                        return Ok(server::Auth::reject());
+                    }
+                };
                 self.auth = Some(AuthInfo {
                     fingerprint,
                     name: key.name,
                 });
+                self.direct_asset = direct_asset;
                 Ok(server::Auth::Accept)
             }
             None => Ok(server::Auth::reject()),
@@ -345,6 +417,17 @@ impl server::Handler for HopSshHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
+        if let Some(asset) = self.direct_asset.clone() {
+            self.start_managed(
+                channel,
+                session.handle(),
+                asset,
+                None,
+                ManagedSessionMode::Direct,
+            )
+            .await?;
+            return Ok(());
+        }
         let assets = self.db.list_assets().await?;
         let size = self.pty_size(channel);
         let mut tui = TuiResources::new(size.width, size.height, assets)?;
@@ -414,8 +497,14 @@ impl server::Handler for HopSshHandler {
                     session.close(channel)?;
                     return Ok(());
                 }
-                self.start_managed(channel, session.handle(), asset, None)
-                    .await?;
+                self.start_managed(
+                    channel,
+                    session.handle(),
+                    asset,
+                    None,
+                    ManagedSessionMode::Exec,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -483,8 +572,14 @@ impl server::Handler for HopSshHandler {
             session.close(channel)?;
         }
         if let Some((asset, tui)) = connect {
-            self.start_managed(channel, session.handle(), asset, Some(tui))
-                .await?;
+            self.start_managed(
+                channel,
+                session.handle(),
+                asset,
+                Some(tui),
+                ManagedSessionMode::Tui,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -668,5 +763,15 @@ mod tests {
         let error = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
 
         assert!(is_client_disconnect(&error));
+    }
+
+    #[test]
+    fn direct_username_parses_owner_and_target_from_last_separator() {
+        let request = parse_direct_username("alice@web-prod-01").unwrap().unwrap();
+
+        assert_eq!(request.key_owner, "alice");
+        assert_eq!(request.target, "web-prod-01");
+        assert!(parse_direct_username("alice").unwrap().is_none());
+        assert!(parse_direct_username("alice@").is_err());
     }
 }

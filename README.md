@@ -112,6 +112,26 @@ hop --host hop-host --port 2222 ssh-config
 
 `hop connect <asset>` 和 TUI 中按 Enter 连接资产属于服务器托管连接：Hop 会解密资产凭证，并从服务器侧发起到目标主机的 SSH 连接。
 
+直连模式也属于服务器托管连接，适合跳过 TUI 直接进入某个资产：
+
+```bash
+ssh -p 2222 <key_owner>@<asset_name>@hop-host
+ssh -p 2222 <key_owner>@<asset_hostname>@hop-host
+```
+
+其中 `<key_owner>` 必须等于 Hop 入口授权密钥的名称，`<asset_name>` 或 `<asset_hostname>` 必须命中资产表，且该资产需要绑定托管凭据。直连会在会话审计中记录为 `mode=direct`。
+
+OpenSSH config 示例：
+
+```sshconfig
+Host hop-web-prod
+  HostName hop-host
+  Port 2222
+  User alice@web-prod-01
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+```
+
 `ssh -J hop:2222 target` 和 `ProxyCommand -W` 属于纯 TCP 转发：Hop 只检查目标是否命中资产 allowlist，不会使用托管凭证。用户本地 SSH 客户端必须能自行完成目标主机认证。
 
 ProxyJump allowlist 支持：

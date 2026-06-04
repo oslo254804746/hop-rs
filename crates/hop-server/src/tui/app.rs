@@ -141,6 +141,12 @@ pub struct TuiApp {
     pub searching: bool,
 }
 
+#[derive(Clone, Debug)]
+pub enum AssetListItem {
+    Group(String),
+    Asset(Asset),
+}
+
 #[derive(Clone)]
 struct FilteredAssetCache {
     query: String,
@@ -179,6 +185,19 @@ impl TuiApp {
         if self.query.trim().is_empty() {
             return self.assets.clone();
         }
+        if let Some(tag) = tag_query(&self.query) {
+            return self
+                .assets
+                .iter()
+                .filter(|asset| {
+                    asset
+                        .tags
+                        .iter()
+                        .any(|asset_tag| asset_tag.eq_ignore_ascii_case(tag))
+                })
+                .cloned()
+                .collect();
+        }
         let names: Vec<String> = self.assets.iter().map(|asset| asset.name.clone()).collect();
         let mut matcher = Matcher::new(Config::DEFAULT);
         let pattern = Pattern::new(
@@ -194,8 +213,32 @@ impl TuiApp {
             .collect()
     }
 
+    fn ordered_filtered_assets(&self) -> Vec<Asset> {
+        let mut assets = self.filtered_assets();
+        assets.sort_by(|left, right| {
+            asset_group_label(left)
+                .cmp(&asset_group_label(right))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        assets
+    }
+
+    pub fn grouped_items(&self) -> Vec<AssetListItem> {
+        let mut items = Vec::new();
+        let mut current_group = String::new();
+        for asset in self.ordered_filtered_assets() {
+            let group = asset_group_label(&asset);
+            if group != current_group {
+                current_group = group.clone();
+                items.push(AssetListItem::Group(group));
+            }
+            items.push(AssetListItem::Asset(asset));
+        }
+        items
+    }
+
     pub fn selected_asset(&self) -> Option<Asset> {
-        let items = self.filtered_assets();
+        let items = self.ordered_filtered_assets();
         items
             .get(self.selected.min(items.len().saturating_sub(1)))
             .cloned()
@@ -245,18 +288,39 @@ impl TuiApp {
     }
 }
 
+fn tag_query(query: &str) -> Option<&str> {
+    let query = query.trim();
+    let (prefix, value) = query.split_once(':')?;
+    prefix
+        .eq_ignore_ascii_case("tag")
+        .then(|| value.trim())
+        .filter(|value| !value.is_empty())
+}
+
+fn asset_group_label(asset: &Asset) -> String {
+    asset
+        .tags
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "untagged".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn asset(name: &str) -> Asset {
+        tagged_asset(name, &[])
+    }
+
+    fn tagged_asset(name: &str, tags: &[&str]) -> Asset {
         Asset {
             id: name.to_string(),
             name: name.to_string(),
             hostname: "127.0.0.1".to_string(),
             port: 22,
             description: None,
-            tags: vec![],
+            tags: tags.iter().map(|tag| tag.to_string()).collect(),
             credential_id: None,
             created_at: None,
             updated_at: None,
@@ -265,9 +329,7 @@ mod tests {
 
     fn test_tui() -> TuiResources {
         let handle = TerminalHandle::new_for_test();
-        let tui =
-            TuiResources::from_terminal_handle(handle, 80, 24, vec![asset("web-prod-01")]).unwrap();
-        tui
+        TuiResources::from_terminal_handle(handle, 80, 24, vec![asset("web-prod-01")]).unwrap()
     }
 
     #[test]
@@ -333,6 +395,46 @@ mod tests {
         assert_eq!(app.filtered_assets().len(), 2);
         app.query = "db".to_string();
         assert_eq!(app.filtered_assets()[0].name, "db-prod-01");
+    }
+
+    #[test]
+    fn tag_query_filters_assets_by_tag() {
+        let mut app = TuiApp::new(vec![
+            tagged_asset("web-prod-01", &["prod", "web"]),
+            tagged_asset("db-dev-01", &["dev", "db"]),
+        ]);
+
+        app.query = "tag:prod".to_string();
+
+        assert_eq!(app.filtered_assets().len(), 1);
+        assert_eq!(app.filtered_assets()[0].name, "web-prod-01");
+    }
+
+    #[test]
+    fn grouped_items_include_tag_headers() {
+        let app = TuiApp::new(vec![
+            tagged_asset("web-prod-01", &["prod", "web"]),
+            tagged_asset("db-dev-01", &["dev", "db"]),
+        ]);
+
+        let groups = app.grouped_items();
+
+        assert!(groups
+            .iter()
+            .any(|item| matches!(item, AssetListItem::Group(label) if label == "dev")));
+        assert!(groups
+            .iter()
+            .any(|item| matches!(item, AssetListItem::Group(label) if label == "prod")));
+    }
+
+    #[test]
+    fn selected_asset_follows_grouped_display_order() {
+        let app = TuiApp::new(vec![
+            tagged_asset("z-last", &["prod"]),
+            tagged_asset("a-first", &["dev"]),
+        ]);
+
+        assert_eq!(app.selected_asset().unwrap().name, "a-first");
     }
 
     #[test]
