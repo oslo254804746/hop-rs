@@ -6,7 +6,16 @@ use nucleo_matcher::{
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
     Config, Matcher,
 };
-use ratatui::{layout::Rect, TerminalOptions, Viewport};
+use ratatui::{
+    crossterm::{
+        cursor::{Hide, MoveTo, Show},
+        execute,
+        style::ResetColor,
+        terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    },
+    layout::Rect,
+    TerminalOptions, Viewport,
+};
 use russh::{server::Handle, ChannelId};
 
 use super::{
@@ -35,8 +44,21 @@ impl TuiResources {
         height: u16,
         assets: Vec<Asset>,
     ) -> Result<Self> {
-        let backend =
-            ratatui::backend::CrosstermBackend::new(TerminalHandle::start(handle, channel_id));
+        Self::from_terminal_handle(
+            TerminalHandle::start(handle, channel_id),
+            width,
+            height,
+            assets,
+        )
+    }
+
+    fn from_terminal_handle(
+        handle: TerminalHandle,
+        width: u16,
+        height: u16,
+        assets: Vec<Asset>,
+    ) -> Result<Self> {
+        let backend = ratatui::backend::CrosstermBackend::new(handle);
         let terminal = ratatui::Terminal::with_options(
             backend,
             TerminalOptions {
@@ -53,6 +75,33 @@ impl TuiResources {
             app: TuiApp::new(assets),
             input: InputAdapter::default(),
         })
+    }
+
+    pub fn enter_screen(&mut self) -> Result<()> {
+        execute!(
+            self.terminal.backend_mut(),
+            EnterAlternateScreen,
+            Hide,
+            ResetColor,
+            Clear(ClearType::All),
+            MoveTo(0, 0)
+        )?;
+        self.terminal.clear()?;
+        self.render()
+    }
+
+    pub fn leave_screen(&mut self) -> Result<()> {
+        execute!(
+            self.terminal.backend_mut(),
+            ResetColor,
+            Show,
+            LeaveAlternateScreen
+        )?;
+        Ok(())
+    }
+
+    pub fn resume_after_target(&mut self) -> Result<()> {
+        self.enter_screen()
     }
 
     pub fn resize(&mut self, width: u16, height: u16) -> Result<()> {
@@ -199,6 +248,7 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::mpsc::{self, unbounded_channel};
 
     fn asset(name: &str) -> Asset {
         Asset {
@@ -212,6 +262,69 @@ mod tests {
             created_at: None,
             updated_at: None,
         }
+    }
+
+    fn test_tui() -> (TuiResources, mpsc::UnboundedReceiver<Vec<u8>>) {
+        let (tx, rx) = unbounded_channel();
+        let handle = TerminalHandle::new_for_test(tx);
+        let tui =
+            TuiResources::from_terminal_handle(handle, 80, 24, vec![asset("web-prod-01")]).unwrap();
+        (tui, rx)
+    }
+
+    fn drain(rx: &mut mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<u8> {
+        let mut output = Vec::new();
+        while let Ok(mut data) = rx.try_recv() {
+            output.append(&mut data);
+        }
+        output
+    }
+
+    #[test]
+    fn enter_screen_switches_to_clean_alternate_screen() {
+        let (mut tui, mut rx) = test_tui();
+
+        tui.enter_screen().unwrap();
+
+        let output = drain(&mut rx);
+        assert!(output
+            .windows(b"\x1b[?1049h".len())
+            .any(|w| w == b"\x1b[?1049h"));
+        assert!(output.windows(b"\x1b[2J".len()).any(|w| w == b"\x1b[2J"));
+        assert!(String::from_utf8_lossy(&output).contains("web-prod-01"));
+    }
+
+    #[test]
+    fn leave_screen_restores_main_screen_for_target_session() {
+        let (mut tui, mut rx) = test_tui();
+        tui.enter_screen().unwrap();
+        drain(&mut rx);
+
+        tui.leave_screen().unwrap();
+
+        let output = drain(&mut rx);
+        assert!(output
+            .windows(b"\x1b[?25h".len())
+            .any(|w| w == b"\x1b[?25h"));
+        assert!(output
+            .windows(b"\x1b[?1049l".len())
+            .any(|w| w == b"\x1b[?1049l"));
+    }
+
+    #[test]
+    fn resume_after_target_forces_full_redraw() {
+        let (mut tui, mut rx) = test_tui();
+        tui.enter_screen().unwrap();
+        drain(&mut rx);
+
+        tui.resume_after_target().unwrap();
+
+        let output = drain(&mut rx);
+        assert!(output
+            .windows(b"\x1b[?1049h".len())
+            .any(|w| w == b"\x1b[?1049h"));
+        assert!(output.windows(b"\x1b[2J".len()).any(|w| w == b"\x1b[2J"));
+        assert!(String::from_utf8_lossy(&output).contains("web-prod-01"));
     }
 
     #[test]

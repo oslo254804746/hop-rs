@@ -24,6 +24,14 @@ impl TerminalHandle {
             sink: Vec::new(),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(sender: UnboundedSender<Vec<u8>>) -> Self {
+        Self {
+            sender,
+            sink: Vec::new(),
+        }
+    }
 }
 
 impl Write for TerminalHandle {

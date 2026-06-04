@@ -349,7 +349,7 @@ impl server::Handler for HopSshHandler {
         let size = self.pty_size(channel);
         let mut tui =
             TuiResources::new(session.handle(), channel, size.width, size.height, assets)?;
-        tui.render()?;
+        tui.enter_screen()?;
         let audit = self.start_tui_session().await?;
         self.channels.lock().await.insert(
             channel,
@@ -448,7 +448,8 @@ impl server::Handler for HopSshHandler {
             match action {
                 Some(TuiAction::None) | None => {}
                 Some(TuiAction::Quit) => {
-                    if let Some(ChannelState::Tui { audit, .. }) = channels.remove(&channel) {
+                    if let Some(ChannelState::Tui { mut tui, audit }) = channels.remove(&channel) {
+                        tui.leave_screen()?;
                         finish_tui = Some((audit, "ok", None));
                     }
                     close = true;
@@ -460,8 +461,10 @@ impl server::Handler for HopSshHandler {
                             b"\r\nAsset has no managed credential; use ProxyJump instead.\r\n"
                                 .to_vec(),
                         );
-                    } else if let Some(ChannelState::Tui { tui, audit }) = channels.remove(&channel)
+                    } else if let Some(ChannelState::Tui { mut tui, audit }) =
+                        channels.remove(&channel)
                     {
+                        tui.leave_screen()?;
                         finish_tui = Some((audit, "connected", None));
                         connect = Some((asset, *tui));
                     }
@@ -495,7 +498,8 @@ impl server::Handler for HopSshHandler {
                     let _ = control.input.send(Vec::new());
                 }
                 Some(ChannelState::Tui { .. }) => {
-                    if let Some(ChannelState::Tui { audit, .. }) = channels.remove(&channel) {
+                    if let Some(ChannelState::Tui { mut tui, audit }) = channels.remove(&channel) {
+                        let _ = tui.leave_screen();
                         finish_tui = Some(audit);
                     }
                 }
@@ -514,7 +518,8 @@ impl server::Handler for HopSshHandler {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         let state = self.channels.lock().await.remove(&channel);
-        if let Some(ChannelState::Tui { audit, .. }) = state {
+        if let Some(ChannelState::Tui { mut tui, audit }) = state {
+            let _ = tui.leave_screen();
             let _ = audit.finish(&self.db, "ok", None).await;
         }
         Ok(())

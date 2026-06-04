@@ -162,14 +162,27 @@ async fn run_managed_bridge(
         if should_return {
             match start_tui_session(&options.db, &options.auth, options.client_ip.clone()).await {
                 Ok(audit) => {
-                    let _ = tui.render();
-                    channels.lock().await.insert(
-                        options.channel_id,
-                        ChannelState::Tui {
-                            tui: Box::new(tui),
-                            audit,
-                        },
-                    );
+                    if let Err(err) = tui.resume_after_target() {
+                        let error = err.to_string();
+                        let _ = audit.finish(&options.db, "failed", Some(&error)).await;
+                        let _ = options
+                            .handle
+                            .data(
+                                options.channel_id,
+                                format!("\r\nFailed to reopen Hop TUI: {error}\r\n").into_bytes(),
+                            )
+                            .await;
+                        let _ = options.handle.eof(options.channel_id).await;
+                        let _ = options.handle.close(options.channel_id).await;
+                    } else {
+                        channels.lock().await.insert(
+                            options.channel_id,
+                            ChannelState::Tui {
+                                tui: Box::new(tui),
+                                audit,
+                            },
+                        );
+                    }
                 }
                 Err(err) => {
                     let _ = options
