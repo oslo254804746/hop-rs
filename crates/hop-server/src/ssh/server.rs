@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use hop_core::{Asset, HopConfig, HopDb, MasterKey, NewSession};
@@ -125,7 +125,11 @@ impl server::Server for HopSshServer {
     }
 
     fn handle_session_error(&mut self, error: <Self::Handler as server::Handler>::Error) {
-        error!(?error, "ssh session error");
+        if is_client_disconnect(&error) {
+            warn!(?error, "ssh client disconnected");
+        } else {
+            error!(?error, "ssh session error");
+        }
     }
 }
 
@@ -205,7 +209,7 @@ impl server::Handler for HopSshHandler {
     type Error = anyhow::Error;
 
     async fn authentication_banner(&mut self) -> Result<Option<String>, Self::Error> {
-        Ok(Some(self.config.ssh.banner.clone()))
+        Ok(authentication_banner(&self.config))
     }
 
     async fn auth_publickey_offered(
@@ -549,6 +553,32 @@ fn key_fingerprint(key: &PublicKey) -> String {
     format!("{}", key.fingerprint(HashAlg::Sha256))
 }
 
+fn authentication_banner(config: &HopConfig) -> Option<String> {
+    let banner = &config.ssh.banner;
+    if banner.is_empty() {
+        return None;
+    }
+    if banner.ends_with('\n') {
+        Some(banner.clone())
+    } else {
+        Some(format!("{banner}\r\n"))
+    }
+}
+
+fn is_client_disconnect(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<io::Error>()
+        .map(|err| {
+            matches!(
+                err.kind(),
+                io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::UnexpectedEof
+            ) || matches!(err.raw_os_error(), Some(10054) | Some(104))
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use hop_core::NewSession;
@@ -591,5 +621,31 @@ mod tests {
 
         config.ssh.keepalive_interval = 0;
         assert_eq!(ssh_keepalive_interval(&config), None);
+    }
+
+    #[test]
+    fn authentication_banner_adds_newline_for_openssh_prompts() {
+        let mut config = HopConfig::default();
+        config.ssh.banner = "Welcome to Hop".to_string();
+
+        assert_eq!(
+            authentication_banner(&config).as_deref(),
+            Some("Welcome to Hop\r\n")
+        );
+    }
+
+    #[test]
+    fn empty_authentication_banner_is_disabled() {
+        let mut config = HopConfig::default();
+        config.ssh.banner = String::new();
+
+        assert!(authentication_banner(&config).is_none());
+    }
+
+    #[test]
+    fn connection_reset_is_treated_as_client_disconnect() {
+        let error = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+
+        assert!(is_client_disconnect(&error));
     }
 }

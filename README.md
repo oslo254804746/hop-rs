@@ -1,71 +1,83 @@
 # Hop
 
-Hop is a lightweight SSH jump server MVP.
+Hop 是一个轻量级 SSH 跳板机 MVP。它把 SSH 公钥白名单、TUI 资产选择、服务器托管凭证连接目标主机，以及受资产 allowlist 限制的 ProxyJump/ProxyCommand 放在一个 Rust 服务里。
 
-MVP scope:
+当前目标是保持部署简单：单服务、SQLite only、默认只暴露 SSH 服务端口，管理端口只绑定本机 loopback。
 
-- SSH public-key whitelist for entering Hop.
-- SSH-over-TUI asset picker with server-managed target credentials.
-- `ProxyJump` / `ProxyCommand` as pure TCP forwarding with an assets allowlist.
-- SQLite only, six tables, encrypted stored credentials.
-- Local `hop` CLI that shells out to OpenSSH and uses SSH exec, never Admin API.
+## 能力边界
 
-Post-MVP items are intentionally not included: TUI file browser, ZMODEM, fine-grained asset grants, TOTP, approval flow, session recording, and SPA frontend.
+已纳入 MVP：
 
-## Build
+- SSH 公钥白名单进入 Hop。
+- SSH-over-TUI 资产搜索与连接。
+- 服务器托管目标凭证，用于 TUI 或 `hop connect <asset>`。
+- ProxyJump/ProxyCommand 纯 TCP 转发，并且只允许命中资产表的目标。
+- SQLite 存储，凭证加密保存。
+- 本机 `hop-server` 管理 CLI 与开发者侧 `hop` SSH wrapper。
+
+暂不纳入 MVP：TUI 文件浏览器、ZMODEM、细粒度资产授权、TOTP、审批流、会话录像和 SPA 前端。
+
+## 快速验证
+
+开发环境先跑：
 
 ```bash
-cargo build --release --workspace
+cargo test --workspace
+cargo build --workspace
 ```
 
-For Linux releases:
+Linux 发布构建：
 
 ```bash
-rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
-cargo build --release --bin hop-server --target x86_64-unknown-linux-gnu
-cargo build --release --bin hop-server --target aarch64-unknown-linux-gnu
+cargo build --release --bin hop-server --bin hop
 ```
 
-## First Run
+部署说明见 [docs/deployment.md](docs/deployment.md)，包含二进制直部署、systemd、Docker 部署、升级、备份和排障。
+
+## 首次运行
 
 ```bash
 cp config.example.toml config.toml
 hop-server serve --config config.toml
 ```
 
-On first run, Hop creates:
+首次启动时，Hop 会自动创建：
 
-- SQLite database at `database.path`.
-- Host key at `ssh.host_key_file`.
-- Credential master secret at `security.secret_key_file`.
-- Random admin password, printed once to the terminal.
+- SQLite 数据库：`database.path`
+- Hop SSH host key：`ssh.host_key_file`
+- 凭证加密主密钥：`security.secret_key_file`
+- 初始管理员密码：只打印一次到终端或日志
 
-Admin Web binds to `127.0.0.1:8080` by default. For remote administration:
+默认端口：
+
+- SSH 服务：`0.0.0.0:2222`
+- Admin Web：`127.0.0.1:8080`
+
+Admin Web 在 MVP 中强制绑定 loopback。远程访问时，请通过宿主机系统 SSH 或管理网络建立隧道，不要把 Admin Web 直接暴露到公网。
+
+## 本机管理 CLI
+
+在 Admin Web 完整录入数据前，可以直接在服务器上使用 `hop-server` 管理数据：
+
+先分清两类认证数据：
+
+- `key add` 添加的是“谁可以登录 Hop 的 2222 端口”。Hop 入口只接受 SSH 公钥白名单认证，不使用密码登录。
+- `credential add` 添加的是“Hop 服务器连接目标资产时用什么用户名/密码或私钥”。它只在 TUI 选择资产或 `hop connect <asset>` 之后使用，不是 Hop 入口登录密码。
 
 ```bash
-ssh -L 8080:127.0.0.1:8080 hop-host -p 2222
-```
+hop-server --config config.toml reset-admin
 
-Then open `http://127.0.0.1:8080`.
-
-## Local Management CLI
-
-Before Admin Web is populated, seed data locally on the server:
-
-```bash
-hop-server reset-admin --config config.toml
-
-hop-server key add --config config.toml \
+hop-server --config config.toml key add \
   --name "alice laptop" \
   --public-key-file ~/.ssh/id_ed25519.pub
 
-printf '%s' 'secret' | hop-server credential add --config config.toml \
+printf '%s' 'secret' | hop-server --config config.toml credential add \
   --name deploy-password \
   --username deploy \
   --auth-type password \
   --password-stdin
 
-hop-server asset add --config config.toml \
+hop-server --config config.toml asset add \
   --name web-prod-01 \
   --hostname 10.0.1.10 \
   --port 22 \
@@ -73,19 +85,17 @@ hop-server asset add --config config.toml \
   --credential-id <credential-id>
 ```
 
-Listing credentials never prints decrypted passwords, private keys, or passphrases.
-Use `--password-stdin` to read a password from standard input instead of exposing
-it in the process list.
+列出凭证不会输出解密后的密码、私钥或 passphrase。生产环境优先使用 `--password-stdin`，避免把密码暴露在进程参数里。
 
-## Developer Usage
+## 开发者使用
 
-Enter Hop TUI:
+进入 Hop TUI：
 
 ```bash
 ssh hop-host -p 2222
 ```
 
-Use the local wrapper:
+使用本地 wrapper：
 
 ```bash
 hop --host hop-host --port 2222
@@ -94,45 +104,39 @@ hop --host hop-host --port 2222 connect web-prod-01
 hop --host hop-host --port 2222 ssh-config
 ```
 
-The `hop` CLI only invokes `ssh`. It does not call Admin API.
+`hop` CLI 只调用本机 OpenSSH，不访问 Admin API。
 
-## Managed Connection vs ProxyJump
+如果看到 `Permission denied (publickey...)`，先确认自己的公钥已经通过 `hop-server key add` 加入 Hop 的 authorized keys，并处于 active 状态。`credentials` 里的用户名和密码不会用于登录 Hop；`--user` 只影响 SSH 连接显示的用户名，认证仍以公钥 fingerprint 为准。
 
-`hop connect <asset>` and TUI Enter are server-side managed connections. Hop decrypts the asset credential and opens an outbound SSH session to the target.
+## Managed Connection 与 ProxyJump
 
-`ssh -J hop:2222 target` and `ProxyCommand -W` are pure TCP forwarding. Hop only checks that `target` matches the assets allowlist. It never decrypts or uses stored target credentials for ProxyJump.
+`hop connect <asset>` 和 TUI 中按 Enter 连接资产属于服务器托管连接：Hop 会解密资产凭证，并从服务器侧发起到目标主机的 SSH 连接。
 
-Allowlist matching supports:
+`ssh -J hop:2222 target` 和 `ProxyCommand -W` 属于纯 TCP 转发：Hop 只检查目标是否命中资产 allowlist，不会使用托管凭证。用户本地 SSH 客户端必须能自行完成目标主机认证。
+
+ProxyJump allowlist 支持：
 
 - `assets.hostname:assets.port`
-- `assets.name`, which forwards to that asset's stored `hostname:port`
-- `<asset>.hop`, which strips `.hop` and forwards to that asset's stored `hostname:port`
+- `assets.name`，转发到该资产保存的 `hostname:port`
+- `<asset>.hop`，去掉 `.hop` 后按资产名解析
 
-## Backups
+## 备份
 
-Back up these files together:
+请把下面三个文件作为同一批次备份：
 
-- SQLite database, for assets, keys, sessions, known hosts, and encrypted credentials.
-- `hop.secret`, required to decrypt stored credentials.
-- Hop SSH host key, to avoid client host-key warnings.
+- SQLite 数据库
+- `hop.secret`
+- Hop SSH host key
 
-If `hop.secret` is lost, stored credentials cannot be recovered.
+如果 `hop.secret` 丢失，已保存的目标凭证无法恢复。
 
-## Troubleshooting
+## 项目结构
 
-- Unknown SSH key: add the user's public key in Admin Web or `hop-server key add`.
-- Target auth failure: verify the asset has a credential and the username/secret works on the target.
-- Host key mismatch: inspect Admin Web known hosts, delete the stale entry only after verifying the target host.
-- DB locked: Hop enables WAL and a 5s busy timeout; persistent locks usually mean another process is holding the SQLite file.
-- Admin Web not reachable remotely: it binds to localhost by default; use an SSH tunnel.
-
-## File Transfer
-
-MVP does not implement TUI file browser, ZMODEM, or server-managed SFTP transfer.
-
-For users with their own target credentials, use standard OpenSSH through ProxyJump:
-
-```bash
-scp -J hop-host:2222 ./file web-prod-01.hop:/tmp/
-sftp -J hop-host:2222 web-prod-01.hop
+```text
+crates/hop-core/      配置、模型、SQLite、凭证加密
+crates/hop-server/    SSH 服务、TUI、Admin Web、本机管理 CLI
+crates/hop-cli/       开发者本地 SSH wrapper
+migrations/           SQLite schema
+systemd/              systemd service 示例
+docs/                 设计与部署文档
 ```
