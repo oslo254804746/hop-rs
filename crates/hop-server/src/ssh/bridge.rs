@@ -41,6 +41,25 @@ pub fn spawn_managed_bridge(options: ManagedBridgeOptions) -> BridgeControl {
     }
 }
 
+fn managed_session_mode(return_to_tui: bool) -> &'static str {
+    if return_to_tui {
+        "tui-connect"
+    } else {
+        "exec-connect"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_session_mode_distinguishes_tui_connects() {
+        assert_eq!(managed_session_mode(true), "tui-connect");
+        assert_eq!(managed_session_mode(false), "exec-connect");
+    }
+}
+
 async fn run_managed_bridge(
     mut options: ManagedBridgeOptions,
     mut inbound: mpsc::UnboundedReceiver<Vec<u8>>,
@@ -52,11 +71,7 @@ async fn run_managed_bridge(
         .start_session(NewSession {
             key_finger: options.auth.fingerprint.clone(),
             key_name: Some(options.auth.name.clone()),
-            mode: if options.return_to_tui.is_some() {
-                "tui".to_string()
-            } else {
-                "exec-connect".to_string()
-            },
+            mode: managed_session_mode(should_return_to_tui).to_string(),
             asset_name: Some(options.asset.name.clone()),
             target_host: Some(options.asset.hostname.clone()),
             target_port: Some(options.asset.port),

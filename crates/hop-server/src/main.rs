@@ -2,7 +2,11 @@ mod admin;
 mod ssh;
 mod tui;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    io::{self, Read},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -88,6 +92,8 @@ enum CredentialCommand {
         auth_type: AuthTypeArg,
         #[arg(long)]
         password: Option<String>,
+        #[arg(long, conflicts_with = "password")]
+        password_stdin: bool,
         #[arg(long)]
         private_key_file: Option<PathBuf>,
         #[arg(long)]
@@ -161,9 +167,11 @@ async fn main() -> Result<()> {
                     username,
                     auth_type,
                     password,
+                    password_stdin,
                     private_key_file,
                     passphrase,
                 } => {
+                    let password = read_stdin_secret_arg(password, password_stdin)?;
                     admin::local_cli::add_credential(
                         &db,
                         &master_key,
@@ -209,6 +217,22 @@ async fn main() -> Result<()> {
             }
         }
     }
+}
+
+fn read_stdin_secret_arg(value: Option<String>, read_stdin: bool) -> Result<Option<String>> {
+    if !read_stdin {
+        return Ok(value);
+    }
+
+    let mut raw = String::new();
+    io::stdin()
+        .read_to_string(&mut raw)
+        .context("read --password-stdin")?;
+    Ok(Some(normalize_stdin_secret(&raw)))
+}
+
+fn normalize_stdin_secret(value: &str) -> String {
+    value.trim_end_matches(&['\r', '\n'][..]).to_string()
 }
 
 async fn serve(config_path: Option<PathBuf>) -> Result<()> {
@@ -266,5 +290,42 @@ mod tests {
 
         config.server.admin_bind = "192.168.1.10:8080".to_string();
         assert!(validate_admin_bind(&config).is_err());
+    }
+
+    #[test]
+    fn credential_add_accepts_password_stdin_flag() {
+        let cli = Cli::try_parse_from([
+            "hop-server",
+            "credential",
+            "add",
+            "--name",
+            "deploy",
+            "--username",
+            "deploy",
+            "--auth-type",
+            "password",
+            "--password-stdin",
+        ])
+        .unwrap();
+
+        let Some(Command::Credential {
+            command:
+                CredentialCommand::Add {
+                    password,
+                    password_stdin,
+                    ..
+                },
+        }) = cli.command
+        else {
+            panic!("expected credential add");
+        };
+
+        assert!(password.is_none());
+        assert!(password_stdin);
+    }
+
+    #[test]
+    fn stdin_secret_strips_trailing_newlines_only() {
+        assert_eq!(normalize_stdin_secret(" secret \r\n"), " secret ");
     }
 }

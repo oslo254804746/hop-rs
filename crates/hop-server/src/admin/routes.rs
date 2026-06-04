@@ -18,7 +18,10 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 
 use super::{
-    auth::{clear_cookie, cookie_token, require_login, session_cookie, AdminSessions},
+    auth::{
+        clear_cookie, cookie_token, require_login, session_cookie, AdminSessions,
+        AuthenticatedSession,
+    },
     bootstrap, html,
     local_cli::parse_public_key_line,
 };
@@ -69,18 +72,35 @@ pub async fn serve_admin(bind: SocketAddr, db: HopDb, master_key: Arc<MasterKey>
     Ok(())
 }
 
-async fn guard(headers: &HeaderMap, state: &AdminState) -> Option<Response> {
-    if require_login(headers, &state.sessions).await {
+async fn guard(
+    headers: &HeaderMap,
+    state: &AdminState,
+) -> std::result::Result<AuthenticatedSession, Response> {
+    require_login(headers, &state.sessions)
+        .await
+        .ok_or_else(|| Redirect::to("/login").into_response())
+}
+
+async fn csrf_guard(
+    state: &AdminState,
+    session: &AuthenticatedSession,
+    csrf_token: &str,
+) -> Option<Response> {
+    if state
+        .sessions
+        .validate_csrf(&session.token, csrf_token)
+        .await
+    {
         None
     } else {
-        Some(Redirect::to("/login").into_response())
+        Some((StatusCode::FORBIDDEN, "invalid CSRF token").into_response())
     }
 }
 
 async fn index(State(state): State<AdminState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
-        return resp;
-    }
+    let Ok(_session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
     let assets = state.db.list_assets().await.unwrap_or_default();
     let credentials = state.db.list_credentials().await.unwrap_or_default();
     let keys = state.db.list_authorized_keys().await.unwrap_or_default();
@@ -130,16 +150,22 @@ async fn logout(State(state): State<AdminState>, headers: HeaderMap) -> Response
 }
 
 async fn assets(State(state): State<AdminState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
-        return resp;
-    }
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
     let assets = state.db.list_assets().await.unwrap_or_default();
     let credentials = state.db.list_credentials().await.unwrap_or_default();
-    Html(html::assets(&assets, &credentials).into_string()).into_response()
+    Html(html::assets(&assets, &credentials, &session.csrf_token).into_string()).into_response()
+}
+
+#[derive(Deserialize)]
+struct CsrfForm {
+    csrf_token: String,
 }
 
 #[derive(Deserialize)]
 struct AssetForm {
+    csrf_token: String,
     name: String,
     hostname: String,
     port: i64,
@@ -153,7 +179,10 @@ async fn create_asset(
     headers: HeaderMap,
     Form(form): Form<AssetForm>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
     let tags = parse_tags(form.tags);
@@ -180,14 +209,14 @@ async fn edit_asset(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
-        return resp;
-    }
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
     let Ok(Some(asset)) = state.db.get_asset_by_id(&id).await else {
         return Redirect::to("/assets").into_response();
     };
     let credentials = state.db.list_credentials().await.unwrap_or_default();
-    Html(html::edit_asset(&asset, &credentials).into_string()).into_response()
+    Html(html::edit_asset(&asset, &credentials, &session.csrf_token).into_string()).into_response()
 }
 
 async fn update_asset(
@@ -196,7 +225,10 @@ async fn update_asset(
     Path(id): Path<String>,
     Form(form): Form<AssetForm>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
     let tags = parse_tags(form.tags);
@@ -225,8 +257,12 @@ async fn delete_asset(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Form(form): Form<CsrfForm>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
     let _ = state.db.delete_asset(&id).await;
@@ -234,15 +270,16 @@ async fn delete_asset(
 }
 
 async fn credentials(State(state): State<AdminState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
-        return resp;
-    }
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
     let credentials = state.db.list_credentials().await.unwrap_or_default();
-    Html(html::credentials(&credentials).into_string()).into_response()
+    Html(html::credentials(&credentials, &session.csrf_token).into_string()).into_response()
 }
 
 #[derive(Deserialize)]
 struct CredentialForm {
+    csrf_token: String,
     name: String,
     username: String,
     auth_type: String,
@@ -256,7 +293,10 @@ async fn create_credential(
     headers: HeaderMap,
     Form(form): Form<CredentialForm>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
     let Ok(auth_type) = AuthType::try_from(form.auth_type.as_str()) else {
@@ -302,13 +342,13 @@ async fn edit_credential(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
-        return resp;
-    }
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
     let Ok(Some(credential)) = state.db.get_credential(&id).await else {
         return Redirect::to("/credentials").into_response();
     };
-    Html(html::edit_credential(&credential).into_string()).into_response()
+    Html(html::edit_credential(&credential, &session.csrf_token).into_string()).into_response()
 }
 
 async fn update_credential(
@@ -317,7 +357,10 @@ async fn update_credential(
     Path(id): Path<String>,
     Form(form): Form<CredentialForm>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
     let Ok(Some(existing)) = state.db.get_credential(&id).await else {
@@ -398,8 +441,12 @@ async fn delete_credential(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Form(form): Form<CsrfForm>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
     let _ = state.db.delete_credential(&id).await;
@@ -407,15 +454,16 @@ async fn delete_credential(
 }
 
 async fn keys(State(state): State<AdminState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
-        return resp;
-    }
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
     let keys = state.db.list_authorized_keys().await.unwrap_or_default();
-    Html(html::keys(&keys).into_string()).into_response()
+    Html(html::keys(&keys, &session.csrf_token).into_string()).into_response()
 }
 
 #[derive(Deserialize)]
 struct KeyForm {
+    csrf_token: String,
     name: String,
     public_key: String,
 }
@@ -425,7 +473,10 @@ async fn create_key(
     headers: HeaderMap,
     Form(form): Form<KeyForm>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
     if let Ok((public_key, fingerprint)) = parse_public_key_line(&form.public_key) {
@@ -442,13 +493,13 @@ async fn edit_key(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
-        return resp;
-    }
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
     let Ok(Some(key)) = state.db.get_authorized_key_by_id(&id).await else {
         return Redirect::to("/keys").into_response();
     };
-    Html(html::edit_key(&key).into_string()).into_response()
+    Html(html::edit_key(&key, &session.csrf_token).into_string()).into_response()
 }
 
 async fn update_key(
@@ -457,7 +508,10 @@ async fn update_key(
     Path(id): Path<String>,
     Form(form): Form<KeyForm>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
     if let Ok((public_key, fingerprint)) = parse_public_key_line(&form.public_key) {
@@ -476,8 +530,12 @@ async fn deactivate_key(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Form(form): Form<CsrfForm>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
     let _ = state.db.set_authorized_key_active(&id, false).await;
@@ -488,8 +546,12 @@ async fn activate_key(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Form(form): Form<CsrfForm>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
     let _ = state.db.set_authorized_key_active(&id, true).await;
@@ -500,8 +562,12 @@ async fn delete_key(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Form(form): Form<CsrfForm>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
     let _ = state.db.delete_authorized_key(&id).await;
@@ -509,15 +575,16 @@ async fn delete_key(
 }
 
 async fn known_hosts(State(state): State<AdminState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
-        return resp;
-    }
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
     let hosts = state.db.list_known_hosts().await.unwrap_or_default();
-    Html(html::known_hosts(&hosts).into_string()).into_response()
+    Html(html::known_hosts(&hosts, &session.csrf_token).into_string()).into_response()
 }
 
 #[derive(Deserialize)]
 struct KnownHostDelete {
+    csrf_token: String,
     key_type: String,
 }
 
@@ -527,7 +594,10 @@ async fn delete_known_host(
     Path((hostname, port)): Path<(String, i64)>,
     Form(form): Form<KnownHostDelete>,
 ) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
     let _ = state
@@ -538,9 +608,9 @@ async fn delete_known_host(
 }
 
 async fn sessions(State(state): State<AdminState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = guard(&headers, &state).await {
-        return resp;
-    }
+    let Ok(_session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
     let sessions = state.db.list_sessions(100).await.unwrap_or_default();
     Html(html::sessions(&sessions).into_string()).into_response()
 }

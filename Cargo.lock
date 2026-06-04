@@ -1457,7 +1457,6 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -1497,7 +1496,6 @@ dependencies = [
  "hop-core",
  "maud",
  "nucleo-matcher",
- "rand 0.10.1",
  "rand 0.8.6",
  "ratatui",
  "russh",

@@ -82,6 +82,7 @@ pub async fn serve_ssh(
         host_key::load_or_generate(&config.ssh.host_key_file, &config.ssh.host_key_type)?;
     let russh_config = server::Config {
         inactivity_timeout: Some(Duration::from_secs(3600)),
+        keepalive_interval: ssh_keepalive_interval(&config),
         auth_rejection_time: Duration::from_secs(1),
         auth_rejection_time_initial: Some(Duration::from_millis(100)),
         keys: vec![host_key],
@@ -99,6 +100,13 @@ pub async fn serve_ssh(
         .run_on_socket(Arc::new(russh_config), &listener)
         .await?;
     Ok(())
+}
+
+fn ssh_keepalive_interval(config: &HopConfig) -> Option<Duration> {
+    match config.ssh.keepalive_interval {
+        0 => None,
+        seconds => Some(Duration::from_secs(seconds)),
+    }
 }
 
 impl server::Server for HopSshServer {
@@ -571,5 +579,17 @@ mod tests {
         let finished = db.get_session(&session.id).await.unwrap().unwrap();
         assert_eq!(finished.status, "ok");
         assert!(finished.ended_at.is_some());
+    }
+
+    #[test]
+    fn ssh_keepalive_interval_uses_config_value() {
+        let mut config = HopConfig::default();
+        assert_eq!(
+            ssh_keepalive_interval(&config),
+            Some(Duration::from_secs(30))
+        );
+
+        config.ssh.keepalive_interval = 0;
+        assert_eq!(ssh_keepalive_interval(&config), None);
     }
 }

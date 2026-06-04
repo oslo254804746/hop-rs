@@ -3,6 +3,8 @@ ssh_bind = "0.0.0.0:2222"
 admin_bind = "127.0.0.1:8080"
 
 [database]
+# Relative paths are resolved from the process working directory, such as
+# /var/lib/hop when using the sample systemd service.
 path = "./hop.db"
 
 [ssh]
@@ -14,6 +16,7 @@ connect_timeout = 10
 proxy_policy = "assets_only"
 
 [security]
+# Relative paths use the same working-directory base as database.path.
 secret_key_file = "./hop.secret"
 
 [runtime]

@@ -59,11 +59,11 @@ hop-server key add --config config.toml \
   --name "alice laptop" \
   --public-key-file ~/.ssh/id_ed25519.pub
 
-hop-server credential add --config config.toml \
+printf '%s' 'secret' | hop-server credential add --config config.toml \
   --name deploy-password \
   --username deploy \
   --auth-type password \
-  --password 'secret'
+  --password-stdin
 
 hop-server asset add --config config.toml \
   --name web-prod-01 \
@@ -74,6 +74,8 @@ hop-server asset add --config config.toml \
 ```
 
 Listing credentials never prints decrypted passwords, private keys, or passphrases.
+Use `--password-stdin` to read a password from standard input instead of exposing
+it in the process list.
 
 ## Developer Usage
 
@@ -103,8 +105,8 @@ The `hop` CLI only invokes `ssh`. It does not call Admin API.
 Allowlist matching supports:
 
 - `assets.hostname:assets.port`
-- `assets.name`
-- `<asset>.hop`
+- `assets.name`, which forwards to that asset's stored `hostname:port`
+- `<asset>.hop`, which strips `.hop` and forwards to that asset's stored `hostname:port`
 
 ## Backups
 

@@ -59,7 +59,12 @@ pub fn login(error: Option<&str>) -> Markup {
     )
 }
 
-pub fn overview(asset_count: usize, credential_count: usize, key_count: usize, session_count: usize) -> Markup {
+pub fn overview(
+    asset_count: usize,
+    credential_count: usize,
+    key_count: usize,
+    session_count: usize,
+) -> Markup {
     layout(
         "Overview",
         html! {
@@ -74,13 +79,14 @@ pub fn overview(asset_count: usize, credential_count: usize, key_count: usize, s
     )
 }
 
-pub fn assets(items: &[Asset], credentials: &[Credential]) -> Markup {
+pub fn assets(items: &[Asset], credentials: &[Credential], csrf_token: &str) -> Markup {
     layout(
         "Assets",
         html! {
             h1 { "Assets" }
             h2 { "Add Asset" }
             form method="post" action="/assets" {
+                (csrf_field(csrf_token))
                 div.grid {
                     label { "Name" input name="name" required; }
                     label { "Hostname" input name="hostname" required; }
@@ -111,6 +117,7 @@ pub fn assets(items: &[Asset], credentials: &[Credential]) -> Markup {
                             a class="button" href=(format!("/assets/{}/edit", asset.id)) { "Edit" }
                             " "
                             form method="post" action=(format!("/assets/{}/delete", asset.id)) {
+                                (csrf_field(csrf_token))
                                 button class="danger" type="submit" { "Delete" }
                             }
                         }
@@ -121,12 +128,13 @@ pub fn assets(items: &[Asset], credentials: &[Credential]) -> Markup {
     )
 }
 
-pub fn edit_asset(asset: &Asset, credentials: &[Credential]) -> Markup {
+pub fn edit_asset(asset: &Asset, credentials: &[Credential], csrf_token: &str) -> Markup {
     layout(
         "Edit Asset",
         html! {
             h1 { "Edit Asset" }
             form method="post" action=(format!("/assets/{}", asset.id)) {
+                (csrf_field(csrf_token))
                 div.grid {
                     label { "Name" input name="name" value=(asset.name) required; }
                     label { "Hostname" input name="hostname" value=(asset.hostname) required; }
@@ -150,13 +158,14 @@ pub fn edit_asset(asset: &Asset, credentials: &[Credential]) -> Markup {
     )
 }
 
-pub fn credentials(items: &[Credential]) -> Markup {
+pub fn credentials(items: &[Credential], csrf_token: &str) -> Markup {
     layout(
         "Credentials",
         html! {
             h1 { "Credentials" }
             h2 { "Add Credential" }
             form method="post" action="/credentials" {
+                (csrf_field(csrf_token))
                 div.grid {
                     label { "Name" input name="name" required; }
                     label { "Username" input name="username" required; }
@@ -191,6 +200,7 @@ pub fn credentials(items: &[Credential]) -> Markup {
                             a class="button" href=(format!("/credentials/{}/edit", credential.id)) { "Edit" }
                             " "
                             form method="post" action=(format!("/credentials/{}/delete", credential.id)) {
+                                (csrf_field(csrf_token))
                                 button class="danger" type="submit" { "Delete" }
                             }
                         }
@@ -201,12 +211,13 @@ pub fn credentials(items: &[Credential]) -> Markup {
     )
 }
 
-pub fn edit_credential(credential: &Credential) -> Markup {
+pub fn edit_credential(credential: &Credential, csrf_token: &str) -> Markup {
     layout(
         "Edit Credential",
         html! {
             h1 { "Edit Credential" }
             form method="post" action=(format!("/credentials/{}", credential.id)) {
+                (csrf_field(csrf_token))
                 div.grid {
                     label { "Name" input name="name" value=(credential.name) required; }
                     label { "Username" input name="username" value=(credential.username) required; }
@@ -228,13 +239,14 @@ pub fn edit_credential(credential: &Credential) -> Markup {
     )
 }
 
-pub fn keys(items: &[AuthorizedKey]) -> Markup {
+pub fn keys(items: &[AuthorizedKey], csrf_token: &str) -> Markup {
     layout(
         "Keys",
         html! {
             h1 { "Authorized Keys" }
             h2 { "Add Key" }
             form method="post" action="/keys" {
+                (csrf_field(csrf_token))
                 label { "Name" input name="name" required; }
                 label { "Public Key" textarea name="public_key" rows="4" required {} }
                 button type="submit" { "Save" }
@@ -252,10 +264,12 @@ pub fn keys(items: &[AuthorizedKey]) -> Markup {
                             " "
                             @if key.is_active {
                                 form method="post" action=(format!("/keys/{}/deactivate", key.id)) {
+                                    (csrf_field(csrf_token))
                                     button class="danger" type="submit" { "Deactivate" }
                                 }
                             } @else {
                                 form method="post" action=(format!("/keys/{}/activate", key.id)) {
+                                    (csrf_field(csrf_token))
                                     button type="submit" { "Activate" }
                                 }
                             }
@@ -267,24 +281,26 @@ pub fn keys(items: &[AuthorizedKey]) -> Markup {
     )
 }
 
-pub fn edit_key(key: &AuthorizedKey) -> Markup {
+pub fn edit_key(key: &AuthorizedKey, csrf_token: &str) -> Markup {
     layout(
         "Edit Key",
         html! {
             h1 { "Edit Key" }
             form method="post" action=(format!("/keys/{}", key.id)) {
+                (csrf_field(csrf_token))
                 label { "Name" input name="name" value=(key.name) required; }
                 label { "Public Key" textarea name="public_key" rows="4" required { (key.public_key) } }
                 button type="submit" { "Save" }
             }
             form method="post" action=(format!("/keys/{}/delete", key.id)) {
+                (csrf_field(csrf_token))
                 button class="danger" type="submit" { "Delete Key" }
             }
         },
     )
 }
 
-pub fn known_hosts(items: &[KnownHost]) -> Markup {
+pub fn known_hosts(items: &[KnownHost], csrf_token: &str) -> Markup {
     layout(
         "Known Hosts",
         html! {
@@ -298,6 +314,7 @@ pub fn known_hosts(items: &[KnownHost]) -> Markup {
                         td { (host.fingerprint) }
                         td {
                             form method="post" action=(format!("/known-hosts/{}/{}/delete", host.hostname, host.port)) {
+                                (csrf_field(csrf_token))
                                 input type="hidden" name="key_type" value=(host.key_type);
                                 button class="danger" type="submit" { "Delete" }
                             }
@@ -330,4 +347,23 @@ pub fn sessions(items: &[Session]) -> Markup {
             }
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mutating_forms_include_csrf_token() {
+        let rendered = assets(&[], &[], "csrf-123").into_string();
+
+        assert!(rendered.contains(r#"name="csrf_token""#));
+        assert!(rendered.contains(r#"value="csrf-123""#));
+    }
+}
+
+fn csrf_field(csrf_token: &str) -> Markup {
+    html! {
+        input type="hidden" name="csrf_token" value=(csrf_token);
+    }
 }

@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use anyhow::Result;
 use hop_core::Asset;
 use nucleo_matcher::{
@@ -26,8 +28,15 @@ pub struct TuiResources {
 }
 
 impl TuiResources {
-    pub fn new(handle: Handle, channel_id: ChannelId, width: u16, height: u16, assets: Vec<Asset>) -> Result<Self> {
-        let backend = ratatui::backend::CrosstermBackend::new(TerminalHandle::start(handle, channel_id));
+    pub fn new(
+        handle: Handle,
+        channel_id: ChannelId,
+        width: u16,
+        height: u16,
+        assets: Vec<Asset>,
+    ) -> Result<Self> {
+        let backend =
+            ratatui::backend::CrosstermBackend::new(TerminalHandle::start(handle, channel_id));
         let terminal = ratatui::Terminal::with_options(
             backend,
             TerminalOptions {
@@ -77,15 +86,27 @@ impl TuiResources {
 #[derive(Clone)]
 pub struct TuiApp {
     assets: Vec<Asset>,
+    filtered_cache: RefCell<FilteredAssetCache>,
     pub query: String,
     pub selected: usize,
     pub searching: bool,
 }
 
+#[derive(Clone)]
+struct FilteredAssetCache {
+    query: String,
+    assets: Vec<Asset>,
+}
+
 impl TuiApp {
     pub fn new(assets: Vec<Asset>) -> Self {
+        let filtered_assets = assets.clone();
         Self {
             assets,
+            filtered_cache: RefCell::new(FilteredAssetCache {
+                query: String::new(),
+                assets: filtered_assets,
+            }),
             query: String::new(),
             selected: 0,
             searching: false,
@@ -93,12 +114,30 @@ impl TuiApp {
     }
 
     pub fn filtered_assets(&self) -> Vec<Asset> {
+        if self.filtered_cache.borrow().query == self.query {
+            return self.filtered_cache.borrow().assets.clone();
+        }
+
+        let assets = self.compute_filtered_assets();
+        *self.filtered_cache.borrow_mut() = FilteredAssetCache {
+            query: self.query.clone(),
+            assets: assets.clone(),
+        };
+        assets
+    }
+
+    fn compute_filtered_assets(&self) -> Vec<Asset> {
         if self.query.trim().is_empty() {
             return self.assets.clone();
         }
         let names: Vec<String> = self.assets.iter().map(|asset| asset.name.clone()).collect();
         let mut matcher = Matcher::new(Config::DEFAULT);
-        let pattern = Pattern::new(&self.query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy);
+        let pattern = Pattern::new(
+            &self.query,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            AtomKind::Fuzzy,
+        );
         let matched = pattern.match_list(names, &mut matcher);
         matched
             .into_iter()
@@ -108,7 +147,9 @@ impl TuiApp {
 
     pub fn selected_asset(&self) -> Option<Asset> {
         let items = self.filtered_assets();
-        items.get(self.selected.min(items.len().saturating_sub(1))).cloned()
+        items
+            .get(self.selected.min(items.len().saturating_sub(1)))
+            .cloned()
     }
 
     pub fn handle_input(&mut self, input: TuiInput) -> TuiAction {
@@ -178,6 +219,15 @@ mod tests {
         let mut app = TuiApp::new(vec![asset("web-prod-01"), asset("db-prod-01")]);
         app.query = "web".to_string();
         assert_eq!(app.filtered_assets()[0].name, "web-prod-01");
+    }
+
+    #[test]
+    fn cached_filter_refreshes_when_query_changes() {
+        let mut app = TuiApp::new(vec![asset("web-prod-01"), asset("db-prod-01")]);
+
+        assert_eq!(app.filtered_assets().len(), 2);
+        app.query = "db".to_string();
+        assert_eq!(app.filtered_assets()[0].name, "db-prod-01");
     }
 
     #[test]
