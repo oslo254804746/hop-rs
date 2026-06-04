@@ -1,0 +1,7 @@
+/target/
+*.db
+*.db-shm
+*.db-wal
+hop.secret
+hop_host_key
+config.toml

@@ -1,0 +1,23 @@
+[Unit]
+Description=Hop SSH jump server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hop
+Group=hop
+WorkingDirectory=/var/lib/hop
+ExecStart=/usr/local/bin/hop-server serve --config /etc/hop/config.toml
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/hop
+
+[Install]
+WantedBy=multi-user.target

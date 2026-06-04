@@ -1,0 +1,55 @@
+[workspace]
+members = [
+    "crates/hop-core",
+    "crates/hop-server",
+    "crates/hop-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1.0"
+argon2 = "0.5"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+cookie = "0.18"
+futures = "0.3"
+hkdf = "0.12"
+maud = { version = "0.27", features = ["axum"] }
+nucleo-matcher = "0.3"
+rand = "0.8"
+rand_core = "0.6"
+ratatui = "0.29"
+russh = { version = "0.61.1", default-features = false, features = ["async-trait", "ring", "rsa", "flate2"] }
+russh-sftp = "2.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "chrono", "uuid", "migrate"] }
+tempfile = "3.10"
+termwiz = "0.23"
+thiserror = "2.0"
+tokio = { version = "1.45", features = ["full"] }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.8", features = ["v4", "serde"] }
+zeroize = "1.8"
+
+# Force sqlx's sqlite dependency through bundled SQLite for zero-dependency Linux deploys.
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
