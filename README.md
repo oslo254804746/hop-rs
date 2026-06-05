@@ -1,161 +1,141 @@
-# Hop
+<div align="center">
 
-Hop 是一个轻量级 SSH 跳板机 MVP。它把 SSH 公钥白名单、TUI 资产选择、服务器托管凭证连接目标主机，以及受资产 allowlist 限制的 ProxyJump/ProxyCommand 放在一个 Rust 服务里。
+# 🦀 Hop
 
-当前目标是保持部署简单：单服务、SQLite only、默认只暴露 SSH 服务端口，管理端口默认绑定本机 loopback。
+**Minimal SSH bastion, maximum control.**
 
-## 能力边界
+A single Rust binary that replaces your bloated jump server with pubkey auth, a TUI asset picker, managed credentials, and proxy-aware forwarding — all backed by SQLite.
 
-已纳入 MVP：
+[![CI](https://github.com/oslo254804746/hop-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/oslo254804746/hop-rs/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-- SSH 公钥白名单进入 Hop。
-- SSH-over-TUI 资产搜索与连接。
-- 服务器托管目标凭证，用于 TUI 或资产名直连。
-- ProxyJump/ProxyCommand 纯 TCP 转发，并且只允许命中资产表的目标。
-- SQLite 存储，凭证加密保存。
-- 本机 `hop-server` 管理 CLI。
+</div>
 
-暂不纳入 MVP：TUI 文件浏览器、ZMODEM、细粒度资产授权、TOTP、审批流、会话录像和 SPA 前端。
+---
 
-## 快速验证
+## Why Hop?
 
-开发环境先跑：
+Most bastion/jump-server solutions are bloated Java/Python stacks with databases, caches, message queues, and admin panels that take a week to deploy. Hop is the opposite:
 
-```bash
-cargo test --workspace
-cargo build --workspace
+- **Single binary** — `hop-server` does everything
+- **Zero external deps** — SQLite bundled, no Redis/Postgres/RabbitMQ
+- **Secure by default** — Admin Web on loopback, credentials encrypted with ChaCha20-Poly1305
+- **SSH-native** — your users just `ssh`, no proprietary client needed
+
+## Features
+
+```text
+┌─────────────────────────────────────────────────────────┐
+│  Pubkey Whitelist     Only trusted keys enter Hop       │
+│  TUI Asset Picker     Fuzzy search, connect in seconds  │
+│  Managed Credentials  Server-side auth to targets       │
+│  ProxyJump/ProxyCmd   Allowlist-restricted TCP forward  │
+│  Admin Web            Lightweight management UI         │
+│  Import/Export        Bulk asset/credential transfer    │
+│  TOFU Host Keys       Auto-trust on first connect       │
+│  i18n Admin           Multi-language admin interface    │
+└─────────────────────────────────────────────────────────┘
 ```
 
-Linux 发布构建：
+## Quick Start
 
 ```bash
+# Build
 cargo build --release -p hop-server
-```
 
-部署说明见 [docs/deployment.md](docs/deployment.md)，包含二进制直部署、systemd、Docker 部署、升级、备份和排障。
-
-## 首次运行
-
-```bash
+# Run
 cp config.example.toml config.toml
-hop-server serve --config config.toml
+./target/release/hop-server serve --config config.toml
 ```
 
-首次启动时，Hop 会自动创建：
+First boot auto-generates:
+- SQLite database
+- Ed25519 host key
+- ChaCha20-Poly1305 master key (`hop.secret`)
+- One-time admin password (printed to stdout)
 
-- SQLite 数据库：`database.path`
-- Hop SSH host key：`ssh.host_key_file`
-- 凭证加密主密钥：`security.secret_key_file`
-- 初始管理员密码：只打印一次到终端或日志
+Default ports: **SSH `0.0.0.0:2222`** | **Admin Web `127.0.0.1:8080`**
 
-默认端口：
-
-- SSH 服务：`0.0.0.0:2222`
-- Admin Web：`127.0.0.1:8080`
-
-Admin Web 默认绑定 loopback。远程访问时，请通过宿主机系统 SSH 或管理网络建立隧道；如果主动改成 `0.0.0.0:8080`，请用防火墙、VPN、宿主机本地端口映射或可信管理网络限制访问。
-
-Docker 镜像会把配置和运行数据集中到 `/data`，首次启动会自动生成 `/data/config.toml`。Linux 主机推荐用 host network：
+## Usage
 
 ```bash
-docker run -d --name hop --network host -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:latest
-```
-
-Docker Desktop 上不要依赖 `--network=host` 访问 Admin Web；请按 [部署文档](docs/deployment.md) 使用 bridge 网络和宿主机 loopback 端口映射。
-
-## 本机管理 CLI
-
-在 Admin Web 完整录入数据前，可以直接在服务器上使用 `hop-server` 管理数据：
-
-先分清两类认证数据：
-
-- `key add` 添加的是“谁可以登录 Hop 的 2222 端口”。Hop 入口只接受 SSH 公钥白名单认证，不使用密码登录。
-- `credential add` 添加的是“Hop 服务器连接目标资产时用什么用户名/密码或私钥”。它只在 TUI 选择资产或资产名直连时使用，不是 Hop 入口登录密码。
-
-```bash
-hop-server --config config.toml reset-admin
-
-hop-server --config config.toml key add \
-  --name "alice laptop" \
-  --public-key-file ~/.ssh/id_ed25519.pub
-
-printf '%s' 'secret' | hop-server --config config.toml credential add \
-  --name deploy-password \
-  --username deploy \
-  --auth-type password \
-  --password-stdin
-
-hop-server --config config.toml asset add \
-  --name web-prod-01 \
-  --hostname 10.0.1.10 \
-  --port 22 \
-  --tags prod,web \
-  --credential-id <credential-id>
-```
-
-列出凭证不会输出解密后的密码、私钥或 passphrase。生产环境优先使用 `--password-stdin`，避免把密码暴露在进程参数里。
-
-## 开发者使用
-
-Hop 入口身份只由管理员预先信任的 SSH 公钥决定；`credentials` 中保存的用户名、密码或私钥只用于 Hop 服务器侧连接目标资产，不用于登录 Hop 本身。
-
-进入 Hop TUI：
-
-```bash
+# Interactive TUI — fuzzy search your fleet
 ssh -p 2222 hop-host
-```
 
-用资产名作为 SSH username，直接进入某个服务器托管资产：
-
-```bash
+# Direct connect — asset name as SSH username
 ssh -p 2222 web-prod-01@hop-host
-```
 
-通过 ProxyJump 使用 Hop 做纯 TCP 跳板：
-
-```bash
+# ProxyJump — Hop as a transparent TCP relay
 ssh -J hop-host:2222 web-prod-01.hop
 ```
 
-如果看到 `Permission denied (publickey...)`，先确认自己的公钥已经通过 `hop-server key add` 加入 Hop 的 authorized keys，并处于 active 状态。`credentials` 里的用户名和密码不会用于登录 Hop；Hop 入口认证始终以公钥 fingerprint 为准。
-
-## Managed Connection 与 ProxyJump
-
-TUI 中按 Enter 连接资产、以及资产名直连都属于服务器托管连接：Hop 会解密资产凭证，并从服务器侧发起到目标主机的 SSH 连接。
-
-直连模式也属于服务器托管连接，适合跳过 TUI 直接进入某个资产：
-
-```bash
-ssh -p 2222 <asset_name>@hop-host
-ssh -p 2222 <asset_hostname>@hop-host
-```
-
-其中 SSH username 会被 Hop 解释为直连目标，`<asset_name>` 或 `<asset_hostname>` 必须命中资产表，且该资产需要绑定托管凭据。Hop 入口身份仍由公钥 fingerprint 决定，审计中的 `key_name` 来自 authorized key 记录。直连会在会话审计中记录为 `mode=direct`。
-
-`ssh -J hop:2222 target` 和 `ProxyCommand -W` 属于纯 TCP 转发：Hop 只检查目标是否命中资产 allowlist，不会使用托管凭证。用户本地 SSH 客户端必须能自行完成目标主机认证。
-
-ProxyJump allowlist 支持：
-
-- `assets.hostname:assets.port`
-- `assets.name`，转发到该资产保存的 `hostname:port`
-- `<asset>.hop`，去掉 `.hop` 后按资产名解析
-
-## 备份
-
-请把下面三个文件作为同一批次备份；Docker 部署可直接备份整个 `/data` 挂载目录：
-
-- SQLite 数据库
-- `hop.secret`
-- Hop SSH host key
-
-如果 `hop.secret` 丢失，已保存的目标凭证无法恢复。
-
-## 项目结构
+## Architecture
 
 ```text
-crates/hop-core/      配置、模型、SQLite、凭证加密
-crates/hop-server/    SSH 服务、TUI、Admin Web、本机管理 CLI
-migrations/           SQLite schema
-systemd/              systemd service 示例
-docs/                 设计与部署文档
+crates/
+├── hop-core/       Config, models, SQLite, credential encryption
+└── hop-server/     SSH server, TUI, Admin Web, local CLI
+migrations/         SQLite schema migrations
+systemd/            Production service unit
 ```
+
+**Stack:** `russh` · `ratatui` · `axum` · `sqlx` · `chacha20poly1305` · `maud`
+
+## CLI Reference
+
+```bash
+hop-server serve                    # Start the server (default)
+hop-server reset-admin              # Reset admin password
+hop-server key add|list|activate|deactivate
+hop-server credential add|list|delete
+hop-server asset add|list|delete
+hop-server export --kind assets --format csv --output dump.csv
+hop-server import --file dump.csv --on-conflict skip
+```
+
+## Docker
+
+```bash
+# Linux (recommended): host network preserves loopback binding
+docker run -d --name hop --network host \
+  -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:latest
+
+# Docker Desktop: bridge with loopback-only admin port
+docker run -d --name hop \
+  -p 2222:2222 -p 127.0.0.1:8080:8080 \
+  -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:latest
+```
+
+Initial admin password: `docker logs hop`
+
+## Deployment
+
+Full deployment guide (binary, systemd, Docker, upgrades, backup, troubleshooting):
+
+**→ [docs/deployment.md](docs/deployment.md)**
+
+## Security Model
+
+| Layer | Mechanism |
+|-------|-----------|
+| Hop entry auth | SSH public key whitelist only |
+| Credential storage | ChaCha20-Poly1305 + HKDF-SHA256 |
+| Admin Web auth | Argon2 password hash |
+| ProxyJump targets | Asset allowlist enforcement |
+| Admin Web exposure | Loopback-only by default |
+
+> **`hop.secret` is your crown jewel.** Lose it and all stored credentials become unrecoverable. Back it up.
+
+## Backup
+
+Three files, one atomic snapshot:
+
+```bash
+hop.db          # Everything: assets, keys, sessions, encrypted creds
+hop.secret      # Master key — unrecoverable if lost
+hop_host_key    # SSH host identity
+```
+
+## License
+
+MIT
