@@ -26,10 +26,18 @@ admin_bind = "127.0.0.1:8080"   # Loopback only — see "Admin Web Access"
 
 ## Binary + systemd
 
-### 1. Build
+### 1. Get the binary
 
 ```bash
+# Download a release binary
+HOP_VERSION=vX.Y.Z
+curl -fL -o hop-server \
+  "https://github.com/oslo254804746/hop-rs/releases/download/${HOP_VERSION}/hop-server-linux-amd64"
+chmod 0755 hop-server
+
+# Or build from source
 cargo build --release -p hop-server
+cp target/release/hop-server ./hop-server
 ```
 
 ### 2. Install
@@ -39,7 +47,7 @@ sudo useradd --system --home-dir /var/lib/hop --shell /usr/sbin/nologin hop
 sudo install -d -o hop -g hop -m 0750 /var/lib/hop
 sudo install -d -m 0755 /etc/hop
 
-sudo install -m 0755 target/release/hop-server /usr/local/bin/hop-server
+sudo install -m 0755 hop-server /usr/local/bin/hop-server
 sudo install -m 0644 config.example.toml /etc/hop/config.toml
 ```
 
@@ -57,13 +65,7 @@ First boot prints the admin password:
 sudo journalctl -u hop -n 50 --no-pager
 ```
 
-### 4. Verify SSH
-
-```bash
-ssh -p 2222 hop-host          # TUI (after adding your pubkey)
-ssh -p 2222 web-01@hop-host   # Direct connect
-ssh -J hop-host:2222 web-01.hop  # ProxyJump
-```
+Continue with "Initial Data Setup" before the first SSH verification.
 
 ---
 
@@ -74,13 +76,14 @@ ssh -J hop-host:2222 web-01.hop  # ProxyJump
 Host network lets the container bind `127.0.0.1:8080` directly on the host — no exposure gymnastics needed.
 
 ```bash
+HOP_VERSION=vX.Y.Z
 docker run -d \
   --name hop \
   --restart unless-stopped \
   --network host \
   -v "$PWD/data:/data" \
   -e RUST_LOG=info \
-  ghcr.io/oslo254804746/hop-rs:latest
+  ghcr.io/oslo254804746/hop-rs:${HOP_VERSION}
 ```
 
 ### Docker Desktop (macOS/Windows): bridge network
@@ -90,7 +93,8 @@ docker run -d \
 1. First run to generate config:
    ```bash
    mkdir -p data
-   docker run --rm -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:latest hop-server --help >/dev/null
+   HOP_VERSION=vX.Y.Z
+   docker run --rm -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:${HOP_VERSION} hop-server --help >/dev/null
    ```
 
 2. Edit `data/config.toml`:
@@ -101,6 +105,7 @@ docker run -d \
 
 3. Start with loopback-only publish:
    ```bash
+   HOP_VERSION=vX.Y.Z
    docker run -d \
      --name hop \
      --restart unless-stopped \
@@ -108,7 +113,7 @@ docker run -d \
      -p 127.0.0.1:8080:8080 \
      -v "$PWD/data:/data" \
      -e RUST_LOG=info \
-     ghcr.io/oslo254804746/hop-rs:latest
+     ghcr.io/oslo254804746/hop-rs:${HOP_VERSION}
    ```
 
 The security boundary is `-p 127.0.0.1:8080:8080` — never use `-p 8080:8080`.
@@ -144,6 +149,8 @@ If you change `admin_bind` to `0.0.0.0:8080`, the server logs a warning. Protect
 
 ## Initial Data Setup
 
+Run this before the first SSH login. Hop entry auth and target auth are separate:
+
 Two types of auth data — don't confuse them:
 
 | Command | Controls | Used for |
@@ -170,6 +177,16 @@ hop-server --config /etc/hop/config.toml asset add \
   --credential-id <id>
 ```
 
+`credential add` prints the credential ID for `--credential-id`. Assets without a credential are proxy-only: they can be reached through ProxyJump, but TUI and direct-connect mode require a managed credential.
+
+Verify SSH after adding data:
+
+```bash
+ssh -p 2222 hop-host             # TUI
+ssh -p 2222 web-prod-01@hop-host # Direct connect with managed credential
+ssh -J hop-host:2222 web-prod-01.hop # ProxyJump TCP relay
+```
+
 ---
 
 ## Bulk Import/Export
@@ -186,6 +203,8 @@ hop-server export --kind credentials --format json --output creds.json
 hop-server import --kind credentials --file creds.json
 ```
 
+Credential import/export is metadata-only. It transfers `name`, `username`, and `auth_type`, but never exports passwords, private keys, or passphrases.
+
 ---
 
 ## Upgrade
@@ -195,7 +214,10 @@ hop-server import --kind credentials --file creds.json
 ```bash
 sudo systemctl stop hop
 sudo tar -C /var/lib -czf "hop-backup-$(date +%Y%m%d%H%M%S).tgz" hop
-sudo install -m 0755 target/release/hop-server /usr/local/bin/hop-server
+HOP_VERSION=vX.Y.Z
+curl -fL -o hop-server \
+  "https://github.com/oslo254804746/hop-rs/releases/download/${HOP_VERSION}/hop-server-linux-amd64"
+sudo install -m 0755 hop-server /usr/local/bin/hop-server
 sudo systemctl start hop
 sudo journalctl -u hop -n 50 --no-pager
 ```
@@ -234,9 +256,9 @@ Restore: stop service → extract backup to data dir → start service.
 |---------|-------|-----|
 | `Permission denied (publickey)` | User pubkey not in whitelist | `hop-server key add` then verify `key list` shows active |
 | Target auth failure | Wrong credential bound to asset | Check `credential list`, verify username/password/key |
-| Host key mismatch | Target host reinstalled | Clear stale entry from Hop's known hosts |
+| Host key mismatch | Target host reinstalled | Admin Web → Known Hosts → delete stale target entry, then reconnect |
 | Admin Web unreachable remotely | Loopback binding (by design) | Use SSH tunnel or adjust `admin_bind` with protection |
-| Docker Desktop can't reach Admin | `--network host` doesn't work on Desktop | Use bridge + `-p 127.0.0.1:8080:8080` |
+| Docker Desktop can't reach Admin | `--network host` doesn't work on Desktop | Use bridge, set `admin_bind = "0.0.0.0:8080"`, and publish `-p 127.0.0.1:8080:8080` |
 | `DB locked` | Another process holds SQLite | Check for duplicate `hop-server` instances |
 
 ---

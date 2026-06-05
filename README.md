@@ -33,7 +33,7 @@
 │  托管凭证          服务端代理认证目标主机             │
 │  ProxyJump 转发    受资产白名单约束的 TCP 转发        │
 │  Admin Web         轻量管理界面                       │
-│  批量导入/导出     资产与凭证批量迁移                 │
+│  批量导入/导出     资产与凭证元数据迁移               │
 │  TOFU 主机密钥     首次连接自动信任                   │
 │  i18n 管理界面     多语言支持                         │
 └────────────────────────────────────────────────────────┘
@@ -58,6 +58,31 @@ cp config.example.toml config.toml
 
 默认端口：**SSH `0.0.0.0:2222`** | **Admin Web `127.0.0.1:8080`**
 
+## 首次初始化
+
+另开一个终端，先把自己的 SSH 公钥加入 Hop 白名单，再创建托管凭证和资产：
+
+```bash
+./target/release/hop-server --config config.toml key add \
+  --name "alice laptop" \
+  --public-key-file ~/.ssh/id_ed25519.pub
+
+printf '%s' 'target-password' | ./target/release/hop-server --config config.toml credential add \
+  --name deploy-password \
+  --username deploy \
+  --auth-type password \
+  --password-stdin
+
+./target/release/hop-server --config config.toml asset add \
+  --name web-prod-01 \
+  --hostname 10.0.1.10 \
+  --port 22 \
+  --tags prod,web \
+  --credential-id <credential-id>
+```
+
+`credential add` 会输出凭证 ID，填入资产的 `--credential-id`。没有托管凭证的资产仍可用于 ProxyJump 转发。
+
 ## 使用方式
 
 ```bash
@@ -70,6 +95,8 @@ ssh -p 2222 web-prod-01@hop-host
 # ProxyJump —— Hop 作为透明 TCP 中继
 ssh -J hop-host:2222 web-prod-01.hop
 ```
+
+交互式 TUI 和直连模式使用 Hop 托管凭证连接目标主机；ProxyJump 只做受资产白名单约束的 TCP 中继，目标主机认证仍由本机 SSH 客户端完成。
 
 ## 项目结构
 
@@ -95,17 +122,19 @@ hop-server export --kind assets --format csv --output dump.csv
 hop-server import --file dump.csv --on-conflict skip
 ```
 
+凭证导入/导出只迁移 `name`、`username`、`auth_type` 等元数据，不导出密码或私钥材料。
+
 ## Docker
 
 ```bash
 # Linux（推荐）：host 网络保持回环绑定
 docker run -d --name hop --network host \
-  -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:latest
+  -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:vX.Y.Z
 
-# Docker Desktop：bridge 网络 + 仅本地回环映射管理端口
+# Docker Desktop：先将 data/config.toml 的 admin_bind 改成 "0.0.0.0:8080"
 docker run -d --name hop \
   -p 2222:2222 -p 127.0.0.1:8080:8080 \
-  -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:latest
+  -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:vX.Y.Z
 ```
 
 查看初始管理员密码：`docker logs hop`

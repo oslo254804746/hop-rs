@@ -33,7 +33,7 @@ Most bastion/jump-server solutions are bloated Java/Python stacks with databases
 │  Managed Credentials  Server-side auth to targets       │
 │  ProxyJump/ProxyCmd   Allowlist-restricted TCP forward  │
 │  Admin Web            Lightweight management UI         │
-│  Import/Export        Bulk asset/credential transfer    │
+│  Import/Export        Asset and credential metadata     │
 │  TOFU Host Keys       Auto-trust on first connect       │
 │  i18n Admin           Multi-language admin interface    │
 └─────────────────────────────────────────────────────────┘
@@ -58,6 +58,31 @@ First boot auto-generates:
 
 Default ports: **SSH `0.0.0.0:2222`** | **Admin Web `127.0.0.1:8080`**
 
+## First Setup
+
+In another terminal, add your SSH public key to the Hop whitelist, then create a managed credential and asset:
+
+```bash
+./target/release/hop-server --config config.toml key add \
+  --name "alice laptop" \
+  --public-key-file ~/.ssh/id_ed25519.pub
+
+printf '%s' 'target-password' | ./target/release/hop-server --config config.toml credential add \
+  --name deploy-password \
+  --username deploy \
+  --auth-type password \
+  --password-stdin
+
+./target/release/hop-server --config config.toml asset add \
+  --name web-prod-01 \
+  --hostname 10.0.1.10 \
+  --port 22 \
+  --tags prod,web \
+  --credential-id <credential-id>
+```
+
+`credential add` prints the credential ID for `--credential-id`. Assets without managed credentials can still be used for ProxyJump forwarding.
+
 ## Usage
 
 ```bash
@@ -70,6 +95,8 @@ ssh -p 2222 web-prod-01@hop-host
 # ProxyJump — Hop as a transparent TCP relay
 ssh -J hop-host:2222 web-prod-01.hop
 ```
+
+Interactive TUI and direct-connect modes use Hop-managed credentials to reach targets. ProxyJump is an asset-allowlisted TCP relay; target authentication still comes from your local SSH client.
 
 ## Architecture
 
@@ -95,17 +122,19 @@ hop-server export --kind assets --format csv --output dump.csv
 hop-server import --file dump.csv --on-conflict skip
 ```
 
+Credential import/export transfers metadata only, such as `name`, `username`, and `auth_type`; passwords and private keys are never exported.
+
 ## Docker
 
 ```bash
 # Linux (recommended): host network preserves loopback binding
 docker run -d --name hop --network host \
-  -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:latest
+  -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:vX.Y.Z
 
-# Docker Desktop: bridge with loopback-only admin port
+# Docker Desktop: first set data/config.toml admin_bind to "0.0.0.0:8080"
 docker run -d --name hop \
   -p 2222:2222 -p 127.0.0.1:8080:8080 \
-  -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:latest
+  -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:vX.Y.Z
 ```
 
 Initial admin password: `docker logs hop`
