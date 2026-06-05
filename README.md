@@ -1,10 +1,12 @@
 <div align="center">
 
+**中文** | [English](README-EN.md)
+
 # 🦀 Hop
 
-**Minimal SSH bastion, maximum control.**
+**极简 SSH 跳板机，极致掌控。**
 
-A single Rust binary that replaces your bloated jump server with pubkey auth, a TUI asset picker, managed credentials, and proxy-aware forwarding — all backed by SQLite.
+一个 Rust 单二进制文件，用公钥认证、TUI 资产选择器、托管凭证和代理转发，替代你臃肿的跳板机方案 —— 全部由 SQLite 驱动。
 
 [![CI](https://github.com/oslo254804746/hop-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/oslo254804746/hop-rs/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -13,79 +15,79 @@ A single Rust binary that replaces your bloated jump server with pubkey auth, a 
 
 ---
 
-## Why Hop?
+## 为什么选 Hop？
 
-Most bastion/jump-server solutions are bloated Java/Python stacks with databases, caches, message queues, and admin panels that take a week to deploy. Hop is the opposite:
+大多数跳板机/堡垒机方案是臃肿的 Java/Python 全家桶，需要数据库、缓存、消息队列和各种管理面板，部署一套要一周。Hop 反其道而行：
 
-- **Single binary** — `hop-server` does everything
-- **Zero external deps** — SQLite bundled, no Redis/Postgres/RabbitMQ
-- **Secure by default** — Admin Web on loopback, credentials encrypted with ChaCha20-Poly1305
-- **SSH-native** — your users just `ssh`, no proprietary client needed
+- **单二进制** —— `hop-server` 一个文件搞定一切
+- **零外部依赖** —— SQLite 内嵌，不需要 Redis/Postgres/RabbitMQ
+- **默认安全** —— Admin Web 仅监听本地回环，凭证使用 ChaCha20-Poly1305 加密
+- **SSH 原生** —— 用户只需要 `ssh`，无需专属客户端
 
-## Features
+## 功能一览
 
 ```text
-┌─────────────────────────────────────────────────────────┐
-│  Pubkey Whitelist     Only trusted keys enter Hop       │
-│  TUI Asset Picker     Fuzzy search, connect in seconds  │
-│  Managed Credentials  Server-side auth to targets       │
-│  ProxyJump/ProxyCmd   Allowlist-restricted TCP forward  │
-│  Admin Web            Lightweight management UI         │
-│  Import/Export        Bulk asset/credential transfer    │
-│  TOFU Host Keys       Auto-trust on first connect       │
-│  i18n Admin           Multi-language admin interface    │
-└─────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│  公钥白名单        仅受信密钥可进入 Hop               │
+│  TUI 资产选择器    模糊搜索，秒级连接                 │
+│  托管凭证          服务端代理认证目标主机             │
+│  ProxyJump 转发    受资产白名单约束的 TCP 转发        │
+│  Admin Web         轻量管理界面                       │
+│  批量导入/导出     资产与凭证批量迁移                 │
+│  TOFU 主机密钥     首次连接自动信任                   │
+│  i18n 管理界面     多语言支持                         │
+└────────────────────────────────────────────────────────┘
 ```
 
-## Quick Start
+## 快速开始
 
 ```bash
-# Build
+# 构建
 cargo build --release -p hop-server
 
-# Run
+# 运行
 cp config.example.toml config.toml
 ./target/release/hop-server serve --config config.toml
 ```
 
-First boot auto-generates:
-- SQLite database
-- Ed25519 host key
-- ChaCha20-Poly1305 master key (`hop.secret`)
-- One-time admin password (printed to stdout)
+首次启动自动生成：
+- SQLite 数据库
+- Ed25519 主机密钥
+- ChaCha20-Poly1305 主密钥（`hop.secret`）
+- 一次性管理员密码（输出到终端）
 
-Default ports: **SSH `0.0.0.0:2222`** | **Admin Web `127.0.0.1:8080`**
+默认端口：**SSH `0.0.0.0:2222`** | **Admin Web `127.0.0.1:8080`**
 
-## Usage
+## 使用方式
 
 ```bash
-# Interactive TUI — fuzzy search your fleet
+# 交互式 TUI —— 模糊搜索你的服务器
 ssh -p 2222 hop-host
 
-# Direct connect — asset name as SSH username
+# 直连模式 —— 资产名作为 SSH 用户名
 ssh -p 2222 web-prod-01@hop-host
 
-# ProxyJump — Hop as a transparent TCP relay
+# ProxyJump —— Hop 作为透明 TCP 中继
 ssh -J hop-host:2222 web-prod-01.hop
 ```
 
-## Architecture
+## 项目结构
 
 ```text
 crates/
-├── hop-core/       Config, models, SQLite, credential encryption
-└── hop-server/     SSH server, TUI, Admin Web, local CLI
-migrations/         SQLite schema migrations
-systemd/            Production service unit
+├── hop-core/       配置、模型、SQLite、凭证加密
+└── hop-server/     SSH 服务、TUI、Admin Web、本机 CLI
+migrations/         SQLite schema 迁移
+systemd/            生产环境 systemd 服务单元
 ```
 
-**Stack:** `russh` · `ratatui` · `axum` · `sqlx` · `chacha20poly1305` · `maud`
+**技术栈：** `russh` · `ratatui` · `axum` · `sqlx` · `chacha20poly1305` · `maud`
 
-## CLI Reference
+## CLI 参考
 
 ```bash
-hop-server serve                    # Start the server (default)
-hop-server reset-admin              # Reset admin password
+hop-server serve                    # 启动服务（默认）
+hop-server reset-admin              # 重置管理员密码
 hop-server key add|list|activate|deactivate
 hop-server credential add|list|delete
 hop-server asset add|list|delete
@@ -96,46 +98,46 @@ hop-server import --file dump.csv --on-conflict skip
 ## Docker
 
 ```bash
-# Linux (recommended): host network preserves loopback binding
+# Linux（推荐）：host 网络保持回环绑定
 docker run -d --name hop --network host \
   -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:latest
 
-# Docker Desktop: bridge with loopback-only admin port
+# Docker Desktop：bridge 网络 + 仅本地回环映射管理端口
 docker run -d --name hop \
   -p 2222:2222 -p 127.0.0.1:8080:8080 \
   -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:latest
 ```
 
-Initial admin password: `docker logs hop`
+查看初始管理员密码：`docker logs hop`
 
-## Deployment
+## 部署
 
-Full deployment guide (binary, systemd, Docker, upgrades, backup, troubleshooting):
+完整部署指南（二进制、systemd、Docker、升级、备份、排障）：
 
 **→ [docs/deployment.md](docs/deployment.md)**
 
-## Security Model
+## 安全模型
 
-| Layer | Mechanism |
-|-------|-----------|
-| Hop entry auth | SSH public key whitelist only |
-| Credential storage | ChaCha20-Poly1305 + HKDF-SHA256 |
-| Admin Web auth | Argon2 password hash |
-| ProxyJump targets | Asset allowlist enforcement |
-| Admin Web exposure | Loopback-only by default |
+| 层级 | 机制 |
+|------|------|
+| Hop 入口认证 | 仅 SSH 公钥白名单 |
+| 凭证存储 | ChaCha20-Poly1305 + HKDF-SHA256 |
+| Admin Web 认证 | Argon2 密码哈希 |
+| ProxyJump 目标 | 资产白名单强制校验 |
+| Admin Web 暴露面 | 默认仅监听回环地址 |
 
-> **`hop.secret` is your crown jewel.** Lose it and all stored credentials become unrecoverable. Back it up.
+> **`hop.secret` 是你的命根子。** 丢了它，所有已存储的凭证将无法恢复。务必备份。
 
-## Backup
+## 备份
 
-Three files, one atomic snapshot:
+三个文件，一次原子快照：
 
 ```bash
-hop.db          # Everything: assets, keys, sessions, encrypted creds
-hop.secret      # Master key — unrecoverable if lost
-hop_host_key    # SSH host identity
+hop.db          # 所有数据：资产、密钥、会话、加密凭证
+hop.secret      # 主密钥 —— 丢失不可恢复
+hop_host_key    # SSH 主机身份
 ```
 
-## License
+## 许可证
 
-MIT
+[MIT](LICENSE)
