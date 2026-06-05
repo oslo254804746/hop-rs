@@ -12,7 +12,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use hop_core::{load_or_create_master_key, AuthType, HopConfig, HopDb, MasterKey};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::admin::transfer::{ConflictPolicy, TransferFormat, TransferKind};
 
@@ -404,6 +404,9 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
     }
     let ssh_bind = config.ssh_bind_addr()?;
     let admin_bind = config.admin_bind_addr()?;
+    if let Some(message) = admin_bind_exposure_warning(&config)? {
+        warn!("{message}");
+    }
     let admin = admin::routes::serve_admin(admin_bind, db.clone(), master_key.clone());
     let ssh = ssh::server::serve_ssh(ssh_bind, config, db, master_key);
     info!("starting hop-server");
@@ -424,11 +427,19 @@ async fn open_runtime(config_path: Option<PathBuf>) -> Result<(HopDb, HopConfig,
 }
 
 fn validate_admin_bind(config: &HopConfig) -> Result<()> {
-    let admin_bind = config.admin_bind_addr()?;
-    if !admin_bind.ip().is_loopback() {
-        bail!("admin_bind must use a loopback address for MVP Admin Web: {admin_bind}");
-    }
+    config.admin_bind_addr()?;
     Ok(())
+}
+
+fn admin_bind_exposure_warning(config: &HopConfig) -> Result<Option<String>> {
+    let admin_bind = config.admin_bind_addr()?;
+    if admin_bind.ip().is_loopback() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "Admin Web is listening on {admin_bind}; protect it with a firewall, VPN, \
+         host-local port mapping, or trusted management network"
+    )))
 }
 
 #[cfg(test)]
@@ -436,21 +447,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn admin_bind_must_be_loopback() {
+    fn admin_bind_accepts_loopback() {
         let mut config = HopConfig::default();
         assert!(validate_admin_bind(&config).is_ok());
 
         config.server.admin_bind = "[::1]:8080".to_string();
         assert!(validate_admin_bind(&config).is_ok());
+    }
 
+    #[test]
+    fn admin_bind_allows_non_loopback_when_configured() {
+        let mut config = HopConfig::default();
         config.server.admin_bind = "0.0.0.0:8080".to_string();
-        assert!(validate_admin_bind(&config).is_err());
+        assert!(validate_admin_bind(&config).is_ok());
 
         config.server.admin_bind = "[::]:8080".to_string();
-        assert!(validate_admin_bind(&config).is_err());
+        assert!(validate_admin_bind(&config).is_ok());
 
         config.server.admin_bind = "192.168.1.10:8080".to_string();
-        assert!(validate_admin_bind(&config).is_err());
+        assert!(validate_admin_bind(&config).is_ok());
+    }
+
+    #[test]
+    fn non_loopback_admin_bind_gets_warning() {
+        let mut config = HopConfig::default();
+        assert!(admin_bind_exposure_warning(&config).unwrap().is_none());
+
+        config.server.admin_bind = "0.0.0.0:8080".to_string();
+        let warning = admin_bind_exposure_warning(&config).unwrap().unwrap();
+        assert!(warning.contains("0.0.0.0:8080"));
+        assert!(warning.contains("firewall"));
     }
 
     #[test]

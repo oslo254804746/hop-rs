@@ -1,5 +1,7 @@
 [server]
 ssh_bind = "0.0.0.0:2222"
+# Prefer 127.0.0.1 for Admin Web. If you bind 0.0.0.0, keep it behind
+# a host-local port mapping, firewall, VPN, or trusted management network.
 admin_bind = "127.0.0.1:8080"
 
 [database]

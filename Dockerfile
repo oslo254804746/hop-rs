@@ -8,15 +8,19 @@ RUN cargo build --release -p hop-server \
 
 FROM debian:bookworm-slim
 
-RUN useradd --system --create-home --home-dir /var/lib/hop hop
-WORKDIR /var/lib/hop
+RUN useradd --system --create-home --home-dir /data hop \
+    && mkdir -p /usr/share/hop \
+    && chown -R hop:hop /data
+WORKDIR /data
 
 COPY --from=build /usr/local/bin/hop-server /usr/local/bin/hop-server
-COPY config.example.toml /etc/hop/config.toml
+COPY config.docker.toml /usr/share/hop/config.docker.toml
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN mkdir -p /etc/hop /var/lib/hop && chown -R hop:hop /var/lib/hop
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
-USER hop
-EXPOSE 2222
+VOLUME ["/data"]
+EXPOSE 2222 8080
 
-CMD ["hop-server", "serve", "--config", "/etc/hop/config.toml"]
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["hop-server", "serve", "--config", "/data/config.toml"]

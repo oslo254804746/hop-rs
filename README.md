@@ -2,7 +2,7 @@
 
 Hop 是一个轻量级 SSH 跳板机 MVP。它把 SSH 公钥白名单、TUI 资产选择、服务器托管凭证连接目标主机，以及受资产 allowlist 限制的 ProxyJump/ProxyCommand 放在一个 Rust 服务里。
 
-当前目标是保持部署简单：单服务、SQLite only、默认只暴露 SSH 服务端口，管理端口只绑定本机 loopback。
+当前目标是保持部署简单：单服务、SQLite only、默认只暴露 SSH 服务端口，管理端口默认绑定本机 loopback。
 
 ## 能力边界
 
@@ -53,7 +53,15 @@ hop-server serve --config config.toml
 - SSH 服务：`0.0.0.0:2222`
 - Admin Web：`127.0.0.1:8080`
 
-Admin Web 在 MVP 中强制绑定 loopback。远程访问时，请通过宿主机系统 SSH 或管理网络建立隧道，不要把 Admin Web 直接暴露到公网。
+Admin Web 默认绑定 loopback。远程访问时，请通过宿主机系统 SSH 或管理网络建立隧道；如果主动改成 `0.0.0.0:8080`，请用防火墙、VPN、宿主机本地端口映射或可信管理网络限制访问。
+
+Docker 镜像会把配置和运行数据集中到 `/data`，首次启动会自动生成 `/data/config.toml`。Linux 主机推荐用 host network：
+
+```bash
+docker run -d --name hop --network host -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:latest
+```
+
+Docker Desktop 上不要依赖 `--network=host` 访问 Admin Web；请按 [部署文档](docs/deployment.md) 使用 bridge 网络和宿主机 loopback 端口映射。
 
 ## 本机管理 CLI
 
@@ -134,7 +142,7 @@ ProxyJump allowlist 支持：
 
 ## 备份
 
-请把下面三个文件作为同一批次备份：
+请把下面三个文件作为同一批次备份；Docker 部署可直接备份整个 `/data` 挂载目录：
 
 - SQLite 数据库
 - `hop.secret`
