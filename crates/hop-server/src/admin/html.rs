@@ -1,10 +1,24 @@
 use hop_core::{Asset, AuthorizedKey, Credential, KnownHost, Session};
-use maud::{html, Markup, DOCTYPE};
+use maud::{html, Markup, PreEscaped, DOCTYPE};
 
 use super::{
     i18n::{L10n, Locale},
     transfer::ImportSummary,
 };
+
+const ICON_OVERVIEW: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>"#;
+
+const ICON_ASSETS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1"/><circle cx="6" cy="18" r="1"/></svg>"#;
+
+const ICON_CREDENTIALS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>"#;
+
+const ICON_KEYS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10a4 4 0 0 0-8 0c0 3 2 5.5 4 7.5C10 15.5 12 13 12 10z"/><path d="M12 10a4 4 0 0 1 8 0c0 3-2 5.5-4 7.5C14 15.5 12 13 12 10z"/><path d="M12 2v2"/><path d="M12 18v4"/></svg>"#;
+
+const ICON_KNOWN_HOSTS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>"#;
+
+const ICON_SESSIONS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>"#;
+
+const ICON_IMPORT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M8 21H3v-5"/><path d="M21 3l-9 9"/><path d="M3 21l9-9"/></svg>"#;
 
 pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Markup {
     let alternate = t.locale.alternate();
@@ -19,20 +33,63 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                 style {
                     r#"
                     :root {
-                        color-scheme: light;
-                        --ink: #171a1f;
-                        --ink-soft: #4d5562;
-                        --muted: #737b88;
-                        --line: #dfe4e0;
-                        --surface: #ffffff;
-                        --surface-soft: #f6f8f5;
-                        --field: #fbfcfb;
-                        --accent: #0f766e;
-                        --accent-strong: #0b5f59;
-                        --accent-soft: #d9efec;
-                        --danger: #b42318;
-                        --danger-soft: #fde8e6;
-                        --shadow: 0 18px 50px rgba(23, 26, 31, 0.08);
+                        color-scheme: dark;
+                        --bg: #0a0e14;
+                        --surface: #141920;
+                        --surface-raised: #1a2230;
+                        --field: #0f1318;
+                        --border: rgba(0, 229, 199, 0.12);
+                        --border-glow: rgba(0, 229, 199, 0.25);
+                        --ink: #e0e6ed;
+                        --ink-soft: #8b9ab0;
+                        --muted: #5a6a7e;
+                        --accent: #00e5c7;
+                        --accent-strong: #00ffdd;
+                        --accent-soft: rgba(0, 229, 199, 0.1);
+                        --danger: #ff4d4d;
+                        --danger-soft: rgba(255, 77, 77, 0.1);
+                        --shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+                        --glow: 0 0 20px rgba(0, 229, 199, 0.06);
+                        --sidebar-bg: rgba(10, 14, 20, 0.85);
+                        --sidebar-ink: #c8d4e0;
+                        --sidebar-muted: #5a6a7e;
+                        --topbar-bg: rgba(10, 14, 20, 0.8);
+                        --topbar-border: rgba(0, 229, 199, 0.08);
+                        --table-stripe: rgba(26, 34, 48, 0.5);
+                        --table-hover: rgba(0, 229, 199, 0.04);
+                        --tag-bg: rgba(0, 229, 199, 0.08);
+                        --tag-ink: #00e5c7;
+                    }
+
+                    @media (prefers-color-scheme: light) {
+                        :root {
+                            color-scheme: light;
+                            --bg: #f4f7f6;
+                            --surface: #ffffff;
+                            --surface-raised: #f8faf9;
+                            --field: #fbfcfb;
+                            --border: #dfe4e0;
+                            --border-glow: rgba(15, 118, 110, 0.2);
+                            --ink: #171a1f;
+                            --ink-soft: #4d5562;
+                            --muted: #737b88;
+                            --accent: #0f766e;
+                            --accent-strong: #0b5f59;
+                            --accent-soft: #d9efec;
+                            --danger: #b42318;
+                            --danger-soft: #fde8e6;
+                            --shadow: 0 18px 50px rgba(23, 26, 31, 0.08);
+                            --glow: none;
+                            --sidebar-bg: #171a1f;
+                            --sidebar-ink: #c9d3cf;
+                            --sidebar-muted: #9ca8a4;
+                            --topbar-bg: rgba(246, 248, 245, 0.9);
+                            --topbar-border: rgba(223, 228, 224, 0.85);
+                            --table-stripe: #f8faf8;
+                            --table-hover: #f4faf8;
+                            --tag-bg: #edf4ef;
+                            --tag-ink: #315849;
+                        }
                     }
 
                     * { box-sizing: border-box; }
@@ -40,9 +97,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     body.admin-shell {
                         margin: 0;
                         min-height: 100vh;
-                        background:
-                            linear-gradient(135deg, rgba(15, 118, 110, 0.08), transparent 34%),
-                            var(--surface-soft);
+                        background: var(--bg);
                         color: var(--ink);
                         font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
                         letter-spacing: 0;
@@ -52,7 +107,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
 
                     .app-frame {
                         display: grid;
-                        grid-template-columns: 278px minmax(0, 1fr);
+                        grid-template-columns: 268px minmax(0, 1fr);
                         min-height: 100vh;
                     }
 
@@ -60,9 +115,11 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         position: sticky;
                         top: 0;
                         height: 100svh;
-                        padding: 24px 18px;
-                        background: #171a1f;
-                        color: #eef4f1;
+                        padding: 24px 16px;
+                        background: var(--sidebar-bg);
+                        backdrop-filter: blur(20px);
+                        border-right: 1px solid var(--border);
+                        color: var(--sidebar-ink);
                         display: flex;
                         flex-direction: column;
                         gap: 28px;
@@ -70,30 +127,32 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
 
                     .brand {
                         display: grid;
-                        grid-template-columns: 44px minmax(0, 1fr);
+                        grid-template-columns: 42px minmax(0, 1fr);
                         gap: 12px;
                         align-items: center;
                         padding: 0 6px;
                     }
 
                     .brand-mark {
-                        width: 44px;
-                        height: 44px;
-                        border-radius: 8px;
+                        width: 42px;
+                        height: 42px;
+                        border-radius: 10px;
                         display: grid;
                         place-items: center;
-                        background: var(--accent);
-                        color: white;
+                        background: rgba(0, 229, 199, 0.12);
+                        border: 1px solid rgba(0, 229, 199, 0.3);
+                        color: var(--accent);
                         font-weight: 800;
                         font-size: 1.1rem;
+                        text-shadow: 0 0 10px rgba(0, 229, 199, 0.5);
                     }
 
-                    .brand strong { display: block; font-size: 1.04rem; }
-                    .brand span { color: #aab4b0; font-size: 0.82rem; }
+                    .brand strong { display: block; font-size: 1.04rem; color: #fff; }
+                    .brand span { color: var(--sidebar-muted); font-size: 0.82rem; }
 
                     .nav {
                         display: grid;
-                        gap: 5px;
+                        gap: 4px;
                     }
 
                     .nav-link {
@@ -103,48 +162,50 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         gap: 10px;
                         padding: 9px 10px;
                         border-radius: 8px;
-                        color: #c9d3cf;
+                        color: var(--sidebar-ink);
                         text-decoration: none;
-                        font-weight: 650;
-                        font-size: 0.92rem;
+                        font-weight: 600;
+                        font-size: 0.9rem;
                         transition: background 160ms ease, color 160ms ease, transform 160ms ease;
                     }
 
-                    .nav-link::before {
-                        content: "";
-                        width: 8px;
-                        height: 8px;
-                        border-radius: 999px;
-                        background: #66716d;
+                    .nav-link svg {
+                        width: 18px;
+                        height: 18px;
+                        opacity: 0.6;
+                        flex-shrink: 0;
+                        transition: opacity 160ms ease;
                     }
 
                     .nav-link:hover {
-                        background: rgba(255, 255, 255, 0.07);
-                        color: white;
+                        background: rgba(0, 229, 199, 0.06);
+                        color: #fff;
                         transform: translateX(2px);
                     }
 
+                    .nav-link:hover svg { opacity: 1; }
+
                     .nav-link.active {
-                        background: rgba(15, 118, 110, 0.22);
-                        color: white;
+                        background: rgba(0, 229, 199, 0.12);
+                        color: #fff;
                     }
 
-                    .nav-link.active::before { background: #62d6cb; }
+                    .nav-link.active svg { opacity: 1; color: var(--accent); }
 
                     .sidebar-footer {
                         margin-top: auto;
                         padding: 14px;
-                        border: 1px solid rgba(255, 255, 255, 0.1);
+                        border: 1px solid var(--border);
                         border-radius: 8px;
-                        background: rgba(255, 255, 255, 0.05);
-                        color: #dce5e1;
-                        font-size: 0.86rem;
+                        background: rgba(0, 229, 199, 0.03);
+                        color: var(--sidebar-ink);
+                        font-size: 0.84rem;
                     }
 
                     .sidebar-footer small {
                         display: block;
                         margin-top: 4px;
-                        color: #9ca8a4;
+                        color: var(--sidebar-muted);
                         line-height: 1.45;
                     }
 
@@ -154,8 +215,8 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         display: inline-block;
                         margin-right: 8px;
                         border-radius: 999px;
-                        background: #62d6cb;
-                        box-shadow: 0 0 0 4px rgba(98, 214, 203, 0.14);
+                        background: var(--accent);
+                        box-shadow: 0 0 8px rgba(0, 229, 199, 0.4);
                     }
 
                     .language-switch {
@@ -165,11 +226,11 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         gap: 10px;
                         margin-top: 12px;
                         padding-top: 12px;
-                        border-top: 1px solid rgba(255, 255, 255, 0.1);
+                        border-top: 1px solid var(--border);
                     }
 
                     .language-switch a {
-                        color: #62d6cb;
+                        color: var(--accent);
                         font-weight: 780;
                         text-decoration: none;
                     }
@@ -185,8 +246,8 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         justify-content: space-between;
                         gap: 20px;
                         padding: 28px 38px 18px;
-                        border-bottom: 1px solid rgba(223, 228, 224, 0.85);
-                        background: rgba(246, 248, 245, 0.9);
+                        border-bottom: 1px solid var(--topbar-border);
+                        background: var(--topbar-bg);
                         backdrop-filter: blur(14px);
                     }
 
@@ -196,6 +257,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         font-size: 0.76rem;
                         font-weight: 800;
                         text-transform: uppercase;
+                        letter-spacing: 0.05em;
                     }
 
                     .topbar h1 {
@@ -230,10 +292,15 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     .panel {
                         margin: 0 0 22px;
                         padding: 22px;
-                        border: 1px solid var(--line);
-                        border-radius: 8px;
-                        background: rgba(255, 255, 255, 0.88);
-                        box-shadow: var(--shadow);
+                        border: 1px solid var(--border);
+                        border-radius: 10px;
+                        background: var(--surface);
+                        box-shadow: var(--glow);
+                        transition: border-color 200ms ease, box-shadow 200ms ease;
+                    }
+
+                    .panel:hover {
+                        border-color: var(--border-glow);
                     }
 
                     .panel-header {
@@ -281,25 +348,34 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     .metric {
                         min-height: 132px;
                         padding: 18px;
-                        border: 1px solid var(--line);
-                        border-radius: 8px;
+                        border: 1px solid var(--border);
+                        border-radius: 10px;
                         background: var(--surface);
                         display: flex;
                         flex-direction: column;
                         justify-content: space-between;
-                        box-shadow: var(--shadow);
+                        box-shadow: var(--glow);
+                        transition: border-color 200ms ease, box-shadow 200ms ease;
+                    }
+
+                    .metric:hover {
+                        border-color: var(--border-glow);
                     }
 
                     .metric-label {
                         color: var(--muted);
                         font-size: 0.84rem;
                         font-weight: 700;
+                        text-transform: uppercase;
+                        letter-spacing: 0.03em;
                     }
 
                     .metric-value {
                         font-size: 2.35rem;
                         line-height: 1;
                         font-weight: 850;
+                        color: var(--accent);
+                        text-shadow: 0 0 14px rgba(0, 229, 199, 0.3);
                     }
 
                     .metric-note {
@@ -319,7 +395,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         width: 100%;
                         min-height: 42px;
                         padding: 10px 11px;
-                        border: 1px solid #cfd7d2;
+                        border: 1px solid var(--border);
                         border-radius: 7px;
                         background: var(--field);
                         color: var(--ink);
@@ -337,8 +413,8 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     input:focus, select:focus, textarea:focus {
                         outline: 0;
                         border-color: var(--accent);
-                        background: white;
-                        box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.13);
+                        background: var(--surface);
+                        box-shadow: 0 0 0 3px rgba(0, 229, 199, 0.15);
                     }
 
                     input[type="hidden"] { display: none; }
@@ -362,33 +438,38 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
 
                     button, .button {
                         background: var(--accent);
-                        color: white;
-                        box-shadow: 0 9px 22px rgba(15, 118, 110, 0.2);
+                        color: #0a0e14;
+                        box-shadow: 0 4px 16px rgba(0, 229, 199, 0.2);
                     }
 
                     button:hover, .button:hover {
                         background: var(--accent-strong);
                         transform: translateY(-1px);
+                        box-shadow: 0 6px 24px rgba(0, 229, 199, 0.3);
                     }
 
                     .ghost-button {
-                        border: 1px solid var(--line);
-                        background: white;
+                        border: 1px solid var(--border);
+                        background: transparent;
                         color: var(--ink);
                     }
 
                     .ghost-button:hover {
-                        border-color: #c5cec8;
+                        border-color: var(--border-glow);
+                        background: var(--accent-soft);
                         transform: translateY(-1px);
                     }
 
                     button.danger, .danger {
                         background: var(--danger);
                         color: white;
-                        box-shadow: 0 9px 22px rgba(180, 35, 24, 0.15);
+                        box-shadow: 0 4px 16px rgba(255, 77, 77, 0.15);
                     }
 
-                    button.danger:hover, .danger:hover { background: #961f16; }
+                    button.danger:hover, .danger:hover {
+                        background: #ff6666;
+                        box-shadow: 0 6px 24px rgba(255, 77, 77, 0.25);
+                    }
 
                     .muted, .fine-print {
                         color: var(--muted);
@@ -402,6 +483,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         background: var(--danger-soft);
                         color: var(--danger);
                         font-weight: 720;
+                        border: 1px solid rgba(255, 77, 77, 0.2);
                     }
 
                     .fine-print {
@@ -411,9 +493,9 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
 
                     .table-wrap {
                         overflow-x: auto;
-                        border: 1px solid var(--line);
-                        border-radius: 8px;
-                        background: white;
+                        border: 1px solid var(--border);
+                        border-radius: 10px;
+                        background: var(--surface);
                     }
 
                     table.data-table {
@@ -425,22 +507,27 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     .data-table th,
                     .data-table td {
                         padding: 13px 14px;
-                        border-bottom: 1px solid var(--line);
+                        border-bottom: 1px solid var(--border);
                         text-align: left;
                         vertical-align: top;
                     }
 
                     .data-table th {
                         color: var(--muted);
-                        background: #f8faf8;
+                        background: var(--surface-raised);
                         font-size: 0.76rem;
                         font-weight: 800;
                         text-transform: uppercase;
+                        letter-spacing: 0.03em;
                     }
 
                     .data-table tr:last-child td { border-bottom: 0; }
-                    .data-table tbody tr { transition: background 140ms ease; }
-                    .data-table tbody tr:hover { background: #f4faf8; }
+                    .data-table tbody tr { transition: background 160ms ease, box-shadow 160ms ease; }
+                    .data-table tbody tr:nth-child(even) { background: var(--table-stripe); }
+                    .data-table tbody tr:hover {
+                        background: var(--table-hover);
+                        box-shadow: inset 3px 0 0 var(--accent);
+                    }
 
                     .primary-cell {
                         display: grid;
@@ -459,6 +546,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         font-size: 0.84rem;
                         line-height: 1.45;
                         word-break: break-all;
+                        color: var(--accent);
                     }
 
                     .tag-list, .secret-list, .action-row {
@@ -502,18 +590,19 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     }
 
                     .tag {
-                        background: #edf4ef;
-                        color: #315849;
+                        background: var(--tag-bg);
+                        color: var(--tag-ink);
                     }
 
                     .status-pill {
                         background: var(--accent-soft);
-                        color: var(--accent-strong);
+                        color: var(--accent);
                     }
 
                     .status-pill.neutral {
-                        background: #edf0f2;
-                        color: #55606d;
+                        background: var(--surface-raised);
+                        color: var(--muted);
+                        border: 1px solid var(--border);
                     }
 
                     .status-pill.danger {
@@ -537,10 +626,11 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
 
                     pre {
                         white-space: pre-wrap;
-                        border: 1px solid var(--line);
+                        border: 1px solid var(--border);
                         border-radius: 8px;
-                        background: white;
+                        background: var(--surface);
                         padding: 14px;
+                        color: var(--ink);
                     }
 
                     @media (max-width: 900px) {
@@ -592,13 +682,13 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                             }
                         }
                         nav.nav aria-label=(t.nav_primary) {
-                            (nav_link("/", t.nav_overview, active == "overview"))
-                            (nav_link("/assets", t.nav_assets, active == "assets"))
-                            (nav_link("/credentials", t.nav_credentials, active == "credentials"))
-                            (nav_link("/keys", t.nav_keys, active == "keys"))
-                            (nav_link("/known-hosts", t.nav_known_hosts, active == "known-hosts"))
-                            (nav_link("/sessions", t.nav_sessions, active == "sessions"))
-                            (nav_link("/import", t.nav_import_export, active == "import"))
+                            (nav_link("/", t.nav_overview, ICON_OVERVIEW, active == "overview"))
+                            (nav_link("/assets", t.nav_assets, ICON_ASSETS, active == "assets"))
+                            (nav_link("/credentials", t.nav_credentials, ICON_CREDENTIALS, active == "credentials"))
+                            (nav_link("/keys", t.nav_keys, ICON_KEYS, active == "keys"))
+                            (nav_link("/known-hosts", t.nav_known_hosts, ICON_KNOWN_HOSTS, active == "known-hosts"))
+                            (nav_link("/sessions", t.nav_sessions, ICON_SESSIONS, active == "sessions"))
+                            (nav_link("/import", t.nav_import_export, ICON_IMPORT, active == "import"))
                         }
                         div.sidebar-footer {
                             span.status-dot {}
@@ -1503,14 +1593,20 @@ pub fn import_export(t: &L10n, csrf_token: &str, summary: Option<&ImportSummary>
     )
 }
 
-fn nav_link(href: &str, label: &str, active: bool) -> Markup {
+fn nav_link(href: &str, label: &str, icon: &str, active: bool) -> Markup {
     if active {
         html! {
-            a class="nav-link active" href=(href) aria-current="page" { (label) }
+            a class="nav-link active" href=(href) aria-current="page" {
+                (PreEscaped(icon))
+                (label)
+            }
         }
     } else {
         html! {
-            a class="nav-link" href=(href) { (label) }
+            a class="nav-link" href=(href) {
+                (PreEscaped(icon))
+                (label)
+            }
         }
     }
 }
