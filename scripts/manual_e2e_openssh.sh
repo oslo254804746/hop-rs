@@ -72,12 +72,10 @@ Start Hop:
 
 Manual checks:
 
-  ssh -p 2222 127.0.0.1 hop-version
-  ssh -p 2222 127.0.0.1 hop-list-assets
-  ssh -tt -p 2222 127.0.0.1 'hop-connect e2e-target'
   ssh -p 2222 127.0.0.1
+  ssh -tt -p 2222 e2e-target@127.0.0.1
   ssh -J 127.0.0.1:2222 e2e-target.hop
 
 ProxyJump requires your local SSH client to have credentials for the target.
-Managed TUI / hop-connect uses the Hop-stored credential seeded above.
+Managed TUI and direct asset login use the Hop-stored credential seeded above.
 EOF

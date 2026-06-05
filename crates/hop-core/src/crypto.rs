@@ -99,7 +99,9 @@ pub fn decrypt_envelope(master: &MasterKey, context: &str, envelope: &str) -> Re
         return Err(HopCoreError::Crypto("malformed envelope".to_string()));
     }
     if parts[0] != ENVELOPE_VERSION || parts[1] != ENVELOPE_ALG {
-        return Err(HopCoreError::Crypto("unsupported envelope version or algorithm".to_string()));
+        return Err(HopCoreError::Crypto(
+            "unsupported envelope version or algorithm".to_string(),
+        ));
     }
     let nonce = STANDARD
         .decode(parts[2])

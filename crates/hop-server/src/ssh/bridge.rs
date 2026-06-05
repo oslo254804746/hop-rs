@@ -23,12 +23,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn managed_session_mode_distinguishes_tui_connects() {
+    fn managed_session_mode_distinguishes_user_visible_connects() {
         assert_eq!(managed_session_mode(ManagedSessionMode::Tui), "tui-connect");
-        assert_eq!(
-            managed_session_mode(ManagedSessionMode::Exec),
-            "exec-connect"
-        );
         assert_eq!(managed_session_mode(ManagedSessionMode::Direct), "direct");
     }
 }
@@ -50,7 +46,6 @@ pub struct ManagedBridgeOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagedSessionMode {
     Tui,
-    Exec,
     Direct,
 }
 
@@ -67,7 +62,6 @@ pub fn spawn_managed_bridge(options: ManagedBridgeOptions) -> BridgeControl {
 fn managed_session_mode(mode: ManagedSessionMode) -> &'static str {
     match mode {
         ManagedSessionMode::Tui => "tui-connect",
-        ManagedSessionMode::Exec => "exec-connect",
         ManagedSessionMode::Direct => "direct",
     }
 }
@@ -228,7 +222,7 @@ async fn run_managed_bridge(
                 .handle
                 .data(
                     options.channel_id,
-                    format!("\r\nhop-connect failed: {err}\r\n").into_bytes(),
+                    format!("\r\ndirect connection failed: {err}\r\n").into_bytes(),
                 )
                 .await;
         }

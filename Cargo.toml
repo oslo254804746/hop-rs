@@ -2,7 +2,6 @@
 members = [
     "crates/hop-core",
     "crates/hop-server",
-    "crates/hop-cli",
 ]
 resolver = "2"
 

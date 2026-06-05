@@ -44,7 +44,8 @@ pub fn hash_password(password: &str) -> Result<String> {
 }
 
 pub fn verify_password(hash: &str, password: &str) -> Result<bool> {
-    let parsed = PasswordHash::new(hash).map_err(|err| anyhow!("parse admin password hash: {err}"))?;
+    let parsed =
+        PasswordHash::new(hash).map_err(|err| anyhow!("parse admin password hash: {err}"))?;
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok())
