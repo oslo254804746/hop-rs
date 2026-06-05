@@ -111,8 +111,6 @@ hop/
 │   │           ├── routes.rs     # 管理后台 CRUD
 │   │           ├── auth.rs       # admin 密码认证
 │   │           └── html.rs       # maud/askama 服务端渲染
-│   └── hop-cli/                  # 本地 CLI wrapper，不直接访问 Admin API
-│       └── src/main.rs
 └── docs/
 ```
 
@@ -164,7 +162,7 @@ CREATE TABLE sessions (
     id          TEXT PRIMARY KEY,
     key_finger  TEXT NOT NULL,            -- 连接者的公钥指纹
     key_name    TEXT,                     -- 连接者备注名
-    mode        TEXT NOT NULL,            -- 'tui' | 'exec-connect' | 'proxyjump'
+    mode        TEXT NOT NULL,            -- 'tui' | 'tui-connect' | 'direct' | 'proxyjump'
     asset_name  TEXT,
     target_host TEXT,
     target_port INTEGER,
@@ -244,18 +242,15 @@ ssh -L 8080:127.0.0.1:8080 hop-server -p 2222
 
 ### 开发者：SSH 进入 TUI
 ```bash
-ssh hop-server -p 2222              # 公钥认证通过 → 进入 TUI
+ssh -p 2222 hop-server              # 公钥认证通过 → 进入 TUI
 ```
 
-### 开发者：本地 CLI
+### 开发者：资产名直连
 ```bash
-hop                                 # 启动 TUI（SSH 连接 hop server，等同 ssh hop -p 2222）
-hop ls                              # 通过 SSH exec 列出资产，不访问 Admin API
-hop connect myserver                # 通过 SSH exec 让 hop 使用托管凭证连接资产
-hop ssh-config                      # 输出推荐的 ~/.ssh/config 片段
+ssh -p 2222 myserver@hop-server     # 公钥认证通过 → Hop 使用托管凭证进入资产
 ```
 
-CLI 本质上是封装 SSH 协议的便捷工具，不直接访问 Admin API。所有开发者侧能力都走对外暴露的 SSH 端口，鉴权仍然是公钥白名单。
+SSH username 会被解释为资产名或资产 hostname。进入 Hop 的身份仍然来自公钥 fingerprint，目标主机用户名来自资产绑定的托管凭证。
 
 ### 高级：ProxyJump 直通
 ```bash
@@ -265,39 +260,11 @@ scp -J hop:2222 ./file target-host:/tmp/
 
 ProxyJump/ProxyCommand 模式不使用 hop 存储的目标凭证。用户本地 SSH 客户端必须能完成目标主机认证；hop 只负责验证进入 hop 的公钥、检查目标是否命中 assets allowlist、建立 TCP 转发和记录日志。
 
-推荐 SSH config：
-
-```sshconfig
-Host hop
-    HostName hop.example.com
-    Port 2222
-    User hop
-
-Host *.hop
-    ProxyJump hop
-    HostName %h
-```
-
 当 `host_to_connect` 是 `web-prod-01.hop` 时，hop 可去掉 `.hop` 后缀并按 asset name 查找真实 `hostname:port`；也可以直接接受 assets 表中的真实 `hostname:port`。两种形式都必须命中 assets 表，避免 hop 变成内网 open proxy。
 
-### SSH Exec 协议（给本地 CLI）
+### SSH Remote Command
 
-本地 `hop` CLI 只连 SSH 端口，不访问 Admin API：
-
-```text
-exec "hop-list-assets"
-  → stdout: JSON lines 或紧凑 JSON array，包含 name/hostname/port/tags/has_credential
-
-exec "hop-connect <asset-name>"
-  → 校验 asset 存在且有 credential
-  → hop 使用托管凭证 outbound SSH 到目标
-  → 当前 SSH channel 切入 raw bridge
-
-exec "hop-version"
-  → stdout: 版本和协议号
-```
-
-exec 命令只能暴露开发者日常能力，不提供资产/凭证/公钥写操作。写操作只在 Admin API 或本机管理 CLI 中开放。
+Hop 不提供面向开发者的 SSH remote command API。任何 `ssh hop-server <command>` 请求都会返回不支持消息并以非零状态退出；开发者入口只保留 TUI、资产名直连和 ProxyJump。
 
 ## TUI 界面
 
@@ -359,7 +326,7 @@ ProxyJump 模式是**纯 TCP 转发**（标准行为）：
 - 用户的 SSH 客户端自己通过隧道认证目标主机
 - hop 必须检查目标地址是否在 assets 表中，MVP 不允许任意内网地址转发
 
-凭证查找只在 TUI 或 `hop connect <asset>` 这种 server-side managed connection 中使用。`ssh -J`、`scp -J`、`sftp -J` 永远不使用 hop 托管凭证。
+凭证查找只在 TUI 或资产名直连这种 server-side managed connection 中使用。`ssh -J`、`scp -J`、`sftp -J` 永远不使用 hop 托管凭证。
 
 资产匹配规则：
 
@@ -457,8 +424,7 @@ Post-MVP 再设计 server-managed 文件传输：
   → 判断请求类型：
      ├─ shell/pty 请求 → 启动 TUI（传入 PTY handle）
      ├─ direct-tcpip (ProxyJump/ProxyCommand -W) → 查 asset allowlist → 纯 TCP 桥接
-     ├─ exec "hop-list-assets" → 返回资产列表（给本地 hop CLI 使用）
-     └─ exec "hop-connect xxx" → 查 asset + credential → outbound SSH → raw bridge
+     └─ exec 请求 → 返回不支持 SSH remote commands，并以非零状态退出
 ```
 
 ## 关键依赖
@@ -486,14 +452,13 @@ SQLite 零依赖部署要求使用 bundled SQLite。实现时确认 `sqlx`/`libs
 
 1. **Core + DB** — 模型、SQLite 迁移、配置解析、凭证加密 envelope、WAL/busy_timeout
 2. **最小管理入口** — `reset-admin`、本机 CRUD CLI 或极简 Admin API，用来录入公钥/资产/凭证
-3. **SSH Server** — russh 服务端、公钥白名单认证、PTY/shell/exec/direct-tcpip 路由
+3. **SSH Server** — russh 服务端、公钥白名单认证、PTY/shell/direct-tcpip 路由，exec 请求统一拒绝
 4. **Outbound SSH + Raw Bridge** — 先用硬编码/DB asset 打通 hop server channel ↔ 目标 SSH channel，覆盖 resize、Ctrl+C、EOF、exit status
 5. **TUI** — ratatui 资产列表 + fuzzy search + 键盘交互，Enter 后切入 raw bridge，断开后返回 TUI
 6. **ProxyJump/ProxyCommand** — direct-tcpip 纯 TCP 转发 + assets allowlist + 日志，支持 `<asset>.hop`
 7. **Admin Web** — axum + server-rendered HTML 管理资产/凭证/公钥/known_hosts/sessions
-8. **CLI** — 本地 `hop` wrapper：TUI、`ls`、`connect`、`ssh-config`，全部走 SSH 端口
-9. **Polish** — 错误处理、首次启动引导、Docker、文档、release profile、备份提示
-10. **Post-MVP File Transfer** — SFTP subsystem / 暂存目录 / TUI 文件浏览器 / ZMODEM 可选增强
+8. **Polish** — 错误处理、首次启动引导、Docker、文档、release profile、备份提示
+9. **Post-MVP File Transfer** — SFTP subsystem / 暂存目录 / TUI 文件浏览器 / ZMODEM 可选增强
 
 ## 验证方式
 
@@ -502,6 +467,6 @@ SQLite 零依赖部署要求使用 bundled SQLite。实现时确认 `sqlx`/`libs
 3. `ssh hop -p 2222` → 进入 TUI → 看到资产列表
 4. TUI 中搜索并 Enter 连接目标
 5. 目标连接退出后自动返回 TUI，终端状态正常
-6. `ssh -J hop:2222 target` ProxyJump 直通，仅当 target 命中 assets allowlist
-7. `scp -J hop:2222` 在用户本地具备目标凭证时正常工作
-8. 本地 `hop ls` / `hop connect` / `hop ssh-config` 正常工作，且不访问 Admin API
+6. `ssh -p 2222 web-prod-01@hop` 资产名直连，使用 Hop 托管凭证进入目标
+7. `ssh -J hop:2222 target` ProxyJump 直通，仅当 target 命中 assets allowlist
+8. `scp -J hop:2222` 在用户本地具备目标凭证时正常工作

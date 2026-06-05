@@ -1460,16 +1460,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hop"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "hop-core"
 version = "0.1.0"
 dependencies = [

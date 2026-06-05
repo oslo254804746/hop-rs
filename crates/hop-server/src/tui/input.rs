@@ -34,11 +34,17 @@ impl InputAdapter {
 fn map_event(event: InputEvent) -> Option<TuiInput> {
     match event {
         InputEvent::Key(key) => match key.key {
-            KeyCode::Char('c') | KeyCode::Char('C') if key.modifiers.contains(Modifiers::CTRL) => Some(TuiInput::CtrlC),
-            KeyCode::Char(ch) if key.modifiers.is_empty() || key.modifiers == Modifiers::SHIFT => Some(TuiInput::Char(ch)),
+            KeyCode::Char('c') | KeyCode::Char('C') if key.modifiers.contains(Modifiers::CTRL) => {
+                Some(TuiInput::CtrlC)
+            }
+            KeyCode::Char(ch) if key.modifiers.is_empty() || key.modifiers == Modifiers::SHIFT => {
+                Some(TuiInput::Char(ch))
+            }
             KeyCode::Enter => Some(TuiInput::Enter),
             KeyCode::Char('\r') | KeyCode::Char('\n') => Some(TuiInput::Enter),
-            KeyCode::Backspace | KeyCode::Char('\u{8}') | KeyCode::Char('\u{7f}') => Some(TuiInput::Backspace),
+            KeyCode::Backspace | KeyCode::Char('\u{8}') | KeyCode::Char('\u{7f}') => {
+                Some(TuiInput::Backspace)
+            }
             KeyCode::Escape => Some(TuiInput::Escape),
             KeyCode::UpArrow | KeyCode::ApplicationUpArrow => Some(TuiInput::Up),
             KeyCode::DownArrow | KeyCode::ApplicationDownArrow => Some(TuiInput::Down),

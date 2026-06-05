@@ -15,7 +15,6 @@ use crate::tui::{TuiAction, TuiResources};
 use super::{
     bridge::{self, BridgeControl, ManagedBridgeOptions, ManagedSessionMode, SharedChannels},
     host_key, proxy,
-    routes::{parse_exec_command, ExecCommand},
 };
 
 #[derive(Debug, Clone)]
@@ -440,67 +439,17 @@ impl server::Handler for HopSshHandler {
     async fn exec_request(
         &mut self,
         channel: ChannelId,
-        data: &[u8],
+        _data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
-        let command = match parse_exec_command(data) {
-            Ok(command) => command,
-            Err(err) => {
-                session.data(channel, format!("unsupported command: {err}\n"))?;
-                session.exit_status_request(channel, 127)?;
-                session.eof(channel)?;
-                session.close(channel)?;
-                return Ok(());
-            }
-        };
-
-        match command {
-            ExecCommand::Version => {
-                session.data(
-                    channel,
-                    format!(
-                        "{{\"name\":\"hop\",\"version\":\"{}\",\"protocol\":1}}\n",
-                        env!("CARGO_PKG_VERSION")
-                    ),
-                )?;
-                session.exit_status_request(channel, 0)?;
-                session.eof(channel)?;
-                session.close(channel)?;
-            }
-            ExecCommand::ListAssets => {
-                let assets = self.db.list_assets().await?;
-                let payload = serde_json::to_string(&assets)?;
-                session.data(channel, format!("{payload}\n"))?;
-                session.exit_status_request(channel, 0)?;
-                session.eof(channel)?;
-                session.close(channel)?;
-            }
-            ExecCommand::Connect { asset } => {
-                let Some(asset) = self.db.get_asset_by_name(&asset).await? else {
-                    session.data(channel, b"asset not found\n".to_vec())?;
-                    session.exit_status_request(channel, 2)?;
-                    session.eof(channel)?;
-                    session.close(channel)?;
-                    return Ok(());
-                };
-                if asset.credential_id.is_none() {
-                    session.data(channel, b"asset has no managed credential\n".to_vec())?;
-                    session.exit_status_request(channel, 3)?;
-                    session.eof(channel)?;
-                    session.close(channel)?;
-                    return Ok(());
-                }
-                self.start_managed(
-                    channel,
-                    session.handle(),
-                    asset,
-                    None,
-                    ManagedSessionMode::Exec,
-                )
-                .await?;
-            }
-        }
+        session.data(
+            channel,
+            unsupported_exec_command_message().as_bytes().to_vec(),
+        )?;
+        session.exit_status_request(channel, 127)?;
+        session.eof(channel)?;
+        session.close(channel)?;
         Ok(())
     }
 
@@ -675,6 +624,10 @@ fn authentication_banner(config: &HopConfig) -> Option<String> {
     }
 }
 
+fn unsupported_exec_command_message() -> &'static str {
+    "Hop does not support SSH remote commands. Open an interactive TUI session or connect directly with <asset>@host.\n"
+}
+
 fn is_client_disconnect(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<io::Error>()
@@ -763,6 +716,14 @@ mod tests {
         config.ssh.banner = String::new();
 
         assert!(authentication_banner(&config).is_none());
+    }
+
+    #[test]
+    fn unsupported_exec_message_points_to_supported_ssh_paths() {
+        assert_eq!(
+            unsupported_exec_command_message(),
+            "Hop does not support SSH remote commands. Open an interactive TUI session or connect directly with <asset>@host.\n"
+        );
     }
 
     #[test]
