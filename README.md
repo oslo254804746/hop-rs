@@ -115,11 +115,11 @@ hop --host hop-host --port 2222 ssh-config
 直连模式也属于服务器托管连接，适合跳过 TUI 直接进入某个资产：
 
 ```bash
-ssh -p 2222 <key_owner>@<asset_name>@hop-host
-ssh -p 2222 <key_owner>@<asset_hostname>@hop-host
+ssh -p 2222 <asset_name>@hop-host
+ssh -p 2222 <asset_hostname>@hop-host
 ```
 
-其中 `<key_owner>` 必须等于 Hop 入口授权密钥的名称，`<asset_name>` 或 `<asset_hostname>` 必须命中资产表，且该资产需要绑定托管凭据。直连会在会话审计中记录为 `mode=direct`。
+其中 SSH username 会被 Hop 解释为直连目标，`<asset_name>` 或 `<asset_hostname>` 必须命中资产表，且该资产需要绑定托管凭据。Hop 入口身份仍由公钥 fingerprint 决定，审计中的 `key_name` 来自 authorized key 记录。直连会在会话审计中记录为 `mode=direct`。
 
 OpenSSH config 示例：
 
@@ -127,7 +127,7 @@ OpenSSH config 示例：
 Host hop-web-prod
   HostName hop-host
   Port 2222
-  User alice@web-prod-01
+  User web-prod-01
   IdentityFile ~/.ssh/id_ed25519
   IdentitiesOnly yes
 ```

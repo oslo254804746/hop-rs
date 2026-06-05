@@ -162,17 +162,14 @@ impl HopSshHandler {
     async fn resolve_direct_asset_for_key(
         &self,
         user: &str,
-        key_name: &str,
+        _key_name: &str,
     ) -> Result<Option<Asset>> {
         let Some(request) = parse_direct_username(user)? else {
             return Ok(None);
         };
-        if request.key_owner != key_name {
-            bail!("direct login key owner does not match authorized key name");
-        }
-        let asset = find_direct_asset(&self.db, &request.target)
-            .await?
-            .with_context(|| format!("direct target not found: {}", request.target))?;
+        let Some(asset) = find_direct_asset(&self.db, &request.target).await? else {
+            return Ok(None);
+        };
         if asset.credential_id.is_none() {
             bail!("direct target has no managed credential");
         }
@@ -231,24 +228,21 @@ pub(crate) async fn start_tui_session(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DirectLoginRequest {
-    key_owner: String,
     target: String,
 }
 
 fn parse_direct_username(user: &str) -> Result<Option<DirectLoginRequest>> {
-    let Some((key_owner, target)) = user.rsplit_once('@') else {
-        return Ok(None);
-    };
-    let key_owner = key_owner.trim();
-    let target = target.trim();
-    if key_owner.is_empty() || target.is_empty() {
-        bail!("direct username requires <key_owner>@<asset>");
+    let target = user.trim();
+    if target.is_empty() {
+        bail!("direct username requires <asset>");
     }
-    if key_owner.contains(char::is_whitespace) || target.contains(char::is_whitespace) {
+    if target.contains('@') {
+        bail!("direct username must be a single asset name or hostname");
+    }
+    if target.contains(char::is_whitespace) {
         bail!("direct username cannot contain whitespace");
     }
     Ok(Some(DirectLoginRequest {
-        key_owner: key_owner.to_string(),
         target: target.to_string(),
     }))
 }
@@ -697,9 +691,22 @@ fn is_client_disconnect(error: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use hop_core::NewSession;
+    use hop_core::{AuthType, NewAsset, NewCredential, NewSession};
 
     use super::*;
+
+    fn test_handler(db: HopDb) -> HopSshHandler {
+        HopSshHandler {
+            db,
+            config: HopConfig::default(),
+            master_key: Arc::new(MasterKey::from_bytes([0; 32])),
+            auth: None,
+            direct_asset: None,
+            client_ip: None,
+            channels: Arc::new(Mutex::new(HashMap::new())),
+            ptys: HashMap::new(),
+        }
+    }
 
     #[tokio::test]
     async fn active_tui_session_finish_marks_record_done() {
@@ -766,12 +773,40 @@ mod tests {
     }
 
     #[test]
-    fn direct_username_parses_owner_and_target_from_last_separator() {
-        let request = parse_direct_username("alice@web-prod-01").unwrap().unwrap();
+    fn direct_username_uses_asset_name_as_target() {
+        let request = parse_direct_username("web-prod-01").unwrap().unwrap();
 
-        assert_eq!(request.key_owner, "alice");
         assert_eq!(request.target, "web-prod-01");
-        assert!(parse_direct_username("alice").unwrap().is_none());
-        assert!(parse_direct_username("alice@").is_err());
+        assert!(parse_direct_username("alice@web-prod-01").is_err());
+        assert!(parse_direct_username("").is_err());
+    }
+
+    #[tokio::test]
+    async fn direct_asset_resolution_uses_authenticated_key_metadata_only_for_identity() {
+        let db = HopDb::in_memory().await.unwrap();
+        let credential = db
+            .add_credential(NewCredential {
+                id: Some("cred-1".to_string()),
+                name: "deploy".to_string(),
+                username: "deploy".to_string(),
+                auth_type: AuthType::Password,
+                password_enc: Some("encrypted-password".to_string()),
+                private_key_enc: None,
+                passphrase_enc: None,
+            })
+            .await
+            .unwrap();
+        let mut asset = NewAsset::new("web-prod-01", "10.0.0.10", 22);
+        asset.credential_id = Some(credential.id);
+        db.add_asset(asset).await.unwrap();
+        let handler = test_handler(db);
+
+        let asset = handler
+            .resolve_direct_asset_for_key("web-prod-01", "wangbaofeng")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(asset.name, "web-prod-01");
     }
 }
