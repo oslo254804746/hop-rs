@@ -33,7 +33,7 @@ fn main() -> Result<()> {
     let target = config::SshTarget::new(cli.user, cli.host, cli.port);
     match cli.command {
         None => ssh_exec::interactive_shell(&target),
-        Some(Command::Ls) => ssh_exec::exec(&target, "hop-list-assets", false),
+        Some(Command::Ls) => ssh_exec::list_assets(&target),
         Some(Command::Connect { asset }) => {
             ssh_exec::exec(&target, &format!("hop-connect {asset}"), true)
         }
