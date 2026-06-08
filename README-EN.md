@@ -32,6 +32,7 @@ Most bastion/jump-server solutions are bloated Java/Python stacks with databases
 │  TUI Asset Picker     Fuzzy search, connect in seconds  │
 │  Managed Credentials  Server-side auth to targets       │
 │  ProxyJump/ProxyCmd   Allowlist-restricted TCP forward  │
+│  RDP/TCP Assets       Standard SSH tunnels, no Hop CLI  │
 │  Admin Web            Lightweight management UI         │
 │  Import/Export        Asset and credential metadata     │
 │  TOFU Host Keys       Auto-trust on first connect       │
@@ -94,9 +95,13 @@ ssh -p 2222 web-prod-01@hop-host
 
 # ProxyJump — Hop as a transparent TCP relay
 ssh -J hop-host:2222 web-prod-01.hop
+
+# RDP — create a protocol=RDP, port=3389 asset in Admin Web, then copy the tunnel command
+ssh -p 2222 -N -T -L 127.0.0.1:13389:win-prod-rdp.hop:3389 hop-host
+mstsc /v:127.0.0.1:13389
 ```
 
-Interactive TUI and direct-connect modes use Hop-managed credentials to reach targets. ProxyJump is an asset-allowlisted TCP relay; target authentication still comes from your local SSH client.
+Interactive TUI and direct-connect modes use Hop-managed credentials to reach SSH targets. ProxyJump, local port forwarding, and RDP/TCP assets are asset-allowlisted TCP relays. RDP does not require a Hop client CLI; use system OpenSSH plus mstsc, Microsoft Remote Desktop, FreeRDP, or another standard RDP client.
 
 ## Architecture
 
@@ -117,7 +122,7 @@ hop-server serve                    # Start the server (default)
 hop-server reset-admin              # Reset admin password
 hop-server key add|list|activate|deactivate
 hop-server credential add|list|delete
-hop-server asset add|list|delete
+hop-server asset add|list|delete       # add supports --protocol ssh|rdp|tcp
 hop-server export --kind assets --format csv --output dump.csv
 hop-server import --file dump.csv --on-conflict skip
 ```

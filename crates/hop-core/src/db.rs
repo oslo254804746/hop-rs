@@ -8,8 +8,9 @@ use sqlx::{
 use crate::{
     errors::HopCoreError,
     models::{
-        new_id, validate_tcp_port, Asset, AssetRow, AuthorizedKey, Credential, KnownHost, NewAsset,
-        NewAuthorizedKey, NewCredential, NewKnownHost, NewSession, Session, Setting,
+        new_id, protocol_supports_managed_credentials, validate_asset_protocol, validate_tcp_port,
+        Asset, AssetRow, AuthorizedKey, Credential, KnownHost, NewAsset, NewAuthorizedKey,
+        NewCredential, NewKnownHost, NewSession, Session, Setting,
     },
     Result,
 };
@@ -241,21 +242,28 @@ impl HopDb {
 
     pub async fn add_asset(&self, asset: NewAsset) -> Result<Asset> {
         let id = new_id();
+        let protocol = validate_asset_protocol(&asset.protocol)?;
         let port = validate_tcp_port(asset.port)?;
         let tags = serde_json::to_string(&asset.tags)?;
+        let credential_id = if protocol_supports_managed_credentials(&protocol) {
+            asset.credential_id
+        } else {
+            None
+        };
         sqlx::query(
             r#"
-            INSERT INTO assets (id, name, hostname, port, description, tags, credential_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            INSERT INTO assets (id, name, protocol, hostname, port, description, tags, credential_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
         )
         .bind(&id)
         .bind(asset.name)
+        .bind(protocol)
         .bind(asset.hostname)
         .bind(i64::from(port))
         .bind(asset.description)
         .bind(tags)
-        .bind(asset.credential_id)
+        .bind(credential_id)
         .execute(&self.pool)
         .await?;
         self.get_asset_by_id(&id)
@@ -264,27 +272,35 @@ impl HopDb {
     }
 
     pub async fn update_asset(&self, id: &str, asset: NewAsset) -> Result<()> {
+        let protocol = validate_asset_protocol(&asset.protocol)?;
         let port = validate_tcp_port(asset.port)?;
         let tags = serde_json::to_string(&asset.tags)?;
+        let credential_id = if protocol_supports_managed_credentials(&protocol) {
+            asset.credential_id
+        } else {
+            None
+        };
         sqlx::query(
             r#"
             UPDATE assets
             SET name = ?1,
-                hostname = ?2,
-                port = ?3,
-                description = ?4,
-                tags = ?5,
-                credential_id = ?6,
+                protocol = ?2,
+                hostname = ?3,
+                port = ?4,
+                description = ?5,
+                tags = ?6,
+                credential_id = ?7,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?7
+            WHERE id = ?8
             "#,
         )
         .bind(asset.name)
+        .bind(protocol)
         .bind(asset.hostname)
         .bind(i64::from(port))
         .bind(asset.description)
         .bind(tags)
-        .bind(asset.credential_id)
+        .bind(credential_id)
         .bind(id)
         .execute(&self.pool)
         .await?;
@@ -302,7 +318,7 @@ impl HopDb {
     pub async fn list_assets(&self) -> Result<Vec<Asset>> {
         let rows = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT id, name, hostname, port, description, tags, credential_id, created_at, updated_at
+            SELECT id, name, protocol, hostname, port, description, tags, credential_id, created_at, updated_at
             FROM assets
             ORDER BY name ASC
             "#,
@@ -318,7 +334,7 @@ impl HopDb {
     pub async fn get_asset_by_id(&self, id: &str) -> Result<Option<Asset>> {
         let row = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT id, name, hostname, port, description, tags, credential_id, created_at, updated_at
+            SELECT id, name, protocol, hostname, port, description, tags, credential_id, created_at, updated_at
             FROM assets
             WHERE id = ?1
             "#,
@@ -332,7 +348,7 @@ impl HopDb {
     pub async fn get_asset_by_name(&self, name: &str) -> Result<Option<Asset>> {
         let row = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT id, name, hostname, port, description, tags, credential_id, created_at, updated_at
+            SELECT id, name, protocol, hostname, port, description, tags, credential_id, created_at, updated_at
             FROM assets
             WHERE name = ?1
             "#,
@@ -354,7 +370,7 @@ impl HopDb {
 
         let row = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT id, name, hostname, port, description, tags, credential_id, created_at, updated_at
+            SELECT id, name, protocol, hostname, port, description, tags, credential_id, created_at, updated_at
             FROM assets
             WHERE (hostname = ?1 AND port = ?2)
                OR (name = ?3)
@@ -620,6 +636,51 @@ mod tests {
                 .username,
             "deploy"
         );
+    }
+
+    #[tokio::test]
+    async fn asset_protocol_defaults_to_ssh_in_database_rows() {
+        let db = HopDb::in_memory().await.unwrap();
+
+        let inserted = db
+            .add_asset(NewAsset::new("web-prod-01", "10.0.1.10", 22))
+            .await
+            .unwrap();
+
+        assert_eq!(inserted.protocol, "ssh");
+        assert_eq!(
+            db.get_asset_by_name("web-prod-01")
+                .await
+                .unwrap()
+                .unwrap()
+                .protocol,
+            "ssh"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_ssh_assets_are_proxy_only_even_when_credential_is_submitted() {
+        let db = HopDb::in_memory().await.unwrap();
+        let credential = db
+            .add_credential(NewCredential {
+                id: Some("cred-1".to_string()),
+                name: "windows admin".to_string(),
+                username: "administrator".to_string(),
+                auth_type: AuthType::Password,
+                password_enc: Some("encrypted-password".to_string()),
+                private_key_enc: None,
+                passphrase_enc: None,
+            })
+            .await
+            .unwrap();
+        let mut asset = NewAsset::new("win-rdp", "10.0.2.20", 3389);
+        asset.protocol = "rdp".to_string();
+        asset.credential_id = Some(credential.id);
+
+        let inserted = db.add_asset(asset).await.unwrap();
+
+        assert_eq!(inserted.protocol, "rdp");
+        assert!(inserted.credential_id.is_none());
     }
 
     #[tokio::test]

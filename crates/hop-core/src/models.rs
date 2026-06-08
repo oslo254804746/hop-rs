@@ -3,6 +3,10 @@ use uuid::Uuid;
 
 use crate::errors::HopCoreError;
 
+pub const ASSET_PROTOCOL_SSH: &str = "ssh";
+pub const ASSET_PROTOCOL_RDP: &str = "rdp";
+pub const ASSET_PROTOCOL_TCP: &str = "tcp";
+
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AuthorizedKey {
     pub id: String,
@@ -38,6 +42,7 @@ impl NewAuthorizedKey {
 pub struct Asset {
     pub id: String,
     pub name: String,
+    pub protocol: String,
     pub hostname: String,
     pub port: i64,
     pub description: Option<String>,
@@ -51,6 +56,7 @@ pub struct Asset {
 pub(crate) struct AssetRow {
     pub id: String,
     pub name: String,
+    pub protocol: String,
     pub hostname: String,
     pub port: i64,
     pub description: Option<String>,
@@ -61,17 +67,19 @@ pub(crate) struct AssetRow {
 }
 
 impl TryFrom<AssetRow> for Asset {
-    type Error = serde_json::Error;
+    type Error = HopCoreError;
 
     fn try_from(row: AssetRow) -> Result<Self, Self::Error> {
         let tags = match row.tags {
             Some(raw) if !raw.trim().is_empty() => serde_json::from_str(&raw)?,
             _ => Vec::new(),
         };
+        let protocol = validate_asset_protocol(&row.protocol)?;
 
         Ok(Self {
             id: row.id,
             name: row.name,
+            protocol,
             hostname: row.hostname,
             port: row.port,
             description: row.description,
@@ -86,6 +94,7 @@ impl TryFrom<AssetRow> for Asset {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewAsset {
     pub name: String,
+    pub protocol: String,
     pub hostname: String,
     pub port: i64,
     pub description: Option<String>,
@@ -97,6 +106,7 @@ impl NewAsset {
     pub fn new(name: impl Into<String>, hostname: impl Into<String>, port: i64) -> Self {
         Self {
             name: name.into(),
+            protocol: ASSET_PROTOCOL_SSH.to_string(),
             hostname: hostname.into(),
             port,
             description: None,
@@ -222,6 +232,21 @@ pub fn validate_tcp_port(port: i64) -> crate::Result<u16> {
     }
 }
 
+pub fn validate_asset_protocol(protocol: &str) -> crate::Result<String> {
+    match protocol.trim().to_ascii_lowercase().as_str() {
+        ASSET_PROTOCOL_SSH => Ok(ASSET_PROTOCOL_SSH.to_string()),
+        ASSET_PROTOCOL_RDP => Ok(ASSET_PROTOCOL_RDP.to_string()),
+        ASSET_PROTOCOL_TCP => Ok(ASSET_PROTOCOL_TCP.to_string()),
+        other => Err(HopCoreError::Validation(format!(
+            "asset protocol must be ssh, rdp, or tcp, got {other}"
+        ))),
+    }
+}
+
+pub fn protocol_supports_managed_credentials(protocol: &str) -> bool {
+    protocol == ASSET_PROTOCOL_SSH
+}
+
 pub fn validate_credential_material(
     auth_type: &AuthType,
     password_enc: Option<&str>,
@@ -265,6 +290,22 @@ mod tests {
         assert!(validate_tcp_port(0).is_err());
         assert!(validate_tcp_port(-1).is_err());
         assert!(validate_tcp_port(65_536).is_err());
+    }
+
+    #[test]
+    fn new_asset_defaults_to_ssh_protocol() {
+        let asset = NewAsset::new("web-prod-01", "10.0.1.10", 22);
+
+        assert_eq!(asset.protocol, "ssh");
+    }
+
+    #[test]
+    fn validate_asset_protocol_accepts_only_supported_values() {
+        assert_eq!(validate_asset_protocol("ssh").unwrap(), "ssh");
+        assert_eq!(validate_asset_protocol("RDP").unwrap(), "rdp");
+        assert_eq!(validate_asset_protocol(" tcp ").unwrap(), "tcp");
+        assert!(validate_asset_protocol("vnc").is_err());
+        assert!(validate_asset_protocol("").is_err());
     }
 
     #[test]

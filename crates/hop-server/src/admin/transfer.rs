@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use hop_core::{Asset, AuthType, Credential, HopDb, NewAsset, NewCredential};
+use hop_core::{Asset, AuthType, Credential, HopDb, NewAsset, NewCredential, ASSET_PROTOCOL_SSH};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +108,8 @@ pub struct AssetTransferRow {
     pub description: Option<String>,
     pub tags: Vec<String>,
     pub credential_id: Option<String>,
+    #[serde(default = "default_asset_protocol")]
+    pub protocol: String,
 }
 
 impl From<Asset> for AssetTransferRow {
@@ -119,6 +121,7 @@ impl From<Asset> for AssetTransferRow {
             description: asset.description,
             tags: asset.tags,
             credential_id: asset.credential_id,
+            protocol: asset.protocol,
         }
     }
 }
@@ -127,6 +130,7 @@ impl From<AssetTransferRow> for NewAsset {
     fn from(row: AssetTransferRow) -> Self {
         Self {
             name: row.name,
+            protocol: row.protocol,
             hostname: row.hostname,
             port: row.port,
             description: row.description,
@@ -282,7 +286,7 @@ pub async fn import_credentials(
 }
 
 fn write_asset_csv(rows: &[AssetTransferRow]) -> String {
-    let mut output = String::from("name,hostname,port,description,tags,credential_id\n");
+    let mut output = String::from("name,hostname,port,description,tags,credential_id,protocol\n");
     for row in rows {
         push_csv_row(
             &mut output,
@@ -293,6 +297,7 @@ fn write_asset_csv(rows: &[AssetTransferRow]) -> String {
                 row.description.as_deref().unwrap_or(""),
                 &row.tags.join("|"),
                 row.credential_id.as_deref().unwrap_or(""),
+                row.protocol.as_str(),
             ],
         );
     }
@@ -330,9 +335,17 @@ fn read_asset_csv(input: &str) -> Result<Vec<AssetTransferRow>> {
             description: nonempty(record[3].clone()),
             tags: split_tags(&record[4]),
             credential_id: nonempty(record[5].clone()),
+            protocol: record
+                .get(6)
+                .cloned()
+                .unwrap_or_else(default_asset_protocol),
         });
     }
     Ok(rows)
+}
+
+fn default_asset_protocol() -> String {
+    ASSET_PROTOCOL_SSH.to_string()
 }
 
 fn read_credential_csv(input: &str) -> Result<Vec<CredentialTransferRow>> {
@@ -439,20 +452,33 @@ mod tests {
 
         let csv = export_assets(&[asset], TransferFormat::Csv).unwrap();
 
-        assert!(csv.starts_with("name,hostname,port,description,tags,credential_id\n"));
-        assert!(csv.contains("web,10.0.0.1,22,,prod|web,"));
+        assert!(csv.starts_with("name,hostname,port,description,tags,credential_id,protocol\n"));
+        assert!(csv.contains("web,10.0.0.1,22,,prod|web,,ssh"));
     }
 
     #[test]
     fn imports_assets_from_json_rows() {
         let rows = import_asset_rows(
-            r#"[{"name":"web","hostname":"10.0.0.1","port":22,"description":null,"tags":["prod"],"credential_id":null}]"#,
+            r#"[{"name":"web","hostname":"10.0.0.1","port":3389,"description":null,"tags":["windows"],"credential_id":null,"protocol":"rdp"}]"#,
             TransferFormat::Json,
         )
         .unwrap();
 
         assert_eq!(rows[0].name, "web");
-        assert_eq!(rows[0].tags, vec!["prod"]);
+        assert_eq!(rows[0].protocol, "rdp");
+        assert_eq!(rows[0].tags, vec!["windows"]);
+    }
+
+    #[test]
+    fn imports_legacy_asset_csv_rows_as_ssh_protocol() {
+        let rows = import_asset_rows(
+            "name,hostname,port,description,tags,credential_id\nweb,10.0.0.1,22,,prod,\n",
+            TransferFormat::Csv,
+        )
+        .unwrap();
+
+        assert_eq!(rows[0].name, "web");
+        assert_eq!(rows[0].protocol, "ssh");
     }
 
     #[test]
@@ -479,6 +505,7 @@ mod tests {
         hop_core::Asset {
             id: name.to_string(),
             name: name.to_string(),
+            protocol: ASSET_PROTOCOL_SSH.to_string(),
             hostname: hostname.to_string(),
             port: 22,
             description: None,
@@ -510,11 +537,13 @@ mod tests {
             description: Some("prod web".to_string()),
             tags: vec!["prod".to_string()],
             credential_id: None,
+            protocol: "rdp".to_string(),
         };
 
         let new_asset: NewAsset = row.into();
 
         assert_eq!(new_asset.name, "web");
+        assert_eq!(new_asset.protocol, "rdp");
         assert_eq!(new_asset.tags, vec!["prod"]);
     }
 

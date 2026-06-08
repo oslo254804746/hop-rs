@@ -2,8 +2,9 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{bail, Context, Result};
 use hop_core::{
-    encrypt_envelope, new_id, validate_credential_material, validate_tcp_port, AuthType, HopDb,
-    MasterKey, NewAsset, NewAuthorizedKey, NewCredential,
+    encrypt_envelope, new_id, protocol_supports_managed_credentials, validate_asset_protocol,
+    validate_credential_material, validate_tcp_port, AuthType, HopDb, MasterKey, NewAsset,
+    NewAuthorizedKey, NewCredential,
 };
 use russh::keys::{parse_public_key_base64, ssh_key::HashAlg, PublicKeyBase64};
 
@@ -150,16 +151,24 @@ pub async fn delete_credential(db: &HopDb, id: &str) -> Result<()> {
 pub async fn add_asset(
     db: &HopDb,
     name: String,
+    protocol: String,
     hostname: String,
     port: i64,
     description: Option<String>,
     tags: Vec<String>,
     credential_id: Option<String>,
 ) -> Result<()> {
+    let protocol = validate_asset_protocol(&protocol)?;
     validate_tcp_port(port)?;
+    let credential_id = if protocol_supports_managed_credentials(&protocol) {
+        credential_id
+    } else {
+        None
+    };
     let asset = db
         .add_asset(NewAsset {
             name,
+            protocol,
             hostname,
             port,
             description,
@@ -168,8 +177,8 @@ pub async fn add_asset(
         })
         .await?;
     println!(
-        "added asset {}\t{}\t{}:{}",
-        asset.id, asset.name, asset.hostname, asset.port
+        "added asset {}\t{}\t{}\t{}:{}",
+        asset.id, asset.name, asset.protocol, asset.hostname, asset.port
     );
     Ok(())
 }
@@ -177,9 +186,10 @@ pub async fn add_asset(
 pub async fn list_assets(db: &HopDb) -> Result<()> {
     for asset in db.list_assets().await? {
         println!(
-            "{}\t{}\t{}:{}\t{}\t{}",
+            "{}\t{}\t{}\t{}:{}\t{}\t{}",
             asset.id,
             asset.name,
+            asset.protocol,
             asset.hostname,
             asset.port,
             asset.tags.join(","),

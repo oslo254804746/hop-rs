@@ -32,6 +32,7 @@
 │  TUI 资产选择器    模糊搜索，秒级连接                 │
 │  托管凭证          服务端代理认证目标主机             │
 │  ProxyJump 转发    受资产白名单约束的 TCP 转发        │
+│  RDP/TCP 资产      标准 SSH 隧道，无需 Hop 客户端     │
 │  Admin Web         轻量管理界面                       │
 │  批量导入/导出     资产与凭证元数据迁移               │
 │  TOFU 主机密钥     首次连接自动信任                   │
@@ -94,9 +95,13 @@ ssh -p 2222 web-prod-01@hop-host
 
 # ProxyJump —— Hop 作为透明 TCP 中继
 ssh -J hop-host:2222 web-prod-01.hop
+
+# RDP —— Admin Web 中创建 protocol=RDP、port=3389 的资产后复制隧道命令
+ssh -p 2222 -N -T -L 127.0.0.1:13389:win-prod-rdp.hop:3389 hop-host
+mstsc /v:127.0.0.1:13389
 ```
 
-交互式 TUI 和直连模式使用 Hop 托管凭证连接目标主机；ProxyJump 只做受资产白名单约束的 TCP 中继，目标主机认证仍由本机 SSH 客户端完成。
+交互式 TUI 和直连模式使用 Hop 托管凭证连接 SSH 目标；ProxyJump、本地端口转发和 RDP/TCP 资产只做受资产白名单约束的 TCP 中继。RDP 不需要 Hop 客户端 CLI，使用系统自带 OpenSSH 与 mstsc / Microsoft Remote Desktop / FreeRDP 等标准客户端即可。
 
 ## 项目结构
 
@@ -117,7 +122,7 @@ hop-server serve                    # 启动服务（默认）
 hop-server reset-admin              # 重置管理员密码
 hop-server key add|list|activate|deactivate
 hop-server credential add|list|delete
-hop-server asset add|list|delete
+hop-server asset add|list|delete       # add 支持 --protocol ssh|rdp|tcp
 hop-server export --kind assets --format csv --output dump.csv
 hop-server import --file dump.csv --on-conflict skip
 ```

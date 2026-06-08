@@ -10,8 +10,9 @@ use axum::{
     Router,
 };
 use hop_core::{
-    encrypt_envelope, new_id, validate_credential_material, validate_tcp_port, AuthType, HopDb,
-    MasterKey, NewAsset, NewAuthorizedKey, NewCredential,
+    encrypt_envelope, new_id, protocol_supports_managed_credentials, validate_asset_protocol,
+    validate_credential_material, validate_tcp_port, AuthType, HopDb, MasterKey, NewAsset,
+    NewAuthorizedKey, NewCredential, ASSET_PROTOCOL_SSH,
 };
 use serde::Deserialize;
 use tokio::net::TcpListener;
@@ -34,13 +35,20 @@ pub struct AdminState {
     pub db: HopDb,
     pub master_key: Arc<MasterKey>,
     pub sessions: AdminSessions,
+    pub ssh_port: u16,
 }
 
-pub async fn serve_admin(bind: SocketAddr, db: HopDb, master_key: Arc<MasterKey>) -> Result<()> {
+pub async fn serve_admin(
+    bind: SocketAddr,
+    ssh_bind: SocketAddr,
+    db: HopDb,
+    master_key: Arc<MasterKey>,
+) -> Result<()> {
     let state = AdminState {
         db,
         master_key,
         sessions: AdminSessions::default(),
+        ssh_port: ssh_bind.port(),
     };
     let app = Router::new()
         .route("/", get(index))
@@ -199,6 +207,7 @@ async fn assets(
             &session.csrf_token,
             query.tag.as_deref(),
             &all_tags,
+            state.ssh_port,
         )
         .into_string(),
     )
@@ -214,6 +223,7 @@ struct CsrfForm {
 struct AssetForm {
     csrf_token: String,
     name: String,
+    protocol: Option<String>,
     hostname: String,
     port: i64,
     description: Option<String>,
@@ -240,22 +250,10 @@ async fn create_asset(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
-    let tags = parse_tags(form.tags);
-    let credential_id = form.credential_id.filter(|value| !value.trim().is_empty());
-    if validate_tcp_port(form.port).is_err() {
+    let Some(asset) = new_asset_from_form(form) else {
         return Redirect::to("/assets").into_response();
-    }
-    let _ = state
-        .db
-        .add_asset(NewAsset {
-            name: form.name,
-            hostname: form.hostname,
-            port: form.port,
-            description: form.description.filter(|v| !v.trim().is_empty()),
-            tags,
-            credential_id,
-        })
-        .await;
+    };
+    let _ = state.db.add_asset(asset).await;
     Redirect::to("/assets").into_response()
 }
 
@@ -274,8 +272,18 @@ async fn edit_asset(
     let credentials = state.db.list_credentials().await.unwrap_or_default();
     let all_assets = state.db.list_assets().await.unwrap_or_default();
     let all_tags = collect_tags(&all_assets);
-    Html(html::edit_asset(t, &asset, &credentials, &session.csrf_token, &all_tags).into_string())
-        .into_response()
+    Html(
+        html::edit_asset(
+            t,
+            &asset,
+            &credentials,
+            &session.csrf_token,
+            &all_tags,
+            state.ssh_port,
+        )
+        .into_string(),
+    )
+    .into_response()
 }
 
 async fn update_asset(
@@ -290,25 +298,10 @@ async fn update_asset(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
-    let tags = parse_tags(form.tags);
-    let credential_id = form.credential_id.filter(|value| !value.trim().is_empty());
-    if validate_tcp_port(form.port).is_err() {
+    let Some(asset) = new_asset_from_form(form) else {
         return Redirect::to("/assets").into_response();
-    }
-    let _ = state
-        .db
-        .update_asset(
-            &id,
-            NewAsset {
-                name: form.name,
-                hostname: form.hostname,
-                port: form.port,
-                description: form.description.filter(|v| !v.trim().is_empty()),
-                tags,
-                credential_id,
-            },
-        )
-        .await;
+    };
+    let _ = state.db.update_asset(&id, asset).await;
     Redirect::to("/assets").into_response()
 }
 
@@ -351,6 +344,7 @@ async fn bulk_update_asset_tags(
                     &asset.id,
                     NewAsset {
                         name: asset.name,
+                        protocol: asset.protocol,
                         hostname: asset.hostname,
                         port: asset.port,
                         description: asset.description,
@@ -532,6 +526,26 @@ fn parse_tags(tags: Option<String>) -> Vec<String> {
         .filter(|tag| !tag.is_empty())
         .map(ToString::to_string)
         .collect()
+}
+
+fn new_asset_from_form(form: AssetForm) -> Option<NewAsset> {
+    let protocol =
+        validate_asset_protocol(form.protocol.as_deref().unwrap_or(ASSET_PROTOCOL_SSH)).ok()?;
+    validate_tcp_port(form.port).ok()?;
+    let credential_id = if protocol_supports_managed_credentials(&protocol) {
+        form.credential_id.filter(|value| !value.trim().is_empty())
+    } else {
+        None
+    };
+    Some(NewAsset {
+        name: form.name,
+        protocol,
+        hostname: form.hostname,
+        port: form.port,
+        description: form.description.filter(|v| !v.trim().is_empty()),
+        tags: parse_tags(form.tags),
+        credential_id,
+    })
 }
 
 async fn delete_credential(
@@ -956,5 +970,24 @@ mod tests {
         assert_eq!(form.csrf_token, "csrf-123");
         assert_eq!(form.asset_ids, vec!["asset-1", "asset-2"]);
         assert_eq!(form.tags.as_deref(), Some("prod,web"));
+    }
+
+    #[test]
+    fn asset_form_clears_credentials_for_rdp_protocol() {
+        let asset = new_asset_from_form(AssetForm {
+            csrf_token: "csrf-123".to_string(),
+            name: "win-rdp".to_string(),
+            protocol: Some("rdp".to_string()),
+            hostname: "10.0.2.20".to_string(),
+            port: 3389,
+            description: None,
+            tags: Some("windows,rdp".to_string()),
+            credential_id: Some("cred-1".to_string()),
+        })
+        .unwrap();
+
+        assert_eq!(asset.protocol, "rdp");
+        assert_eq!(asset.tags, vec!["windows", "rdp"]);
+        assert!(asset.credential_id.is_none());
     }
 }

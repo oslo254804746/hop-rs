@@ -1,4 +1,7 @@
-use hop_core::{Asset, AuthorizedKey, Credential, KnownHost, Session};
+use hop_core::{
+    Asset, AuthorizedKey, Credential, KnownHost, Session, ASSET_PROTOCOL_RDP, ASSET_PROTOCOL_SSH,
+    ASSET_PROTOCOL_TCP,
+};
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
 use super::{
@@ -578,6 +581,16 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         gap: 8px;
                     }
 
+                    .command-block {
+                        display: grid;
+                        gap: 8px;
+                        margin-top: 8px;
+                    }
+
+                    .command-input {
+                        font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+                    }
+
                     .tag, .status-pill {
                         display: inline-flex;
                         align-items: center;
@@ -808,6 +821,7 @@ pub fn assets(
     csrf_token: &str,
     selected_tag: Option<&str>,
     all_tags: &[String],
+    ssh_port: u16,
 ) -> Markup {
     layout(
         t.assets_title,
@@ -865,6 +879,12 @@ pub fn assets(
                             input name="name" required;
                         }
                         label.field {
+                            (t.field_protocol)
+                            select name="protocol" onchange="const p=this.form.querySelector('[name=port]'); if (p && (p.value === '22' || p.value === '3389')) p.value = this.value === 'rdp' ? '3389' : '22';" {
+                                (asset_protocol_options(t, ASSET_PROTOCOL_SSH))
+                            }
+                        }
+                        label.field {
                             (t.field_hostname)
                             input name="hostname" required;
                         }
@@ -915,6 +935,7 @@ pub fn assets(
                                 tr {
                                     th.checkbox-cell {}
                                     th { (t.field_name) }
+                                    th { (t.field_protocol) }
                                     th { (t.target_column) }
                                     th { (t.field_tags) }
                                     th { (t.field_credential) }
@@ -923,7 +944,7 @@ pub fn assets(
                             }
                             tbody {
                                 @if items.is_empty() {
-                                    tr.empty-row { td colspan="6" { (t.no_assets) } }
+                                    tr.empty-row { td colspan="7" { (t.no_assets) } }
                                 }
                                 @for asset in items {
                                     tr {
@@ -936,8 +957,12 @@ pub fn assets(
                                                 @if let Some(description) = &asset.description {
                                                     span.subtle { (description) }
                                                 }
+                                                @if let Some(command) = asset_tunnel_command(asset, ssh_port) {
+                                                    span.subtle.mono { (command) }
+                                                }
                                             }
                                         }
+                                        td { span.status-pill.neutral { (asset_protocol_label(t, &asset.protocol)) } }
                                         td.mono { (asset.hostname) ":" (asset.port) }
                                         td {
                                             div.tag-list {
@@ -994,6 +1019,7 @@ pub fn edit_asset(
     credentials: &[Credential],
     csrf_token: &str,
     all_tags: &[String],
+    ssh_port: u16,
 ) -> Markup {
     layout(
         t.edit_asset_title,
@@ -1017,6 +1043,12 @@ pub fn edit_asset(
                         label.field {
                             (t.field_name)
                             input name="name" value=(asset.name) required;
+                        }
+                        label.field {
+                            (t.field_protocol)
+                            select name="protocol" onchange="const p=this.form.querySelector('[name=port]'); if (p && (p.value === '22' || p.value === '3389')) p.value = this.value === 'rdp' ? '3389' : '22';" {
+                                (asset_protocol_options(t, &asset.protocol))
+                            }
                         }
                         label.field {
                             (t.field_hostname)
@@ -1057,8 +1089,66 @@ pub fn edit_asset(
                     }
                 }
             }
+            @if let Some(command) = asset_tunnel_command(asset, ssh_port) {
+                section.panel {
+                    div.panel-header {
+                        div {
+                            h2 { (t.tunnel_command_heading) }
+                            p { (t.tunnel_command_intro) }
+                        }
+                    }
+                    div.command-block {
+                        input class="command-input" readonly value=(command);
+                    }
+                }
+            }
         },
     )
+}
+
+fn asset_protocol_options(t: &L10n, selected: &str) -> Markup {
+    html! {
+        option value=(ASSET_PROTOCOL_SSH) selected[selected == ASSET_PROTOCOL_SSH] { (t.protocol_ssh) }
+        option value=(ASSET_PROTOCOL_RDP) selected[selected == ASSET_PROTOCOL_RDP] { (t.protocol_rdp) }
+        option value=(ASSET_PROTOCOL_TCP) selected[selected == ASSET_PROTOCOL_TCP] { (t.protocol_tcp) }
+    }
+}
+
+fn asset_protocol_label<'a>(t: &'a L10n, protocol: &'a str) -> &'a str {
+    match protocol {
+        ASSET_PROTOCOL_SSH => t.protocol_ssh,
+        ASSET_PROTOCOL_RDP => t.protocol_rdp,
+        ASSET_PROTOCOL_TCP => t.protocol_tcp,
+        other => other,
+    }
+}
+
+fn asset_tunnel_command(asset: &Asset, ssh_port: u16) -> Option<String> {
+    if asset.protocol == ASSET_PROTOCOL_SSH {
+        return None;
+    }
+    let local_port = if asset.protocol == ASSET_PROTOCOL_RDP {
+        13389
+    } else {
+        asset.port
+    };
+    Some(format!(
+        "ssh -p {ssh_port} -N -T -L 127.0.0.1:{local_port}:{}:{} hop-host",
+        asset_tunnel_target(asset),
+        asset.port
+    ))
+}
+
+fn asset_tunnel_target(asset: &Asset) -> String {
+    if asset
+        .name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        format!("{}.hop", asset.name)
+    } else {
+        asset.hostname.clone()
+    }
 }
 
 pub fn credentials(t: &L10n, items: &[Credential], csrf_token: &str) -> Markup {
@@ -1662,7 +1752,7 @@ mod tests {
 
     #[test]
     fn mutating_forms_include_csrf_token() {
-        let rendered = assets(&EN, &[], &[], "csrf-123", None, &[]).into_string();
+        let rendered = assets(&EN, &[], &[], "csrf-123", None, &[], 2222).into_string();
 
         assert!(rendered.contains(r#"name="csrf_token""#));
         assert!(rendered.contains(r#"value="csrf-123""#));
@@ -1692,11 +1782,25 @@ mod tests {
     #[test]
     fn assets_page_renders_tag_filters_and_bulk_editor() {
         let tags = vec!["prod".to_string(), "web".to_string()];
-        let rendered = assets(&EN, &[], &[], "csrf-123", Some("prod"), &tags).into_string();
+        let rendered = assets(&EN, &[], &[], "csrf-123", Some("prod"), &tags, 2222).into_string();
 
         assert!(rendered.contains(r#"href="/assets?tag=prod""#));
         assert!(rendered.contains(r#"action="/assets/bulk-tags""#));
         assert!(rendered.contains(r#"list="asset-tags-list""#));
+    }
+
+    #[test]
+    fn assets_page_renders_protocol_controls_and_rdp_tunnel_hint() {
+        let mut rdp = asset("win-rdp", "10.0.2.20", &["windows"]);
+        rdp.protocol = ASSET_PROTOCOL_RDP.to_string();
+        rdp.port = 3389;
+
+        let rendered = assets(&EN, &[rdp], &[], "csrf-123", None, &[], 2222).into_string();
+
+        assert!(rendered.contains(r#"name="protocol""#));
+        assert!(rendered.contains(r#"value="rdp""#));
+        assert!(rendered.contains("RDP"));
+        assert!(rendered.contains("ssh -p 2222 -N -T -L 127.0.0.1:13389:win-rdp.hop:3389 hop-host"));
     }
 
     #[test]
@@ -1705,5 +1809,20 @@ mod tests {
 
         assert!(rendered.contains(r#"enctype="multipart/form-data""#));
         assert!(rendered.contains(r#"type="file""#));
+    }
+
+    fn asset(name: &str, hostname: &str, tags: &[&str]) -> Asset {
+        Asset {
+            id: name.to_string(),
+            name: name.to_string(),
+            protocol: ASSET_PROTOCOL_SSH.to_string(),
+            hostname: hostname.to_string(),
+            port: 22,
+            description: None,
+            tags: tags.iter().map(|tag| tag.to_string()).collect(),
+            credential_id: None,
+            created_at: None,
+            updated_at: None,
+        }
     }
 }

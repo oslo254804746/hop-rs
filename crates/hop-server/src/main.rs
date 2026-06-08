@@ -11,7 +11,10 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use hop_core::{load_or_create_master_key, AuthType, HopConfig, HopDb, MasterKey};
+use hop_core::{
+    load_or_create_master_key, AuthType, HopConfig, HopDb, MasterKey, ASSET_PROTOCOL_RDP,
+    ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
+};
 use tracing::{info, warn};
 
 use crate::admin::transfer::{ConflictPolicy, TransferFormat, TransferKind};
@@ -173,11 +176,30 @@ enum CredentialCommand {
     },
 }
 
+#[derive(Debug, Clone, ValueEnum)]
+enum AssetProtocolArg {
+    Ssh,
+    Rdp,
+    Tcp,
+}
+
+impl AssetProtocolArg {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ssh => ASSET_PROTOCOL_SSH,
+            Self::Rdp => ASSET_PROTOCOL_RDP,
+            Self::Tcp => ASSET_PROTOCOL_TCP,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum AssetCommand {
     Add {
         #[arg(long)]
         name: String,
+        #[arg(long, value_enum, default_value = "ssh")]
+        protocol: AssetProtocolArg,
         #[arg(long)]
         hostname: String,
         #[arg(long, default_value_t = 22)]
@@ -263,6 +285,7 @@ async fn main() -> Result<()> {
             match command {
                 AssetCommand::Add {
                     name,
+                    protocol,
                     hostname,
                     port,
                     description,
@@ -272,6 +295,7 @@ async fn main() -> Result<()> {
                     admin::local_cli::add_asset(
                         &db,
                         name,
+                        protocol.as_str().to_string(),
                         hostname,
                         port,
                         description,
@@ -407,7 +431,7 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
     if let Some(message) = admin_bind_exposure_warning(&config)? {
         warn!("{message}");
     }
-    let admin = admin::routes::serve_admin(admin_bind, db.clone(), master_key.clone());
+    let admin = admin::routes::serve_admin(admin_bind, ssh_bind, db.clone(), master_key.clone());
     let ssh = ssh::server::serve_ssh(ssh_bind, config, db, master_key);
     info!("starting hop-server");
     tokio::try_join!(admin, ssh)?;
@@ -547,6 +571,34 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn asset_add_parses_rdp_protocol_option() {
+        let cli = Cli::try_parse_from([
+            "hop-server",
+            "asset",
+            "add",
+            "--name",
+            "win-rdp",
+            "--protocol",
+            "rdp",
+            "--hostname",
+            "10.0.2.20",
+            "--port",
+            "3389",
+        ])
+        .unwrap();
+
+        let Some(Command::Asset {
+            command: AssetCommand::Add { protocol, port, .. },
+        }) = cli.command
+        else {
+            panic!("expected asset add");
+        };
+
+        assert_eq!(protocol.as_str(), ASSET_PROTOCOL_RDP);
+        assert_eq!(port, 3389);
     }
 
     #[tokio::test]
