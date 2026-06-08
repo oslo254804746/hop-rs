@@ -500,7 +500,7 @@ impl server::Handler for HopSshHandler {
                     {
                         output.append(&mut tui.leave_screen()?);
                         finish_tui = Some((audit, "connected", None));
-                        connect = Some((asset, *tui));
+                        connect = Some((*asset, *tui));
                     }
                 }
             }

@@ -328,7 +328,6 @@ impl HopDb {
         rows.into_iter()
             .map(Asset::try_from)
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
     }
 
     pub async fn get_asset_by_id(&self, id: &str) -> Result<Option<Asset>> {
@@ -342,7 +341,7 @@ impl HopDb {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        row.map(Asset::try_from).transpose().map_err(Into::into)
+        row.map(Asset::try_from).transpose()
     }
 
     pub async fn get_asset_by_name(&self, name: &str) -> Result<Option<Asset>> {
@@ -356,7 +355,7 @@ impl HopDb {
         .bind(name)
         .fetch_optional(&self.pool)
         .await?;
-        row.map(Asset::try_from).transpose().map_err(Into::into)
+        row.map(Asset::try_from).transpose()
     }
 
     pub async fn find_proxy_asset(
@@ -383,7 +382,7 @@ impl HopDb {
         .bind(normalized_name)
         .fetch_optional(&self.pool)
         .await?;
-        row.map(Asset::try_from).transpose().map_err(Into::into)
+        row.map(Asset::try_from).transpose()
     }
 
     pub async fn start_session(&self, session: NewSession) -> Result<Session> {

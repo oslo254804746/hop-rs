@@ -27,7 +27,7 @@ use super::{
 pub enum TuiAction {
     None,
     Quit,
-    Connect(Asset),
+    Connect(Box<Asset>),
 }
 
 pub struct TuiResources {
@@ -279,7 +279,7 @@ impl TuiApp {
             }
             TuiInput::Enter => {
                 if let Some(asset) = self.selected_asset() {
-                    return TuiAction::Connect(asset);
+                    return TuiAction::Connect(Box::new(asset));
                 }
             }
             _ => {}

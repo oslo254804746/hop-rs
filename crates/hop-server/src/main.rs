@@ -12,7 +12,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use hop_core::{
-    load_or_create_master_key, AuthType, HopConfig, HopDb, MasterKey, ASSET_PROTOCOL_RDP,
+    load_or_create_master_key, AuthType, HopConfig, HopDb, MasterKey, NewAsset, ASSET_PROTOCOL_RDP,
     ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
 };
 use tracing::{info, warn};
@@ -294,13 +294,15 @@ async fn main() -> Result<()> {
                 } => {
                     admin::local_cli::add_asset(
                         &db,
-                        name,
-                        protocol.as_str().to_string(),
-                        hostname,
-                        port,
-                        description,
-                        tags,
-                        credential_id,
+                        NewAsset {
+                            name,
+                            protocol: protocol.as_str().to_string(),
+                            hostname,
+                            port,
+                            description,
+                            tags,
+                            credential_id,
+                        },
                     )
                     .await
                 }
