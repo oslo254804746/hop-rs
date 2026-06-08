@@ -23,6 +23,8 @@ const ICON_SESSIONS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="
 
 const ICON_IMPORT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M8 21H3v-5"/><path d="M21 3l-9 9"/><path d="M3 21l9-9"/></svg>"#;
 
+const ICON_SETTINGS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 .6 1.65 1.65 0 0 0-.33 1.82V22a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 8.6 20a1.65 1.65 0 0 0-1.82-.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-.6-1 1.65 1.65 0 0 0-1.82-.33H2a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4 8.6a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 8.6 4a1.65 1.65 0 0 0 1-.6 1.65 1.65 0 0 0 .33-1.82V2a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 8.6a1.65 1.65 0 0 0 .6 1 1.65 1.65 0 0 0 1.82.33H22a2 2 0 1 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15z"/></svg>"#;
+
 pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Markup {
     let alternate = t.locale.alternate();
     let language_href = language_switch_href(alternate, active);
@@ -702,6 +704,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                             (nav_link("/known-hosts", t.nav_known_hosts, ICON_KNOWN_HOSTS, active == "known-hosts"))
                             (nav_link("/sessions", t.nav_sessions, ICON_SESSIONS, active == "sessions"))
                             (nav_link("/import", t.nav_import_export, ICON_IMPORT, active == "import"))
+                            (nav_link("/settings", t.nav_settings, ICON_SETTINGS, active == "settings"))
                         }
                         div.sidebar-footer {
                             span.status-dot {}
@@ -756,6 +759,51 @@ pub fn login(t: &L10n, error: Option<&str>) -> Markup {
                         div.button-row {
                             button type="submit" { (t.login_button) }
                         }
+                    }
+                }
+            }
+        },
+    )
+}
+
+pub fn settings(t: &L10n, csrf_token: &str, error: Option<&str>) -> Markup {
+    layout(
+        t.settings_title,
+        "settings",
+        t,
+        html! {
+            div.page-intro {
+                h2 { (t.settings_heading) }
+                p { (t.settings_intro) }
+            }
+            section.panel {
+                div.panel-header {
+                    div {
+                        h2 { (t.admin_password_heading) }
+                        p { (t.admin_password_intro) }
+                    }
+                }
+                @if let Some(error) = error {
+                    p.error-message { (error) }
+                }
+                form method="post" action="/settings" {
+                    (csrf_field(csrf_token))
+                    div.grid {
+                        label.field {
+                            (t.current_password)
+                            input type="password" name="current_password" autocomplete="current-password" required;
+                        }
+                        label.field {
+                            (t.new_password)
+                            input type="password" name="new_password" autocomplete="new-password" required;
+                        }
+                        label.field {
+                            (t.confirm_password)
+                            input type="password" name="confirm_password" autocomplete="new-password" required;
+                        }
+                    }
+                    div.button-row {
+                        button type="submit" { (t.change_password) }
                     }
                 }
             }
@@ -880,7 +928,7 @@ pub fn assets(
                         }
                         label.field {
                             (t.field_protocol)
-                            select name="protocol" onchange="const p=this.form.querySelector('[name=port]'); if (p && (p.value === '22' || p.value === '3389')) p.value = this.value === 'rdp' ? '3389' : '22';" {
+                            select name="protocol" onchange=(asset_protocol_onchange()) {
                                 (asset_protocol_options(t, ASSET_PROTOCOL_SSH))
                             }
                         }
@@ -892,6 +940,7 @@ pub fn assets(
                             (t.field_port)
                             input name="port" type="number" value="22" required;
                         }
+                        p class="fine-print field-wide" data-rdp-port-hint hidden { (t.rdp_port_hint) }
                         label.field {
                             (t.field_tags)
                             input name="tags" placeholder="prod, web" list="asset-tags-list";
@@ -1046,7 +1095,7 @@ pub fn edit_asset(
                         }
                         label.field {
                             (t.field_protocol)
-                            select name="protocol" onchange="const p=this.form.querySelector('[name=port]'); if (p && (p.value === '22' || p.value === '3389')) p.value = this.value === 'rdp' ? '3389' : '22';" {
+                            select name="protocol" onchange=(asset_protocol_onchange()) {
                                 (asset_protocol_options(t, &asset.protocol))
                             }
                         }
@@ -1058,6 +1107,7 @@ pub fn edit_asset(
                             (t.field_port)
                             input name="port" type="number" value=(asset.port) required;
                         }
+                        p class="fine-print field-wide" data-rdp-port-hint hidden[asset.protocol != ASSET_PROTOCOL_RDP] { (t.rdp_port_hint) }
                         label.field {
                             (t.field_tags)
                             input name="tags" value=(asset.tags.join(",")) placeholder="prod, web" list="asset-tags-list";
@@ -1112,6 +1162,10 @@ fn asset_protocol_options(t: &L10n, selected: &str) -> Markup {
         option value=(ASSET_PROTOCOL_RDP) selected[selected == ASSET_PROTOCOL_RDP] { (t.protocol_rdp) }
         option value=(ASSET_PROTOCOL_TCP) selected[selected == ASSET_PROTOCOL_TCP] { (t.protocol_tcp) }
     }
+}
+
+fn asset_protocol_onchange() -> &'static str {
+    "const p=this.form.querySelector('[name=port]'); if (p && (p.value === '22' || p.value === '3389')) p.value = this.value === 'rdp' ? '3389' : '22'; const h=this.form.querySelector('[data-rdp-port-hint]'); if (h) h.hidden = this.value !== 'rdp';"
 }
 
 fn asset_protocol_label<'a>(t: &'a L10n, protocol: &'a str) -> &'a str {
@@ -1724,6 +1778,7 @@ fn active_path(active: &str) -> &'static str {
         "known-hosts" => "/known-hosts",
         "sessions" => "/sessions",
         "import" => "/import",
+        "settings" => "/settings",
         "login" => "/login",
         _ => "/",
     }
@@ -1766,6 +1821,7 @@ mod tests {
         assert!(rendered.contains(r#"class="admin-shell""#));
         assert!(rendered.contains(r#"aria-current="page""#));
         assert!(rendered.contains(r#"href="/assets""#));
+        assert!(rendered.contains(r#"href="/settings""#));
         assert!(rendered.contains("/set-language?lang=zh"));
     }
 
@@ -1800,7 +1856,21 @@ mod tests {
         assert!(rendered.contains(r#"name="protocol""#));
         assert!(rendered.contains(r#"value="rdp""#));
         assert!(rendered.contains("RDP"));
+        assert!(rendered.contains(r#"data-rdp-port-hint"#));
+        assert!(rendered.contains("3390"));
         assert!(rendered.contains("ssh -p 2222 -N -T -L 127.0.0.1:13389:win-rdp.hop:3389 hop-host"));
+    }
+
+    #[test]
+    fn settings_page_renders_admin_password_form() {
+        let rendered = settings(&EN, "csrf-123", Some("problem")).into_string();
+
+        assert!(rendered.contains(r#"action="/settings""#));
+        assert!(rendered.contains(r#"name="current_password""#));
+        assert!(rendered.contains(r#"name="new_password""#));
+        assert!(rendered.contains(r#"name="confirm_password""#));
+        assert!(rendered.contains(r#"value="csrf-123""#));
+        assert!(rendered.contains("problem"));
     }
 
     #[test]

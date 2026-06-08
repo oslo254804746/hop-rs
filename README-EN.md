@@ -128,6 +128,7 @@ hop-server import --file dump.csv --on-conflict skip
 ```
 
 Credential import/export transfers metadata only, such as `name`, `username`, and `auth_type`; passwords and private keys are never exported.
+Change the admin password from Admin Web Settings; use `hop-server reset-admin` for recovery if you forget it.
 
 ## Docker
 

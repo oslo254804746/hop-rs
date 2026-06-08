@@ -128,6 +128,7 @@ hop-server import --file dump.csv --on-conflict skip
 ```
 
 凭证导入/导出只迁移 `name`、`username`、`auth_type` 等元数据，不导出密码或私钥材料。
+管理员密码可在 Admin Web 的 Settings 页面修改；忘记密码时使用 `hop-server reset-admin` 随机重置。
 
 ## Docker
 

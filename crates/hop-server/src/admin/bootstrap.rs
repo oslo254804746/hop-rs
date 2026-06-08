@@ -9,23 +9,52 @@ use rand::{distributions::Alphanumeric, Rng};
 pub const ADMIN_PASSWORD_HASH: &str = "admin_password_hash";
 pub const FIRST_RUN_COMPLETED: &str = "first_run_completed";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminPasswordChangeError {
+    CurrentPasswordInvalid,
+    NewPasswordEmpty,
+    ConfirmationMismatch,
+}
+
 pub async fn ensure_admin_password(db: &HopDb) -> Result<Option<String>> {
     if db.get_setting(ADMIN_PASSWORD_HASH).await?.is_some() {
         return Ok(None);
     }
     let password = generate_password();
-    let hash = hash_password(&password)?;
-    db.set_setting(ADMIN_PASSWORD_HASH, &hash).await?;
-    db.set_setting(FIRST_RUN_COMPLETED, "true").await?;
+    set_admin_password(db, &password).await?;
     Ok(Some(password))
 }
 
 pub async fn reset_admin_password(db: &HopDb) -> Result<String> {
     let password = generate_password();
-    let hash = hash_password(&password)?;
+    set_admin_password(db, &password).await?;
+    Ok(password)
+}
+
+pub async fn set_admin_password(db: &HopDb, password: &str) -> Result<()> {
+    let hash = hash_password(password)?;
     db.set_setting(ADMIN_PASSWORD_HASH, &hash).await?;
     db.set_setting(FIRST_RUN_COMPLETED, "true").await?;
-    Ok(password)
+    Ok(())
+}
+
+pub async fn change_admin_password(
+    db: &HopDb,
+    current_password: &str,
+    new_password: &str,
+    confirm_password: &str,
+) -> Result<std::result::Result<(), AdminPasswordChangeError>> {
+    if new_password.is_empty() {
+        return Ok(Err(AdminPasswordChangeError::NewPasswordEmpty));
+    }
+    if new_password != confirm_password {
+        return Ok(Err(AdminPasswordChangeError::ConfirmationMismatch));
+    }
+    if !verify_admin_password(db, current_password).await? {
+        return Ok(Err(AdminPasswordChangeError::CurrentPasswordInvalid));
+    }
+    set_admin_password(db, new_password).await?;
+    Ok(Ok(()))
 }
 
 pub async fn verify_admin_password(db: &HopDb, password: &str) -> Result<bool> {
@@ -69,5 +98,44 @@ mod tests {
         assert!(verify_password(&hash, "correct horse").unwrap());
         assert!(!verify_password(&hash, "wrong horse").unwrap());
         assert!(!hash.contains("correct horse"));
+    }
+
+    #[tokio::test]
+    async fn change_admin_password_requires_current_password_and_confirmation() {
+        let db = HopDb::in_memory().await.unwrap();
+        set_admin_password(&db, "old-pass").await.unwrap();
+
+        assert_eq!(
+            change_admin_password(&db, "wrong-pass", "new-pass", "new-pass")
+                .await
+                .unwrap(),
+            Err(AdminPasswordChangeError::CurrentPasswordInvalid)
+        );
+        assert!(verify_admin_password(&db, "old-pass").await.unwrap());
+
+        assert_eq!(
+            change_admin_password(&db, "old-pass", "new-pass", "different")
+                .await
+                .unwrap(),
+            Err(AdminPasswordChangeError::ConfirmationMismatch)
+        );
+        assert!(verify_admin_password(&db, "old-pass").await.unwrap());
+
+        assert_eq!(
+            change_admin_password(&db, "old-pass", "", "")
+                .await
+                .unwrap(),
+            Err(AdminPasswordChangeError::NewPasswordEmpty)
+        );
+        assert!(verify_admin_password(&db, "old-pass").await.unwrap());
+
+        assert_eq!(
+            change_admin_password(&db, "old-pass", "new-pass", "new-pass")
+                .await
+                .unwrap(),
+            Ok(())
+        );
+        assert!(!verify_admin_password(&db, "old-pass").await.unwrap());
+        assert!(verify_admin_password(&db, "new-pass").await.unwrap());
     }
 }

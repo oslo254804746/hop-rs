@@ -25,7 +25,7 @@ use super::{
         AuthenticatedSession,
     },
     bootstrap, html,
-    i18n::{l10n, locale_from_code, resolve_locale, LOCALE_COOKIE},
+    i18n::{l10n, locale_from_code, resolve_locale, L10n, LOCALE_COOKIE},
     local_cli::parse_public_key_line,
     transfer::{self, ConflictPolicy, ImportSummary, TransferFormat, TransferKind},
 };
@@ -79,6 +79,7 @@ pub async fn serve_admin(
         )
         .route("/sessions", get(sessions))
         .route("/import", get(import_page).post(import_data))
+        .route("/settings", get(settings).post(update_settings))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -179,6 +180,70 @@ async fn logout(State(state): State<AdminState>, headers: HeaderMap) -> Response
         ],
     )
         .into_response()
+}
+
+async fn settings(State(state): State<AdminState>, headers: HeaderMap) -> Response {
+    let t = request_l10n(&headers);
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    Html(html::settings(t, &session.csrf_token, None).into_string()).into_response()
+}
+
+#[derive(Deserialize)]
+struct SettingsForm {
+    csrf_token: String,
+    current_password: String,
+    new_password: String,
+    confirm_password: String,
+}
+
+async fn update_settings(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Form(form): Form<SettingsForm>,
+) -> Response {
+    let t = request_l10n(&headers);
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
+        return resp;
+    }
+    match bootstrap::change_admin_password(
+        &state.db,
+        &form.current_password,
+        &form.new_password,
+        &form.confirm_password,
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            state.sessions.remove(&session.token).await;
+            (
+                StatusCode::SEE_OTHER,
+                [
+                    (header::SET_COOKIE, clear_cookie()),
+                    (header::LOCATION, "/login".to_string()),
+                ],
+            )
+                .into_response()
+        }
+        Ok(Err(err)) => Html(
+            html::settings(
+                t,
+                &session.csrf_token,
+                Some(settings_password_error_message(t, err)),
+            )
+            .into_string(),
+        )
+        .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to change admin password",
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -902,6 +967,21 @@ fn safe_redirect(value: Option<&str>) -> Option<&str> {
     (value.starts_with('/') && !value.starts_with("//")).then_some(value)
 }
 
+fn settings_password_error_message(
+    t: &L10n,
+    err: bootstrap::AdminPasswordChangeError,
+) -> &'static str {
+    match err {
+        bootstrap::AdminPasswordChangeError::CurrentPasswordInvalid => {
+            t.settings_current_password_invalid
+        }
+        bootstrap::AdminPasswordChangeError::NewPasswordEmpty => t.settings_new_password_empty,
+        bootstrap::AdminPasswordChangeError::ConfirmationMismatch => {
+            t.settings_password_confirmation_mismatch
+        }
+    }
+}
+
 fn download_response(name: &str, format: TransferFormat, body: String) -> Response {
     (
         StatusCode::OK,
@@ -958,6 +1038,7 @@ fn parse_bulk_tags_body(body: &[u8]) -> Result<BulkTagsForm> {
 
 #[cfg(test)]
 mod tests {
+    use super::bootstrap::AdminPasswordChangeError;
     use super::*;
 
     #[test]
@@ -989,5 +1070,30 @@ mod tests {
         assert_eq!(asset.protocol, "rdp");
         assert_eq!(asset.tags, vec!["windows", "rdp"]);
         assert!(asset.credential_id.is_none());
+    }
+
+    #[test]
+    fn settings_password_errors_map_to_localized_messages() {
+        assert_eq!(
+            settings_password_error_message(
+                &super::super::i18n::EN,
+                AdminPasswordChangeError::CurrentPasswordInvalid
+            ),
+            super::super::i18n::EN.settings_current_password_invalid
+        );
+        assert_eq!(
+            settings_password_error_message(
+                &super::super::i18n::EN,
+                AdminPasswordChangeError::NewPasswordEmpty
+            ),
+            super::super::i18n::EN.settings_new_password_empty
+        );
+        assert_eq!(
+            settings_password_error_message(
+                &super::super::i18n::EN,
+                AdminPasswordChangeError::ConfirmationMismatch
+            ),
+            super::super::i18n::EN.settings_password_confirmation_mismatch
+        );
     }
 }

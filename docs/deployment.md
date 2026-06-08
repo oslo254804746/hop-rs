@@ -65,6 +65,8 @@ First boot prints the admin password:
 sudo journalctl -u hop -n 50 --no-pager
 ```
 
+After signing in, change the admin password from Admin Web -> Settings. If it is forgotten, run `hop-server reset-admin` to generate a new random password.
+
 Continue with "Initial Data Setup" before the first SSH verification.
 
 ---
@@ -130,6 +132,8 @@ docker exec hop hop-server --config /data/config.toml reset-admin
 printf '%s' 'secret' | docker exec -i hop hop-server --config /data/config.toml \
   credential add --name deploy --username deploy --auth-type password --password-stdin
 ```
+
+Use Admin Web -> Settings to change the password after the first login; keep `reset-admin` for password recovery.
 
 ---
 
