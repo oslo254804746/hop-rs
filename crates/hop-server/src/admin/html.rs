@@ -1,6 +1,7 @@
 use hop_core::{
-    Asset, AuthorizedKey, Credential, KnownHost, Session, ASSET_PROTOCOL_RDP, ASSET_PROTOCOL_SSH,
-    ASSET_PROTOCOL_TCP,
+    Asset, AuthorizedKey, Credential, KnownHost, Session, ASSET_PRESET_MYSQL,
+    ASSET_PRESET_POSTGRES, ASSET_PRESET_RDP, ASSET_PRESET_REDIS, ASSET_PRESET_VNC,
+    ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
@@ -1011,7 +1012,7 @@ pub fn assets(
                                                 }
                                             }
                                         }
-                                        td { span.status-pill.neutral { (asset_protocol_label(t, &asset.protocol)) } }
+                                        td { span.status-pill.neutral { (asset_protocol_label(t, asset_kind(asset))) } }
                                         td.mono { (asset.hostname) ":" (asset.port) }
                                         td {
                                             div.tag-list {
@@ -1096,7 +1097,7 @@ pub fn edit_asset(
                         label.field {
                             (t.field_protocol)
                             select name="protocol" onchange=(asset_protocol_onchange()) {
-                                (asset_protocol_options(t, &asset.protocol))
+                                (asset_protocol_options(t, asset_kind(asset)))
                             }
                         }
                         label.field {
@@ -1107,7 +1108,7 @@ pub fn edit_asset(
                             (t.field_port)
                             input name="port" type="number" value=(asset.port) required;
                         }
-                        p class="fine-print field-wide" data-rdp-port-hint hidden[asset.protocol != ASSET_PROTOCOL_RDP] { (t.rdp_port_hint) }
+                        p class="fine-print field-wide" data-rdp-port-hint hidden[asset.preset.as_deref() != Some(ASSET_PRESET_RDP)] { (t.rdp_port_hint) }
                         label.field {
                             (t.field_tags)
                             input name="tags" value=(asset.tags.join(",")) placeholder="prod, web" list="asset-tags-list";
@@ -1159,32 +1160,47 @@ pub fn edit_asset(
 fn asset_protocol_options(t: &L10n, selected: &str) -> Markup {
     html! {
         option value=(ASSET_PROTOCOL_SSH) selected[selected == ASSET_PROTOCOL_SSH] { (t.protocol_ssh) }
-        option value=(ASSET_PROTOCOL_RDP) selected[selected == ASSET_PROTOCOL_RDP] { (t.protocol_rdp) }
         option value=(ASSET_PROTOCOL_TCP) selected[selected == ASSET_PROTOCOL_TCP] { (t.protocol_tcp) }
+        option value=(ASSET_PRESET_RDP) selected[selected == ASSET_PRESET_RDP] { (t.protocol_rdp) }
+        option value=(ASSET_PRESET_VNC) selected[selected == ASSET_PRESET_VNC] { (t.protocol_vnc) }
+        option value=(ASSET_PRESET_MYSQL) selected[selected == ASSET_PRESET_MYSQL] { (t.protocol_mysql) }
+        option value=(ASSET_PRESET_POSTGRES) selected[selected == ASSET_PRESET_POSTGRES] { (t.protocol_postgres) }
+        option value=(ASSET_PRESET_REDIS) selected[selected == ASSET_PRESET_REDIS] { (t.protocol_redis) }
     }
 }
 
 fn asset_protocol_onchange() -> &'static str {
-    "const p=this.form.querySelector('[name=port]'); if (p && (p.value === '22' || p.value === '3389')) p.value = this.value === 'rdp' ? '3389' : '22'; const h=this.form.querySelector('[data-rdp-port-hint]'); if (h) h.hidden = this.value !== 'rdp';"
+    "const p=this.form.querySelector('[name=port]'); const d={ssh:22,tcp:22,rdp:3389,vnc:5900,mysql:3306,postgres:5432,redis:6379}; if(p&&d[this.value])p.value=d[this.value]; const h=this.form.querySelector('[data-rdp-port-hint]'); if(h)h.hidden=this.value!=='rdp';"
 }
 
 fn asset_protocol_label<'a>(t: &'a L10n, protocol: &'a str) -> &'a str {
     match protocol {
         ASSET_PROTOCOL_SSH => t.protocol_ssh,
-        ASSET_PROTOCOL_RDP => t.protocol_rdp,
         ASSET_PROTOCOL_TCP => t.protocol_tcp,
+        ASSET_PRESET_RDP => t.protocol_rdp,
+        ASSET_PRESET_VNC => t.protocol_vnc,
+        ASSET_PRESET_MYSQL => t.protocol_mysql,
+        ASSET_PRESET_POSTGRES => t.protocol_postgres,
+        ASSET_PRESET_REDIS => t.protocol_redis,
         other => other,
     }
+}
+
+fn asset_kind(asset: &Asset) -> &str {
+    asset.preset.as_deref().unwrap_or(&asset.protocol)
 }
 
 fn asset_tunnel_command(asset: &Asset, ssh_port: u16) -> Option<String> {
     if asset.protocol == ASSET_PROTOCOL_SSH {
         return None;
     }
-    let local_port = if asset.protocol == ASSET_PROTOCOL_RDP {
-        13389
-    } else {
-        asset.port
+    let local_port = match asset.preset.as_deref() {
+        Some(ASSET_PRESET_RDP) => 13389,
+        Some(ASSET_PRESET_VNC) => 15900,
+        Some(ASSET_PRESET_MYSQL) => 13306,
+        Some(ASSET_PRESET_POSTGRES) => 15432,
+        Some(ASSET_PRESET_REDIS) => 16379,
+        _ => asset.port,
     };
     Some(format!(
         "ssh -p {ssh_port} -N -T -L 127.0.0.1:{local_port}:{}:{} hop-host",
@@ -1848,7 +1864,8 @@ mod tests {
     #[test]
     fn assets_page_renders_protocol_controls_and_rdp_tunnel_hint() {
         let mut rdp = asset("win-rdp", "10.0.2.20", &["windows"]);
-        rdp.protocol = ASSET_PROTOCOL_RDP.to_string();
+        rdp.protocol = ASSET_PROTOCOL_TCP.to_string();
+        rdp.preset = Some(ASSET_PRESET_RDP.to_string());
         rdp.port = 3389;
 
         let rendered = assets(&EN, &[rdp], &[], "csrf-123", None, &[], 2222).into_string();
@@ -1859,6 +1876,29 @@ mod tests {
         assert!(rendered.contains(r#"data-rdp-port-hint"#));
         assert!(rendered.contains("3390"));
         assert!(rendered.contains("ssh -p 2222 -N -T -L 127.0.0.1:13389:win-rdp.hop:3389 hop-host"));
+    }
+
+    #[test]
+    fn assets_page_renders_generic_tcp_presets_with_shared_tunnel_transport() {
+        let cases = [
+            (ASSET_PRESET_VNC, 5900, 15900),
+            (ASSET_PRESET_MYSQL, 3306, 13306),
+            (ASSET_PRESET_POSTGRES, 5432, 15432),
+            (ASSET_PRESET_REDIS, 6379, 16379),
+        ];
+
+        for (preset, remote_port, local_port) in cases {
+            let mut item = asset(preset, "10.0.0.20", &[]);
+            item.protocol = ASSET_PROTOCOL_TCP.to_string();
+            item.preset = Some(preset.to_string());
+            item.port = remote_port;
+            let rendered = assets(&EN, &[item], &[], "csrf-123", None, &[], 2222).into_string();
+
+            assert!(rendered.contains(&format!(r#"value="{preset}""#)));
+            assert!(rendered.contains(&format!(
+                "ssh -p 2222 -N -T -L 127.0.0.1:{local_port}:{preset}.hop:{remote_port} hop-host"
+            )));
+        }
     }
 
     #[test]
@@ -1886,6 +1926,7 @@ mod tests {
             id: name.to_string(),
             name: name.to_string(),
             protocol: ASSET_PROTOCOL_SSH.to_string(),
+            preset: None,
             hostname: hostname.to_string(),
             port: 22,
             description: None,

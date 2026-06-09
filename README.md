@@ -31,8 +31,8 @@
 │  公钥白名单        仅受信密钥可进入 Hop               │
 │  TUI 资产选择器    模糊搜索，秒级连接                 │
 │  托管凭证          服务端代理认证目标主机             │
-│  ProxyJump 转发    受资产白名单约束的 TCP 转发        │
-│  RDP/TCP 资产      标准 SSH 隧道，无需 Hop 客户端     │
+│  通用 TCP 转发     RDP/VNC/数据库等标准 SSH 隧道      │
+│  SSH/SFTP          托管凭证透明连接目标主机           │
 │  Admin Web         轻量管理界面                       │
 │  批量导入/导出     资产与凭证元数据迁移               │
 │  TOFU 主机密钥     首次连接自动信任                   │
@@ -93,15 +93,25 @@ ssh -p 2222 hop-host
 # 直连模式 —— 资产名作为 SSH 用户名
 ssh -p 2222 web-prod-01@hop-host
 
+# SFTP —— 使用同一 SSH 资产及其托管凭证
+sftp -P 2222 web-prod-01@hop-host
+scp -P 2222 ./file web-prod-01@hop-host:/tmp/file
+
 # ProxyJump —— Hop 作为透明 TCP 中继
 ssh -J hop-host:2222 web-prod-01.hop
 
 # RDP —— Admin Web 中创建 protocol=RDP、port=3389 的资产后复制隧道命令
 ssh -p 2222 -N -T -L 127.0.0.1:13389:win-prod-rdp.hop:3389 hop-host
 mstsc /v:127.0.0.1:13389
+
+# VNC / MySQL 等都使用相同的通用 TCP 转发
+ssh -p 2222 -N -T -L 127.0.0.1:15900:vnc-prod.hop:5900 hop-host
+ssh -p 2222 -N -T -L 127.0.0.1:13306:mysql-prod.hop:3306 hop-host
 ```
 
-交互式 TUI 和直连模式使用 Hop 托管凭证连接 SSH 目标；ProxyJump、本地端口转发和 RDP/TCP 资产只做受资产白名单约束的 TCP 中继。RDP 不需要 Hop 客户端 CLI，使用系统自带 OpenSSH 与 mstsc / Microsoft Remote Desktop / FreeRDP 等标准客户端即可。
+交互式 TUI、直连模式和 SFTP 使用 Hop 托管凭证连接 SSH 目标。ProxyJump 与本地端口转发是受资产白名单约束的透明 TCP 中继，RDP、VNC、MySQL、PostgreSQL、Redis 只是端口和客户端提示预设，核心不解析应用协议。通用转发仅支持 TCP，不自动处理 UDP 或动态多端口协议。
+
+当前授权模型刻意保持极简：任一启用的 Hop SSH Key 都可以访问全部已配置资产。按 Key 分配资产属于后续可选演进方向。
 
 ## 项目结构
 
@@ -122,7 +132,7 @@ hop-server serve                    # 启动服务（默认）
 hop-server reset-admin              # 重置管理员密码
 hop-server key add|list|activate|deactivate
 hop-server credential add|list|delete
-hop-server asset add|list|delete       # add 支持 --protocol ssh|rdp|tcp
+hop-server asset add|list|delete       # add 支持 ssh|tcp 及常见 TCP presets
 hop-server export --kind assets --format csv --output dump.csv
 hop-server import --file dump.csv --on-conflict skip
 ```

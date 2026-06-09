@@ -10,9 +10,9 @@ use axum::{
     Router,
 };
 use hop_core::{
-    encrypt_envelope, new_id, protocol_supports_managed_credentials, validate_asset_protocol,
-    validate_credential_material, validate_tcp_port, AuthType, HopDb, MasterKey, NewAsset,
-    NewAuthorizedKey, NewCredential, ASSET_PROTOCOL_SSH,
+    encrypt_envelope, new_id, protocol_supports_managed_credentials, validate_credential_material,
+    validate_tcp_port, AuthType, HopDb, MasterKey, NewAsset, NewAuthorizedKey, NewCredential,
+    ASSET_PROTOCOL_SSH,
 };
 use serde::Deserialize;
 use tokio::net::TcpListener;
@@ -289,6 +289,7 @@ struct AssetForm {
     csrf_token: String,
     name: String,
     protocol: Option<String>,
+    preset: Option<String>,
     hostname: String,
     port: i64,
     description: Option<String>,
@@ -410,6 +411,7 @@ async fn bulk_update_asset_tags(
                     NewAsset {
                         name: asset.name,
                         protocol: asset.protocol,
+                        preset: asset.preset,
                         hostname: asset.hostname,
                         port: asset.port,
                         description: asset.description,
@@ -594,8 +596,11 @@ fn parse_tags(tags: Option<String>) -> Vec<String> {
 }
 
 fn new_asset_from_form(form: AssetForm) -> Option<NewAsset> {
-    let protocol =
-        validate_asset_protocol(form.protocol.as_deref().unwrap_or(ASSET_PROTOCOL_SSH)).ok()?;
+    let (protocol, preset) = hop_core::normalize_asset_protocol(
+        form.protocol.as_deref().unwrap_or(ASSET_PROTOCOL_SSH),
+        form.preset.as_deref(),
+    )
+    .ok()?;
     validate_tcp_port(form.port).ok()?;
     let credential_id = if protocol_supports_managed_credentials(&protocol) {
         form.credential_id.filter(|value| !value.trim().is_empty())
@@ -605,6 +610,7 @@ fn new_asset_from_form(form: AssetForm) -> Option<NewAsset> {
     Some(NewAsset {
         name: form.name,
         protocol,
+        preset,
         hostname: form.hostname,
         port: form.port,
         description: form.description.filter(|v| !v.trim().is_empty()),
@@ -1059,6 +1065,7 @@ mod tests {
             csrf_token: "csrf-123".to_string(),
             name: "win-rdp".to_string(),
             protocol: Some("rdp".to_string()),
+            preset: None,
             hostname: "10.0.2.20".to_string(),
             port: 3389,
             description: None,
@@ -1067,7 +1074,8 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(asset.protocol, "rdp");
+        assert_eq!(asset.protocol, "tcp");
+        assert_eq!(asset.preset.as_deref(), Some("rdp"));
         assert_eq!(asset.tags, vec!["windows", "rdp"]);
         assert!(asset.credential_id.is_none());
     }

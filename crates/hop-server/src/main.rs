@@ -12,7 +12,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use hop_core::{
-    load_or_create_master_key, AuthType, HopConfig, HopDb, MasterKey, NewAsset, ASSET_PROTOCOL_RDP,
+    load_or_create_master_key, AuthType, HopConfig, HopDb, MasterKey, NewAsset, ASSET_PRESET_RDP,
     ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
 };
 use tracing::{info, warn};
@@ -181,14 +181,22 @@ enum AssetProtocolArg {
     Ssh,
     Rdp,
     Tcp,
+    Vnc,
+    Mysql,
+    Postgres,
+    Redis,
 }
 
 impl AssetProtocolArg {
     fn as_str(&self) -> &'static str {
         match self {
             Self::Ssh => ASSET_PROTOCOL_SSH,
-            Self::Rdp => ASSET_PROTOCOL_RDP,
+            Self::Rdp => ASSET_PRESET_RDP,
             Self::Tcp => ASSET_PROTOCOL_TCP,
+            Self::Vnc => "vnc",
+            Self::Mysql => "mysql",
+            Self::Postgres => "postgres",
+            Self::Redis => "redis",
         }
     }
 }
@@ -297,6 +305,7 @@ async fn main() -> Result<()> {
                         NewAsset {
                             name,
                             protocol: protocol.as_str().to_string(),
+                            preset: None,
                             hostname,
                             port,
                             description,
@@ -599,7 +608,7 @@ mod tests {
             panic!("expected asset add");
         };
 
-        assert_eq!(protocol.as_str(), ASSET_PROTOCOL_RDP);
+        assert_eq!(protocol.as_str(), ASSET_PRESET_RDP);
         assert_eq!(port, 3389);
     }
 

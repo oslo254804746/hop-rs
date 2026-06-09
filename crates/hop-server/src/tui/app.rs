@@ -144,7 +144,7 @@ pub struct TuiApp {
 #[derive(Clone, Debug)]
 pub enum AssetListItem {
     Group(String),
-    Asset(Asset),
+    Asset(Box<Asset>),
 }
 
 #[derive(Clone)]
@@ -232,7 +232,7 @@ impl TuiApp {
                 current_group = group.clone();
                 items.push(AssetListItem::Group(group));
             }
-            items.push(AssetListItem::Asset(asset));
+            items.push(AssetListItem::Asset(Box::new(asset)));
         }
         items
     }
@@ -318,6 +318,7 @@ mod tests {
             id: name.to_string(),
             name: name.to_string(),
             protocol: hop_core::ASSET_PROTOCOL_SSH.to_string(),
+            preset: None,
             hostname: "127.0.0.1".to_string(),
             port: 22,
             description: None,

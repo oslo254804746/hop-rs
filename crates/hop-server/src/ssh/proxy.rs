@@ -132,7 +132,7 @@ pub async fn bridge_direct_tcpip(
         .start_session(NewSession {
             key_finger: auth.fingerprint,
             key_name: Some(auth.name),
-            mode: "proxyjump".to_string(),
+            mode: "tcp-forward".to_string(),
             asset_name: Some(asset.name.clone()),
             target_host: Some(asset.hostname.clone()),
             target_port: Some(asset.port),

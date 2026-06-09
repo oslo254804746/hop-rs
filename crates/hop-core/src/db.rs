@@ -8,7 +8,7 @@ use sqlx::{
 use crate::{
     errors::HopCoreError,
     models::{
-        new_id, protocol_supports_managed_credentials, validate_asset_protocol, validate_tcp_port,
+        new_id, normalize_asset_protocol, protocol_supports_managed_credentials, validate_tcp_port,
         Asset, AssetRow, AuthorizedKey, Credential, KnownHost, NewAsset, NewAuthorizedKey,
         NewCredential, NewKnownHost, NewSession, Session, Setting,
     },
@@ -242,7 +242,8 @@ impl HopDb {
 
     pub async fn add_asset(&self, asset: NewAsset) -> Result<Asset> {
         let id = new_id();
-        let protocol = validate_asset_protocol(&asset.protocol)?;
+        let (protocol, preset) =
+            normalize_asset_protocol(&asset.protocol, asset.preset.as_deref())?;
         let port = validate_tcp_port(asset.port)?;
         let tags = serde_json::to_string(&asset.tags)?;
         let credential_id = if protocol_supports_managed_credentials(&protocol) {
@@ -252,13 +253,14 @@ impl HopDb {
         };
         sqlx::query(
             r#"
-            INSERT INTO assets (id, name, protocol, hostname, port, description, tags, credential_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            INSERT INTO assets (id, name, protocol, preset, hostname, port, description, tags, credential_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             "#,
         )
         .bind(&id)
         .bind(asset.name)
         .bind(protocol)
+        .bind(preset)
         .bind(asset.hostname)
         .bind(i64::from(port))
         .bind(asset.description)
@@ -272,7 +274,8 @@ impl HopDb {
     }
 
     pub async fn update_asset(&self, id: &str, asset: NewAsset) -> Result<()> {
-        let protocol = validate_asset_protocol(&asset.protocol)?;
+        let (protocol, preset) =
+            normalize_asset_protocol(&asset.protocol, asset.preset.as_deref())?;
         let port = validate_tcp_port(asset.port)?;
         let tags = serde_json::to_string(&asset.tags)?;
         let credential_id = if protocol_supports_managed_credentials(&protocol) {
@@ -285,17 +288,19 @@ impl HopDb {
             UPDATE assets
             SET name = ?1,
                 protocol = ?2,
-                hostname = ?3,
-                port = ?4,
-                description = ?5,
-                tags = ?6,
-                credential_id = ?7,
+                preset = ?3,
+                hostname = ?4,
+                port = ?5,
+                description = ?6,
+                tags = ?7,
+                credential_id = ?8,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?8
+            WHERE id = ?9
             "#,
         )
         .bind(asset.name)
         .bind(protocol)
+        .bind(preset)
         .bind(asset.hostname)
         .bind(i64::from(port))
         .bind(asset.description)
@@ -318,7 +323,7 @@ impl HopDb {
     pub async fn list_assets(&self) -> Result<Vec<Asset>> {
         let rows = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT id, name, protocol, hostname, port, description, tags, credential_id, created_at, updated_at
+            SELECT id, name, protocol, preset, hostname, port, description, tags, credential_id, created_at, updated_at
             FROM assets
             ORDER BY name ASC
             "#,
@@ -333,7 +338,7 @@ impl HopDb {
     pub async fn get_asset_by_id(&self, id: &str) -> Result<Option<Asset>> {
         let row = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT id, name, protocol, hostname, port, description, tags, credential_id, created_at, updated_at
+            SELECT id, name, protocol, preset, hostname, port, description, tags, credential_id, created_at, updated_at
             FROM assets
             WHERE id = ?1
             "#,
@@ -347,7 +352,7 @@ impl HopDb {
     pub async fn get_asset_by_name(&self, name: &str) -> Result<Option<Asset>> {
         let row = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT id, name, protocol, hostname, port, description, tags, credential_id, created_at, updated_at
+            SELECT id, name, protocol, preset, hostname, port, description, tags, credential_id, created_at, updated_at
             FROM assets
             WHERE name = ?1
             "#,
@@ -369,7 +374,7 @@ impl HopDb {
 
         let row = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT id, name, protocol, hostname, port, description, tags, credential_id, created_at, updated_at
+            SELECT id, name, protocol, preset, hostname, port, description, tags, credential_id, created_at, updated_at
             FROM assets
             WHERE (hostname = ?1 AND port = ?2)
                OR (name = ?3)
@@ -678,7 +683,8 @@ mod tests {
 
         let inserted = db.add_asset(asset).await.unwrap();
 
-        assert_eq!(inserted.protocol, "rdp");
+        assert_eq!(inserted.protocol, "tcp");
+        assert_eq!(inserted.preset.as_deref(), Some("rdp"));
         assert!(inserted.credential_id.is_none());
     }
 

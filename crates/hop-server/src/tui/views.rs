@@ -350,6 +350,7 @@ mod tests {
             id: name.to_string(),
             name: name.to_string(),
             protocol: hop_core::ASSET_PROTOCOL_SSH.to_string(),
+            preset: None,
             hostname: "127.0.0.1".to_string(),
             port: 22,
             description: None,

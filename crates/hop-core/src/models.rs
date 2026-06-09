@@ -4,8 +4,12 @@ use uuid::Uuid;
 use crate::errors::HopCoreError;
 
 pub const ASSET_PROTOCOL_SSH: &str = "ssh";
-pub const ASSET_PROTOCOL_RDP: &str = "rdp";
 pub const ASSET_PROTOCOL_TCP: &str = "tcp";
+pub const ASSET_PRESET_RDP: &str = "rdp";
+pub const ASSET_PRESET_VNC: &str = "vnc";
+pub const ASSET_PRESET_MYSQL: &str = "mysql";
+pub const ASSET_PRESET_POSTGRES: &str = "postgres";
+pub const ASSET_PRESET_REDIS: &str = "redis";
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AuthorizedKey {
@@ -43,6 +47,7 @@ pub struct Asset {
     pub id: String,
     pub name: String,
     pub protocol: String,
+    pub preset: Option<String>,
     pub hostname: String,
     pub port: i64,
     pub description: Option<String>,
@@ -57,6 +62,7 @@ pub(crate) struct AssetRow {
     pub id: String,
     pub name: String,
     pub protocol: String,
+    pub preset: Option<String>,
     pub hostname: String,
     pub port: i64,
     pub description: Option<String>,
@@ -74,12 +80,13 @@ impl TryFrom<AssetRow> for Asset {
             Some(raw) if !raw.trim().is_empty() => serde_json::from_str(&raw)?,
             _ => Vec::new(),
         };
-        let protocol = validate_asset_protocol(&row.protocol)?;
+        let (protocol, preset) = normalize_asset_protocol(&row.protocol, row.preset.as_deref())?;
 
         Ok(Self {
             id: row.id,
             name: row.name,
             protocol,
+            preset,
             hostname: row.hostname,
             port: row.port,
             description: row.description,
@@ -95,6 +102,7 @@ impl TryFrom<AssetRow> for Asset {
 pub struct NewAsset {
     pub name: String,
     pub protocol: String,
+    pub preset: Option<String>,
     pub hostname: String,
     pub port: i64,
     pub description: Option<String>,
@@ -107,6 +115,7 @@ impl NewAsset {
         Self {
             name: name.into(),
             protocol: ASSET_PROTOCOL_SSH.to_string(),
+            preset: None,
             hostname: hostname.into(),
             port,
             description: None,
@@ -235,10 +244,46 @@ pub fn validate_tcp_port(port: i64) -> crate::Result<u16> {
 pub fn validate_asset_protocol(protocol: &str) -> crate::Result<String> {
     match protocol.trim().to_ascii_lowercase().as_str() {
         ASSET_PROTOCOL_SSH => Ok(ASSET_PROTOCOL_SSH.to_string()),
-        ASSET_PROTOCOL_RDP => Ok(ASSET_PROTOCOL_RDP.to_string()),
         ASSET_PROTOCOL_TCP => Ok(ASSET_PROTOCOL_TCP.to_string()),
         other => Err(HopCoreError::Validation(format!(
-            "asset protocol must be ssh, rdp, or tcp, got {other}"
+            "asset protocol must be ssh or tcp, got {other}"
+        ))),
+    }
+}
+
+pub fn normalize_asset_protocol(
+    protocol: &str,
+    preset: Option<&str>,
+) -> crate::Result<(String, Option<String>)> {
+    let protocol = protocol.trim().to_ascii_lowercase();
+    let legacy_preset = validate_asset_preset(Some(protocol.as_str()))
+        .ok()
+        .flatten();
+    if legacy_preset.is_some() {
+        return Ok((ASSET_PROTOCOL_TCP.to_string(), legacy_preset));
+    }
+    let protocol = validate_asset_protocol(&protocol)?;
+    let preset = validate_asset_preset(preset)?;
+    if protocol == ASSET_PROTOCOL_SSH && preset.is_some() {
+        return Err(HopCoreError::Validation(
+            "ssh assets cannot use a tcp preset".to_string(),
+        ));
+    }
+    Ok((protocol, preset))
+}
+
+pub fn validate_asset_preset(preset: Option<&str>) -> crate::Result<Option<String>> {
+    let Some(preset) = preset.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    match preset.to_ascii_lowercase().as_str() {
+        ASSET_PRESET_RDP => Ok(Some(ASSET_PRESET_RDP.to_string())),
+        ASSET_PRESET_VNC => Ok(Some(ASSET_PRESET_VNC.to_string())),
+        ASSET_PRESET_MYSQL => Ok(Some(ASSET_PRESET_MYSQL.to_string())),
+        ASSET_PRESET_POSTGRES => Ok(Some(ASSET_PRESET_POSTGRES.to_string())),
+        ASSET_PRESET_REDIS => Ok(Some(ASSET_PRESET_REDIS.to_string())),
+        other => Err(HopCoreError::Validation(format!(
+            "unsupported tcp preset: {other}"
         ))),
     }
 }
@@ -302,9 +347,16 @@ mod tests {
     #[test]
     fn validate_asset_protocol_accepts_only_supported_values() {
         assert_eq!(validate_asset_protocol("ssh").unwrap(), "ssh");
-        assert_eq!(validate_asset_protocol("RDP").unwrap(), "rdp");
         assert_eq!(validate_asset_protocol(" tcp ").unwrap(), "tcp");
         assert!(validate_asset_protocol("vnc").is_err());
+        assert_eq!(
+            normalize_asset_protocol("RDP", None).unwrap(),
+            ("tcp".to_string(), Some("rdp".to_string()))
+        );
+        assert_eq!(
+            normalize_asset_protocol("tcp", Some("VNC")).unwrap(),
+            ("tcp".to_string(), Some("vnc".to_string()))
+        );
         assert!(validate_asset_protocol("").is_err());
     }
 

@@ -149,20 +149,22 @@ pub async fn delete_credential(db: &HopDb, id: &str) -> Result<()> {
 
 pub async fn add_asset(db: &HopDb, asset: NewAsset) -> Result<()> {
     let asset = db.add_asset(asset).await?;
+    let kind = asset.preset.as_deref().unwrap_or(&asset.protocol);
     println!(
         "added asset {}\t{}\t{}\t{}:{}",
-        asset.id, asset.name, asset.protocol, asset.hostname, asset.port
+        asset.id, asset.name, kind, asset.hostname, asset.port
     );
     Ok(())
 }
 
 pub async fn list_assets(db: &HopDb) -> Result<()> {
     for asset in db.list_assets().await? {
+        let kind = asset.preset.as_deref().unwrap_or(&asset.protocol);
         println!(
             "{}\t{}\t{}\t{}:{}\t{}\t{}",
             asset.id,
             asset.name,
-            asset.protocol,
+            kind,
             asset.hostname,
             asset.port,
             asset.tags.join(","),

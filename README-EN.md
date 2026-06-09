@@ -31,8 +31,8 @@ Most bastion/jump-server solutions are bloated Java/Python stacks with databases
 │  Pubkey Whitelist     Only trusted keys enter Hop       │
 │  TUI Asset Picker     Fuzzy search, connect in seconds  │
 │  Managed Credentials  Server-side auth to targets       │
-│  ProxyJump/ProxyCmd   Allowlist-restricted TCP forward  │
-│  RDP/TCP Assets       Standard SSH tunnels, no Hop CLI  │
+│  Generic TCP Forward  RDP/VNC/database SSH tunnels      │
+│  SSH/SFTP             Managed access to SSH targets     │
 │  Admin Web            Lightweight management UI         │
 │  Import/Export        Asset and credential metadata     │
 │  TOFU Host Keys       Auto-trust on first connect       │
@@ -93,15 +93,25 @@ ssh -p 2222 hop-host
 # Direct connect — asset name as SSH username
 ssh -p 2222 web-prod-01@hop-host
 
+# SFTP — reuse the SSH asset and its managed credential
+sftp -P 2222 web-prod-01@hop-host
+scp -P 2222 ./file web-prod-01@hop-host:/tmp/file
+
 # ProxyJump — Hop as a transparent TCP relay
 ssh -J hop-host:2222 web-prod-01.hop
 
 # RDP — create a protocol=RDP, port=3389 asset in Admin Web, then copy the tunnel command
 ssh -p 2222 -N -T -L 127.0.0.1:13389:win-prod-rdp.hop:3389 hop-host
 mstsc /v:127.0.0.1:13389
+
+# VNC and MySQL use the same generic TCP forwarding path
+ssh -p 2222 -N -T -L 127.0.0.1:15900:vnc-prod.hop:5900 hop-host
+ssh -p 2222 -N -T -L 127.0.0.1:13306:mysql-prod.hop:3306 hop-host
 ```
 
-Interactive TUI and direct-connect modes use Hop-managed credentials to reach SSH targets. ProxyJump, local port forwarding, and RDP/TCP assets are asset-allowlisted TCP relays. RDP does not require a Hop client CLI; use system OpenSSH plus mstsc, Microsoft Remote Desktop, FreeRDP, or another standard RDP client.
+Interactive TUI, direct connect, and SFTP use Hop-managed credentials to reach SSH targets. ProxyJump and local forwarding are transparent, asset-allowlisted TCP relays. RDP, VNC, MySQL, PostgreSQL, and Redis are presets for ports and client guidance; the core does not parse those application protocols. Generic forwarding supports TCP only, not UDP or dynamic multi-port protocols.
+
+The current authorization model is intentionally minimal: every active Hop SSH key can access every configured asset. Per-key asset assignment is a possible future extension.
 
 ## Architecture
 
@@ -122,7 +132,7 @@ hop-server serve                    # Start the server (default)
 hop-server reset-admin              # Reset admin password
 hop-server key add|list|activate|deactivate
 hop-server credential add|list|delete
-hop-server asset add|list|delete       # add supports --protocol ssh|rdp|tcp
+hop-server asset add|list|delete       # add supports ssh|tcp and common TCP presets
 hop-server export --kind assets --format csv --output dump.csv
 hop-server import --file dump.csv --on-conflict skip
 ```

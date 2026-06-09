@@ -7,7 +7,7 @@ use hop_core::{
 use russh::{
     client,
     keys::{decode_secret_key, ssh_key::PublicKey, PrivateKeyWithHashAlg},
-    Channel,
+    Channel, ChannelMsg,
 };
 
 use super::tofu;
@@ -43,6 +43,39 @@ pub async fn connect_asset_shell(
     height: u32,
     timeout: Duration,
 ) -> Result<ManagedTarget> {
+    let session = connect_authenticated_asset(db, master_key, asset, timeout).await?;
+    let channel = session.channel_open_session().await?;
+    channel
+        .request_pty(false, "xterm-256color", width, height, 0, 0, &[])
+        .await?;
+    channel.request_shell(false).await?;
+    Ok(ManagedTarget { session, channel })
+}
+
+pub async fn connect_asset_sftp(
+    db: HopDb,
+    master_key: Arc<MasterKey>,
+    asset: &Asset,
+    timeout: Duration,
+) -> Result<ManagedTarget> {
+    let session = connect_authenticated_asset(db, master_key, asset, timeout).await?;
+    let mut channel = session.channel_open_session().await?;
+    channel.request_subsystem(true, "sftp").await?;
+    match tokio::time::timeout(timeout, channel.wait()).await {
+        Ok(Some(ChannelMsg::Success)) => Ok(ManagedTarget { session, channel }),
+        Ok(Some(ChannelMsg::Failure)) => bail!("target rejected sftp subsystem"),
+        Ok(Some(other)) => bail!("unexpected target response to sftp request: {other:?}"),
+        Ok(None) => bail!("target closed channel while starting sftp subsystem"),
+        Err(_) => bail!("target sftp subsystem request timed out"),
+    }
+}
+
+async fn connect_authenticated_asset(
+    db: HopDb,
+    master_key: Arc<MasterKey>,
+    asset: &Asset,
+    timeout: Duration,
+) -> Result<client::Handle<TofuClient>> {
     let credential_id = asset
         .credential_id
         .as_deref()
@@ -67,12 +100,7 @@ pub async fn connect_asset_shell(
         .context("target connect timed out")??;
 
     authenticate(&mut session, &credential, &master_key).await?;
-    let channel = session.channel_open_session().await?;
-    channel
-        .request_pty(false, "xterm-256color", width, height, 0, 0, &[])
-        .await?;
-    channel.request_shell(false).await?;
-    Ok(ManagedTarget { session, channel })
+    Ok(session)
 }
 
 async fn authenticate(

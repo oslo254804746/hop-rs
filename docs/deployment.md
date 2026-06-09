@@ -188,8 +188,14 @@ Verify SSH after adding data:
 ```bash
 ssh -p 2222 hop-host             # TUI
 ssh -p 2222 web-prod-01@hop-host # Direct connect with managed credential
+sftp -P 2222 web-prod-01@hop-host # Managed SFTP subsystem
 ssh -J hop-host:2222 web-prod-01.hop # ProxyJump TCP relay
 ```
+
+Every active Hop SSH key can currently access every configured asset. SFTP is
+relayed as an SSH subsystem using the asset's managed credential. RDP, VNC,
+MySQL, PostgreSQL, Redis, and Generic TCP assets all use the same allowlisted
+`direct-tcpip` forwarding path; presets only provide port defaults and examples.
 
 ---
 

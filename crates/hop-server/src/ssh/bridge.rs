@@ -14,8 +14,14 @@ pub type SharedChannels = Arc<Mutex<HashMap<ChannelId, ChannelState>>>;
 
 #[derive(Clone)]
 pub struct BridgeControl {
-    pub input: mpsc::UnboundedSender<Vec<u8>>,
+    pub input: mpsc::UnboundedSender<BridgeInput>,
     pub resize: mpsc::UnboundedSender<PtySize>,
+}
+
+#[derive(Debug)]
+pub enum BridgeInput {
+    Data(Vec<u8>),
+    Eof,
 }
 
 #[cfg(test)]
@@ -26,6 +32,7 @@ mod tests {
     fn managed_session_mode_distinguishes_user_visible_connects() {
         assert_eq!(managed_session_mode(ManagedSessionMode::Tui), "tui-connect");
         assert_eq!(managed_session_mode(ManagedSessionMode::Direct), "direct");
+        assert_eq!(managed_session_mode(ManagedSessionMode::Sftp), "sftp");
     }
 }
 
@@ -47,6 +54,7 @@ pub struct ManagedBridgeOptions {
 pub enum ManagedSessionMode {
     Tui,
     Direct,
+    Sftp,
 }
 
 pub fn spawn_managed_bridge(options: ManagedBridgeOptions) -> BridgeControl {
@@ -63,12 +71,13 @@ fn managed_session_mode(mode: ManagedSessionMode) -> &'static str {
     match mode {
         ManagedSessionMode::Tui => "tui-connect",
         ManagedSessionMode::Direct => "direct",
+        ManagedSessionMode::Sftp => "sftp",
     }
 }
 
 async fn run_managed_bridge(
     mut options: ManagedBridgeOptions,
-    mut inbound: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut inbound: mpsc::UnboundedReceiver<BridgeInput>,
     mut resize: mpsc::UnboundedReceiver<PtySize>,
 ) {
     let should_return_to_tui = options.return_to_tui.is_some();
@@ -87,26 +96,42 @@ async fn run_managed_bridge(
     let session_id = session.as_ref().map(|s| s.id.clone()).ok();
 
     let result = async {
-        let _ = options
-            .handle
-            .data(options.channel_id, b"\r\n\x1b[2J\x1b[HConnecting to target...\r\n".to_vec())
-            .await;
-        let mut target = client::connect_asset_shell(
-            options.db.clone(),
-            options.master_key.clone(),
-            &options.asset,
-            options.pty.width as u32,
-            options.pty.height as u32,
-            options.connect_timeout,
-        )
-        .await?;
+        let is_sftp = options.session_mode == ManagedSessionMode::Sftp;
+        if !is_sftp {
+            let _ = options
+                .handle
+                .data(options.channel_id, b"\r\n\x1b[2J\x1b[HConnecting to target...\r\n".to_vec())
+                .await;
+        }
+        let mut target = if is_sftp {
+            client::connect_asset_sftp(
+                options.db.clone(),
+                options.master_key.clone(),
+                &options.asset,
+                options.connect_timeout,
+            )
+            .await?
+        } else {
+            client::connect_asset_shell(
+                options.db.clone(),
+                options.master_key.clone(),
+                &options.asset,
+                options.pty.width as u32,
+                options.pty.height as u32,
+                options.connect_timeout,
+            )
+            .await?
+        };
 
         loop {
             tokio::select! {
-                Some(data) = inbound.recv() => {
-                    target.channel.data_bytes(data).await?;
+                Some(input) = inbound.recv() => {
+                    match input {
+                        BridgeInput::Data(data) => target.channel.data_bytes(data).await?,
+                        BridgeInput::Eof => target.channel.eof().await?,
+                    }
                 }
-                Some(size) = resize.recv() => {
+                Some(size) = resize.recv(), if !is_sftp => {
                     target.channel.window_change(size.width as u32, size.height as u32, 0, 0).await?;
                 }
                 msg = target.channel.wait() => {
@@ -218,13 +243,20 @@ async fn run_managed_bridge(
         }
     } else {
         if let Err(err) = &result {
-            let _ = options
-                .handle
-                .data(
-                    options.channel_id,
-                    format!("\r\ndirect connection failed: {err}\r\n").into_bytes(),
-                )
-                .await;
+            if options.session_mode == ManagedSessionMode::Sftp {
+                let _ = options
+                    .handle
+                    .exit_status_request(options.channel_id, 1)
+                    .await;
+            } else {
+                let _ = options
+                    .handle
+                    .data(
+                        options.channel_id,
+                        format!("\r\ndirect connection failed: {err}\r\n").into_bytes(),
+                    )
+                    .await;
+            }
         }
         let _ = options.handle.eof(options.channel_id).await;
         let _ = options.handle.close(options.channel_id).await;

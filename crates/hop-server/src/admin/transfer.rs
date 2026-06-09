@@ -110,6 +110,8 @@ pub struct AssetTransferRow {
     pub credential_id: Option<String>,
     #[serde(default = "default_asset_protocol")]
     pub protocol: String,
+    #[serde(default)]
+    pub preset: Option<String>,
 }
 
 impl From<Asset> for AssetTransferRow {
@@ -122,6 +124,7 @@ impl From<Asset> for AssetTransferRow {
             tags: asset.tags,
             credential_id: asset.credential_id,
             protocol: asset.protocol,
+            preset: asset.preset,
         }
     }
 }
@@ -131,6 +134,7 @@ impl From<AssetTransferRow> for NewAsset {
         Self {
             name: row.name,
             protocol: row.protocol,
+            preset: row.preset,
             hostname: row.hostname,
             port: row.port,
             description: row.description,
@@ -286,7 +290,8 @@ pub async fn import_credentials(
 }
 
 fn write_asset_csv(rows: &[AssetTransferRow]) -> String {
-    let mut output = String::from("name,hostname,port,description,tags,credential_id,protocol\n");
+    let mut output =
+        String::from("name,hostname,port,description,tags,credential_id,protocol,preset\n");
     for row in rows {
         push_csv_row(
             &mut output,
@@ -298,6 +303,7 @@ fn write_asset_csv(rows: &[AssetTransferRow]) -> String {
                 &row.tags.join("|"),
                 row.credential_id.as_deref().unwrap_or(""),
                 row.protocol.as_str(),
+                row.preset.as_deref().unwrap_or(""),
             ],
         );
     }
@@ -339,6 +345,7 @@ fn read_asset_csv(input: &str) -> Result<Vec<AssetTransferRow>> {
                 .get(6)
                 .cloned()
                 .unwrap_or_else(default_asset_protocol),
+            preset: record.get(7).cloned().and_then(nonempty),
         });
     }
     Ok(rows)
@@ -452,8 +459,10 @@ mod tests {
 
         let csv = export_assets(&[asset], TransferFormat::Csv).unwrap();
 
-        assert!(csv.starts_with("name,hostname,port,description,tags,credential_id,protocol\n"));
-        assert!(csv.contains("web,10.0.0.1,22,,prod|web,,ssh"));
+        assert!(
+            csv.starts_with("name,hostname,port,description,tags,credential_id,protocol,preset\n")
+        );
+        assert!(csv.contains("web,10.0.0.1,22,,prod|web,,ssh,"));
     }
 
     #[test]
@@ -506,6 +515,7 @@ mod tests {
             id: name.to_string(),
             name: name.to_string(),
             protocol: ASSET_PROTOCOL_SSH.to_string(),
+            preset: None,
             hostname: hostname.to_string(),
             port: 22,
             description: None,
@@ -538,6 +548,7 @@ mod tests {
             tags: vec!["prod".to_string()],
             credential_id: None,
             protocol: "rdp".to_string(),
+            preset: None,
         };
 
         let new_asset: NewAsset = row.into();

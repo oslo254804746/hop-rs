@@ -13,7 +13,9 @@ use tracing::{error, info, warn};
 use crate::tui::{TuiAction, TuiResources};
 
 use super::{
-    bridge::{self, BridgeControl, ManagedBridgeOptions, ManagedSessionMode, SharedChannels},
+    bridge::{
+        self, BridgeControl, BridgeInput, ManagedBridgeOptions, ManagedSessionMode, SharedChannels,
+    },
     host_key, proxy,
 };
 
@@ -347,7 +349,7 @@ impl server::Handler for HopSshHandler {
                 .start_session(NewSession {
                     key_finger: auth.fingerprint,
                     key_name: Some(auth.name),
-                    mode: "proxyjump".to_string(),
+                    mode: "tcp-forward".to_string(),
                     asset_name: None,
                     target_host: Some(host_to_connect.to_string()),
                     target_port: Some(i64::from(port_to_connect)),
@@ -453,6 +455,33 @@ impl server::Handler for HopSshHandler {
         Ok(())
     }
 
+    async fn subsystem_request(
+        &mut self,
+        channel: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let Some(asset) = self.direct_asset.clone() else {
+            session.channel_failure(channel)?;
+            return Ok(());
+        };
+        if !accepts_sftp_request(name, Some(&asset)) {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+
+        session.channel_success(channel)?;
+        self.start_managed(
+            channel,
+            session.handle(),
+            asset,
+            None,
+            ManagedSessionMode::Sftp,
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn data(
         &mut self,
         channel: ChannelId,
@@ -473,7 +502,7 @@ impl server::Handler for HopSshHandler {
                         Some(action)
                     }
                     ChannelState::Managed { control } => {
-                        let _ = control.input.send(data.to_vec());
+                        let _ = control.input.send(BridgeInput::Data(data.to_vec()));
                         None
                     }
                 }
@@ -537,7 +566,7 @@ impl server::Handler for HopSshHandler {
             let mut channels = self.channels.lock().await;
             match channels.get(&channel) {
                 Some(ChannelState::Managed { control }) => {
-                    let _ = control.input.send(Vec::new());
+                    let _ = control.input.send(BridgeInput::Eof);
                 }
                 Some(ChannelState::Tui { .. }) => {
                     if let Some(ChannelState::Tui { mut tui, audit }) = channels.remove(&channel) {
@@ -599,6 +628,13 @@ impl server::Handler for HopSshHandler {
         }
         Ok(())
     }
+}
+
+fn accepts_sftp_request(name: &str, asset: Option<&Asset>) -> bool {
+    name == "sftp"
+        && asset.is_some_and(|asset| {
+            asset.protocol == hop_core::ASSET_PROTOCOL_SSH && asset.credential_id.is_some()
+        })
 }
 
 fn send_tui_output(session: &mut Session, channel: ChannelId, output: Vec<u8>) -> Result<()> {
@@ -740,6 +776,33 @@ mod tests {
         assert_eq!(request.target, "web-prod-01");
         assert!(parse_direct_username("alice@web-prod-01").is_err());
         assert!(parse_direct_username("").is_err());
+    }
+
+    #[test]
+    fn sftp_is_only_accepted_for_managed_ssh_assets() {
+        let mut asset = Asset {
+            id: "asset-1".to_string(),
+            name: "web-prod-01".to_string(),
+            protocol: hop_core::ASSET_PROTOCOL_SSH.to_string(),
+            preset: None,
+            hostname: "10.0.0.10".to_string(),
+            port: 22,
+            description: None,
+            tags: Vec::new(),
+            credential_id: Some("cred-1".to_string()),
+            created_at: None,
+            updated_at: None,
+        };
+
+        assert!(accepts_sftp_request("sftp", Some(&asset)));
+        assert!(!accepts_sftp_request("shell", Some(&asset)));
+        assert!(!accepts_sftp_request("sftp", None));
+
+        asset.credential_id = None;
+        assert!(!accepts_sftp_request("sftp", Some(&asset)));
+        asset.protocol = hop_core::ASSET_PROTOCOL_TCP.to_string();
+        asset.credential_id = Some("cred-1".to_string());
+        assert!(!accepts_sftp_request("sftp", Some(&asset)));
     }
 
     #[tokio::test]
