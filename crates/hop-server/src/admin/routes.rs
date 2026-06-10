@@ -11,8 +11,8 @@ use axum::{
 };
 use hop_core::{
     encrypt_envelope, new_id, protocol_supports_managed_credentials, validate_credential_material,
-    validate_tcp_port, AuthType, HopDb, MasterKey, NewAsset, NewAuthorizedKey, NewCredential,
-    ASSET_PROTOCOL_SSH,
+    validate_tcp_port, AssetAccessMode, AuthType, HopDb, MasterKey, NewAsset, NewAuthorizedKey,
+    NewCredential, ASSET_PROTOCOL_SSH,
 };
 use serde::Deserialize;
 use tokio::net::TcpListener;
@@ -645,16 +645,25 @@ async fn keys(State(state): State<AdminState>, headers: HeaderMap) -> Response {
 }
 
 #[derive(Deserialize)]
-struct KeyForm {
+struct CreateKeyForm {
     csrf_token: String,
     name: String,
     public_key: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct KeyAccessForm {
+    csrf_token: String,
+    name: String,
+    public_key: String,
+    asset_access_mode: String,
+    asset_ids: Vec<String>,
+}
+
 async fn create_key(
     State(state): State<AdminState>,
     headers: HeaderMap,
-    Form(form): Form<KeyForm>,
+    Form(form): Form<CreateKeyForm>,
 ) -> Response {
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
@@ -683,31 +692,121 @@ async fn edit_key(
     let Ok(Some(key)) = state.db.get_authorized_key_by_id(&id).await else {
         return Redirect::to("/keys").into_response();
     };
-    Html(html::edit_key(t, &key, &session.csrf_token).into_string()).into_response()
+    let assets = state.db.list_assets().await.unwrap_or_default();
+    let assigned_ids = state
+        .db
+        .list_asset_ids_for_key(&id)
+        .await
+        .unwrap_or_default();
+    Html(html::edit_key(t, &key, &assets, &assigned_ids, &session.csrf_token, None).into_string())
+        .into_response()
 }
 
 async fn update_key(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Form(form): Form<KeyForm>,
+    body: Bytes,
 ) -> Response {
+    let t = request_l10n(&headers);
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
+    };
+    let form = match parse_key_access_form(&body) {
+        Ok(form) => form,
+        Err(err) => {
+            return render_key_edit_error(&state, t, &session, &id, &err.to_string()).await;
+        }
     };
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
-    if let Ok((public_key, fingerprint)) = parse_public_key_line(&form.public_key) {
-        let _ = state
-            .db
-            .update_authorized_key(
-                &id,
-                NewAuthorizedKey::new(form.name, public_key, fingerprint),
-            )
-            .await;
+    let mode = match AssetAccessMode::try_from(form.asset_access_mode.as_str()) {
+        Ok(mode) => mode,
+        Err(err) => {
+            return render_key_edit_error(&state, t, &session, &id, &err.to_string()).await;
+        }
+    };
+    let (public_key, fingerprint) = match parse_public_key_line(&form.public_key) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            return render_key_edit_error(&state, t, &session, &id, &err.to_string()).await;
+        }
+    };
+    match state
+        .db
+        .update_authorized_key_with_access(
+            &id,
+            NewAuthorizedKey::new(form.name, public_key, fingerprint),
+            mode,
+            &form.asset_ids,
+        )
+        .await
+    {
+        Ok(()) => Redirect::to("/keys").into_response(),
+        Err(err) => render_key_edit_error(&state, t, &session, &id, &err.to_string()).await,
     }
-    Redirect::to("/keys").into_response()
+}
+
+fn parse_key_access_form(body: &[u8]) -> Result<KeyAccessForm> {
+    let mut form = KeyAccessForm {
+        csrf_token: String::new(),
+        name: String::new(),
+        public_key: String::new(),
+        asset_access_mode: String::new(),
+        asset_ids: Vec::new(),
+    };
+    for (key, value) in form_urlencoded::parse(body) {
+        match key.as_ref() {
+            "csrf_token" => form.csrf_token = value.into_owned(),
+            "name" => form.name = value.into_owned(),
+            "public_key" => form.public_key = value.into_owned(),
+            "asset_access_mode" => form.asset_access_mode = value.into_owned(),
+            "asset_id" => form.asset_ids.push(value.into_owned()),
+            _ => {}
+        }
+    }
+    ensure!(!form.csrf_token.is_empty(), "missing CSRF token");
+    ensure!(!form.name.trim().is_empty(), "key name is required");
+    ensure!(!form.public_key.trim().is_empty(), "public key is required");
+    ensure!(
+        !form.asset_access_mode.is_empty(),
+        "asset access mode is required"
+    );
+    Ok(form)
+}
+
+async fn render_key_edit_error(
+    state: &AdminState,
+    t: &L10n,
+    session: &AuthenticatedSession,
+    id: &str,
+    error: &str,
+) -> Response {
+    let Ok(Some(key)) = state.db.get_authorized_key_by_id(id).await else {
+        return (StatusCode::BAD_REQUEST, error.to_string()).into_response();
+    };
+    let assets = state.db.list_assets().await.unwrap_or_default();
+    let assigned_ids = state
+        .db
+        .list_asset_ids_for_key(id)
+        .await
+        .unwrap_or_default();
+    (
+        StatusCode::BAD_REQUEST,
+        Html(
+            html::edit_key(
+                t,
+                &key,
+                &assets,
+                &assigned_ids,
+                &session.csrf_token,
+                Some(error),
+            )
+            .into_string(),
+        ),
+    )
+        .into_response()
 }
 
 async fn deactivate_key(
@@ -1057,6 +1156,23 @@ mod tests {
         assert_eq!(form.csrf_token, "csrf-123");
         assert_eq!(form.asset_ids, vec!["asset-1", "asset-2"]);
         assert_eq!(form.tags.as_deref(), Some("prod,web"));
+    }
+
+    #[test]
+    fn key_access_form_parses_repeated_asset_ids_and_empty_selection() {
+        let form = parse_key_access_form(
+            b"csrf_token=csrf-123&name=laptop&public_key=ssh-ed25519+AAAA&asset_access_mode=restricted&asset_id=asset-1&asset_id=asset-2",
+        )
+        .unwrap();
+        assert_eq!(form.csrf_token, "csrf-123");
+        assert_eq!(form.asset_access_mode, "restricted");
+        assert_eq!(form.asset_ids, vec!["asset-1", "asset-2"]);
+
+        let empty = parse_key_access_form(
+            b"csrf_token=csrf-123&name=laptop&public_key=ssh-ed25519+AAAA&asset_access_mode=restricted",
+        )
+        .unwrap();
+        assert!(empty.asset_ids.is_empty());
     }
 
     #[test]

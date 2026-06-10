@@ -1,5 +1,5 @@
 use hop_core::{
-    Asset, AuthorizedKey, Credential, KnownHost, Session, ASSET_PRESET_MYSQL,
+    Asset, AssetAccessMode, AuthorizedKey, Credential, KnownHost, Session, ASSET_PRESET_MYSQL,
     ASSET_PRESET_POSTGRES, ASSET_PRESET_RDP, ASSET_PRESET_REDIS, ASSET_PRESET_VNC,
     ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
 };
@@ -577,6 +577,33 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     .checkbox-cell input {
                         width: 18px;
                         min-height: 18px;
+                    }
+
+                    .asset-access-list {
+                        display: grid;
+                        gap: 10px;
+                        margin-top: 14px;
+                    }
+
+                    .asset-access-item {
+                        display: grid;
+                        grid-template-columns: 22px minmax(0, 1fr);
+                        gap: 10px;
+                        align-items: start;
+                        padding: 12px;
+                        border: 1px solid var(--border);
+                        border-radius: 8px;
+                        background: var(--surface-raised);
+                    }
+
+                    .asset-access-item input {
+                        width: 18px;
+                        min-height: 18px;
+                        margin-top: 2px;
+                    }
+
+                    .asset-access-item[hidden], [data-asset-access-list][hidden] {
+                        display: none;
                     }
 
                     .import-summary {
@@ -1504,7 +1531,20 @@ pub fn keys(t: &L10n, items: &[AuthorizedKey], csrf_token: &str) -> Markup {
     )
 }
 
-pub fn edit_key(t: &L10n, key: &AuthorizedKey, csrf_token: &str) -> Markup {
+pub fn edit_key(
+    t: &L10n,
+    key: &AuthorizedKey,
+    assets: &[Asset],
+    assigned_ids: &[String],
+    csrf_token: &str,
+    error: Option<&str>,
+) -> Markup {
+    let restricted = key.asset_access_mode == AssetAccessMode::Restricted;
+    let accessible_count = if restricted {
+        assigned_ids.len()
+    } else {
+        assets.len()
+    };
     layout(
         t.edit_key_title,
         "keys",
@@ -1523,6 +1563,9 @@ pub fn edit_key(t: &L10n, key: &AuthorizedKey, csrf_token: &str) -> Markup {
                 }
                 form method="post" action=(format!("/keys/{}", key.id)) {
                     (csrf_field(csrf_token))
+                    @if let Some(error) = error {
+                        p.error-message { (error) }
+                    }
                     div.grid {
                         label.field {
                             (t.field_name)
@@ -1533,12 +1576,70 @@ pub fn edit_key(t: &L10n, key: &AuthorizedKey, csrf_token: &str) -> Markup {
                             textarea name="public_key" rows="4" required { (key.public_key) }
                         }
                     }
+                    section.asset-access-list {
+                        div.panel-header {
+                            div {
+                                h2 { (t.key_access_heading) }
+                                p { (t.key_access_intro) }
+                            }
+                            span.status-pill {
+                                (accessible_count) " / " (assets.len()) " " (t.key_assets_suffix)
+                            }
+                        }
+                        label.field {
+                            (t.key_access_mode)
+                            select name="asset_access_mode" data-asset-access-mode onchange=(key_access_mode_onchange()) {
+                                option value="all" selected[!restricted] { (t.key_access_all) }
+                                option value="restricted" selected[restricted] { (t.key_access_restricted) }
+                            }
+                        }
+                        p.fine-print data-access-all-note hidden[restricted] { (t.key_access_all_intro) }
+                        div data-asset-access-list hidden[!restricted] {
+                            p.fine-print { (t.key_access_restricted_intro) }
+                            label.field {
+                                (t.key_asset_search)
+                                input type="search" data-asset-filter oninput=(key_asset_filter_oninput());
+                            }
+                            div.asset-access-list {
+                                @for asset in assets {
+                                    @let assigned = assigned_ids.iter().any(|id| id == &asset.id);
+                                    @let search = format!(
+                                        "{} {} {} {} {}",
+                                        asset.name,
+                                        asset_kind(asset),
+                                        asset.hostname,
+                                        asset.port,
+                                        asset.tags.join(" ")
+                                    ).to_ascii_lowercase();
+                                    label.asset-access-item data-asset-search=(search) {
+                                        input type="checkbox" name="asset_id" value=(asset.id)
+                                            checked[assigned] disabled[!restricted];
+                                        div.primary-cell {
+                                            span { (asset.name) }
+                                            span.subtle {
+                                                (asset_protocol_label(t, asset_kind(asset))) " · "
+                                                (asset.hostname) ":" (asset.port)
+                                            }
+                                            @if !asset.tags.is_empty() {
+                                                div.tag-list {
+                                                    @for tag in &asset.tags {
+                                                        span.tag { (tag) }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     div.button-row {
                         button type="submit" { (t.save_changes) }
                         a.ghost-button href="/keys" { (t.back_to_keys) }
                     }
                 }
             }
+            script { (PreEscaped(key_access_script())) }
             section.panel {
                 div.panel-header {
                     div {
@@ -1553,6 +1654,18 @@ pub fn edit_key(t: &L10n, key: &AuthorizedKey, csrf_token: &str) -> Markup {
             }
         },
     )
+}
+
+fn key_access_mode_onchange() -> &'static str {
+    "window.hopToggleKeyAccess(this.form)"
+}
+
+fn key_asset_filter_oninput() -> &'static str {
+    "const q=this.value.toLowerCase();this.form.querySelectorAll('[data-asset-search]').forEach((row)=>row.hidden=!row.dataset.assetSearch.includes(q))"
+}
+
+fn key_access_script() -> &'static str {
+    r#"window.hopToggleKeyAccess=function(form){const mode=form.querySelector('[data-asset-access-mode]').value;const restricted=mode==='restricted';const list=form.querySelector('[data-asset-access-list]');const note=form.querySelector('[data-access-all-note]');list.hidden=!restricted;note.hidden=restricted;list.querySelectorAll('input[type=checkbox]').forEach((input)=>input.disabled=!restricted);};"#
 }
 
 pub fn known_hosts(t: &L10n, items: &[KnownHost], csrf_token: &str) -> Markup {
@@ -1914,6 +2027,37 @@ mod tests {
     }
 
     #[test]
+    fn key_edit_page_renders_access_modes_search_and_assignments() {
+        let mut key = authorized_key(AssetAccessMode::Restricted);
+        let first = asset("first", "10.0.0.1", &["prod"]);
+        let second = asset("second", "10.0.0.2", &[]);
+        let rendered = edit_key(
+            &EN,
+            &key,
+            &[first.clone(), second],
+            std::slice::from_ref(&first.id),
+            "csrf-123",
+            Some("validation failed"),
+        )
+        .into_string();
+
+        assert!(rendered.contains(r#"name="asset_access_mode""#));
+        assert!(rendered.contains(r#"value="all""#));
+        assert!(rendered.contains(r#"value="restricted" selected"#));
+        assert!(rendered.contains(r#"type="search""#));
+        assert!(rendered.contains(&format!(r#"value="{}" checked"#, first.id)));
+        assert!(rendered.contains("1 / 2 assets"));
+        assert!(rendered.contains("validation failed"));
+        assert!(rendered.contains(r#"name="csrf_token" value="csrf-123""#));
+
+        key.asset_access_mode = AssetAccessMode::All;
+        let all_rendered = edit_key(&EN, &key, &[first], &[], "csrf-123", None).into_string();
+        assert!(all_rendered.contains(r#"value="all" selected"#));
+        assert!(all_rendered.contains("1 / 1 assets"));
+        assert!(all_rendered.contains("Current and future assets are automatically accessible."));
+    }
+
+    #[test]
     fn import_page_uses_multipart_upload_form() {
         let rendered = import_export(&EN, "csrf-123", None).into_string();
 
@@ -1934,6 +2078,18 @@ mod tests {
             credential_id: None,
             created_at: None,
             updated_at: None,
+        }
+    }
+
+    fn authorized_key(mode: AssetAccessMode) -> AuthorizedKey {
+        AuthorizedKey {
+            id: "key-1".to_string(),
+            name: "laptop".to_string(),
+            public_key: "ssh-ed25519 AAAA".to_string(),
+            fingerprint: "SHA256:test".to_string(),
+            is_active: true,
+            asset_access_mode: mode,
+            created_at: None,
         }
     }
 }

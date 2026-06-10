@@ -192,10 +192,27 @@ sftp -P 2222 web-prod-01@hop-host # Managed SFTP subsystem
 ssh -J hop-host:2222 web-prod-01.hop # ProxyJump TCP relay
 ```
 
-Every active Hop SSH key can currently access every configured asset. SFTP is
-relayed as an SSH subsystem using the asset's managed credential. RDP, VNC,
-MySQL, PostgreSQL, Redis, and Generic TCP assets all use the same allowlisted
-`direct-tcpip` forwarding path; presets only provide port defaults and examples.
+Each active Hop SSH key uses one of two asset access modes. `all` includes every
+current and future asset. `restricted` includes only explicitly assigned asset
+IDs; an empty assignment grants no asset access. Existing keys migrate to `all`,
+so an upgrade preserves their current behavior.
+
+Use Admin Web → Keys → Edit to choose a mode and filter/check assets, or use:
+
+```bash
+hop-server key access show <key-id>
+hop-server key access set <key-id> --mode restricted \
+  --asset-id <asset-id> --asset-id <asset-id>
+hop-server key access set <key-id> --mode restricted # Revoke all asset access
+hop-server key access set <key-id> --mode all        # Include future assets
+```
+
+Entry-key authorization and target credentials are separate. The key grants
+access to an asset; the asset's credential authenticates managed SSH and SFTP
+connections to the target. TUI, direct SSH, SFTP, ProxyJump, and generic
+`direct-tcpip` forwarding enforce the same per-key policy. RDP, VNC, MySQL,
+PostgreSQL, Redis, and Generic TCP presets only provide port defaults and
+examples.
 
 ---
 
@@ -214,10 +231,16 @@ hop-server import --kind credentials --file creds.json
 ```
 
 Credential import/export is metadata-only. It transfers `name`, `username`, and `auth_type`, but never exports passwords, private keys, or passphrases.
+Key-to-asset assignments are not part of these transfer formats. They are stored
+in `hop.db`, so the normal database backup includes them without an extra file.
 
 ---
 
 ## Upgrade
+
+Back up `hop.db` before upgrading, as with any schema migration. The per-key
+assignment migration defaults all existing keys to `all`; no additional backup
+artifact is required because assignments live in the database.
 
 ### Binary
 

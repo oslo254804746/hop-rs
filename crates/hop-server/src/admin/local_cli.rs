@@ -2,8 +2,8 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{bail, Context, Result};
 use hop_core::{
-    encrypt_envelope, new_id, validate_credential_material, AuthType, HopDb, MasterKey, NewAsset,
-    NewAuthorizedKey, NewCredential,
+    encrypt_envelope, new_id, validate_credential_material, AssetAccessMode, AuthType, HopDb,
+    MasterKey, NewAsset, NewAuthorizedKey, NewCredential,
 };
 use russh::keys::{parse_public_key_base64, ssh_key::HashAlg, PublicKeyBase64};
 
@@ -61,6 +61,54 @@ pub async fn set_key_active(db: &HopDb, id: &str, active: bool) -> Result<()> {
     println!(
         "key {id} {}",
         if active { "activated" } else { "deactivated" }
+    );
+    Ok(())
+}
+
+pub async fn show_key_access(db: &HopDb, id: &str) -> Result<()> {
+    print!("{}", format_key_access(db, id).await?);
+    Ok(())
+}
+
+async fn format_key_access(db: &HopDb, id: &str) -> Result<String> {
+    let key = db
+        .get_authorized_key_by_id(id)
+        .await?
+        .with_context(|| format!("unknown authorized key id: {id}"))?;
+    let assigned_ids = db.list_asset_ids_for_key(id).await?;
+    let mut output = format!(
+        "key\t{}\t{}\nmode\t{}\nassigned\t{}\n",
+        key.id,
+        key.name,
+        key.asset_access_mode,
+        assigned_ids.len()
+    );
+    for asset_id in assigned_ids {
+        let asset = db
+            .get_asset_by_id(&asset_id)
+            .await?
+            .with_context(|| format!("assigned asset no longer exists: {asset_id}"))?;
+        output.push_str(&format!(
+            "asset\t{}\t{}\t{}:{}\n",
+            asset.id, asset.name, asset.hostname, asset.port
+        ));
+    }
+    Ok(output)
+}
+
+pub async fn set_key_access(
+    db: &HopDb,
+    id: &str,
+    mode: AssetAccessMode,
+    asset_ids: Vec<String>,
+) -> Result<()> {
+    if mode == AssetAccessMode::All && !asset_ids.is_empty() {
+        bail!("--asset-id can only be used with --mode restricted");
+    }
+    db.set_authorized_key_access(id, mode, &asset_ids).await?;
+    println!(
+        "key {id} access mode set to {mode} with {} assigned asset(s)",
+        asset_ids.len()
     );
     Ok(())
 }
@@ -191,5 +239,64 @@ mod tests {
         let (canonical, fingerprint) = parse_public_key_line(key).unwrap();
         assert!(canonical.starts_with("ssh-ed25519 "));
         assert!(fingerprint.starts_with("SHA256:"));
+    }
+
+    #[tokio::test]
+    async fn key_access_format_lists_mode_and_assignments() {
+        let db = HopDb::in_memory().await.unwrap();
+        let key = db
+            .add_authorized_key(NewAuthorizedKey::new(
+                "laptop",
+                "ssh-ed25519 AAAA-test",
+                "SHA256:test",
+            ))
+            .await
+            .unwrap();
+        let asset = db
+            .add_asset(NewAsset::new("web", "10.0.0.10", 22))
+            .await
+            .unwrap();
+        set_key_access(
+            &db,
+            &key.id,
+            AssetAccessMode::Restricted,
+            vec![asset.id.clone()],
+        )
+        .await
+        .unwrap();
+
+        let output = format_key_access(&db, &key.id).await.unwrap();
+        assert!(output.contains("mode\trestricted"));
+        assert!(output.contains(&format!("asset\t{}\tweb\t10.0.0.10:22", asset.id)));
+    }
+
+    #[tokio::test]
+    async fn key_access_rejects_assets_in_all_mode_without_changes() {
+        let db = HopDb::in_memory().await.unwrap();
+        let key = db
+            .add_authorized_key(NewAuthorizedKey::new(
+                "laptop",
+                "ssh-ed25519 AAAA-test",
+                "SHA256:test",
+            ))
+            .await
+            .unwrap();
+
+        assert!(set_key_access(
+            &db,
+            &key.id,
+            AssetAccessMode::All,
+            vec!["asset-1".to_string()],
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            db.get_authorized_key_by_id(&key.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .asset_access_mode,
+            AssetAccessMode::All
+        );
     }
 }

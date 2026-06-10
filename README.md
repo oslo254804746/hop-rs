@@ -111,7 +111,19 @@ ssh -p 2222 -N -T -L 127.0.0.1:13306:mysql-prod.hop:3306 hop-host
 
 交互式 TUI、直连模式和 SFTP 使用 Hop 托管凭证连接 SSH 目标。ProxyJump 与本地端口转发是受资产白名单约束的透明 TCP 中继，RDP、VNC、MySQL、PostgreSQL、Redis 只是端口和客户端提示预设，核心不解析应用协议。通用转发仅支持 TCP，不自动处理 UDP 或动态多端口协议。
 
-当前授权模型刻意保持极简：任一启用的 Hop SSH Key 都可以访问全部已配置资产。按 Key 分配资产属于后续可选演进方向。
+每把启用的 Hop SSH Key 都有独立的资产访问模式：
+
+- `all`：可访问当前及未来新增的全部资产。新建密钥和升级前已有密钥默认使用此模式，升级不会收回现有权限。
+- `restricted`：只能访问明确分配给该密钥的资产；空分配表示可以认证进入 Hop，但不能发现或连接任何资产。
+
+入口密钥只决定“可以访问哪些资产”，资产绑定的托管凭据决定 Hop“如何认证到目标”。TUI、直连 SSH、SFTP、ProxyJump 和本地 TCP 转发使用同一套按 key ID 校验的授权规则。可在 Admin Web 的密钥编辑页搜索并勾选资产，也可使用 CLI：
+
+```bash
+hop-server key access show <key-id>
+hop-server key access set <key-id> --mode restricted --asset-id <asset-id>
+hop-server key access set <key-id> --mode restricted  # 清空权限
+hop-server key access set <key-id> --mode all         # 包含未来资产
+```
 
 ## 项目结构
 
@@ -131,6 +143,7 @@ systemd/            生产环境 systemd 服务单元
 hop-server serve                    # 启动服务（默认）
 hop-server reset-admin              # 重置管理员密码
 hop-server key add|list|activate|deactivate
+hop-server key access show|set
 hop-server credential add|list|delete
 hop-server asset add|list|delete       # add 支持 ssh|tcp 及常见 TCP presets
 hop-server export --kind assets --format csv --output dump.csv
@@ -138,6 +151,7 @@ hop-server import --file dump.csv --on-conflict skip
 ```
 
 凭证导入/导出只迁移 `name`、`username`、`auth_type` 等元数据，不导出密码或私钥材料。
+按密钥的资产分配保存在 `hop.db` 的关联表中，不包含在资产或凭据导入/导出格式里；备份 `hop.db` 即会备份这些授权设置。
 管理员密码可在 Admin Web 的 Settings 页面修改；忘记密码时使用 `hop-server reset-admin` 随机重置。
 
 ## Docker

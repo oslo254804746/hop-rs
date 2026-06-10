@@ -12,8 +12,8 @@ use std::{
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use hop_core::{
-    load_or_create_master_key, AuthType, HopConfig, HopDb, MasterKey, NewAsset, ASSET_PRESET_RDP,
-    ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
+    load_or_create_master_key, AssetAccessMode, AuthType, HopConfig, HopDb, MasterKey, NewAsset,
+    ASSET_PRESET_RDP, ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
 };
 use tracing::{info, warn};
 
@@ -133,6 +133,39 @@ enum KeyCommand {
     Activate {
         id: String,
     },
+    Access {
+        #[command(subcommand)]
+        command: KeyAccessCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum KeyAccessCommand {
+    Show {
+        id: String,
+    },
+    Set {
+        id: String,
+        #[arg(long, value_enum)]
+        mode: AssetAccessModeArg,
+        #[arg(long = "asset-id")]
+        asset_ids: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AssetAccessModeArg {
+    All,
+    Restricted,
+}
+
+impl From<AssetAccessModeArg> for AssetAccessMode {
+    fn from(value: AssetAccessModeArg) -> Self {
+        match value {
+            AssetAccessModeArg::All => AssetAccessMode::All,
+            AssetAccessModeArg::Restricted => AssetAccessMode::Restricted,
+        }
+    }
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -255,6 +288,16 @@ async fn main() -> Result<()> {
                 KeyCommand::Activate { id } => {
                     admin::local_cli::set_key_active(&db, &id, true).await
                 }
+                KeyCommand::Access { command } => match command {
+                    KeyAccessCommand::Show { id } => {
+                        admin::local_cli::show_key_access(&db, &id).await
+                    }
+                    KeyAccessCommand::Set {
+                        id,
+                        mode,
+                        asset_ids,
+                    } => admin::local_cli::set_key_access(&db, &id, mode.into(), asset_ids).await,
+                },
             }
         }
         Command::Credential { command } => {
@@ -610,6 +653,39 @@ mod tests {
 
         assert_eq!(protocol.as_str(), ASSET_PRESET_RDP);
         assert_eq!(port, 3389);
+    }
+
+    #[test]
+    fn key_access_commands_parse_repeated_asset_ids() {
+        let cli = Cli::try_parse_from([
+            "hop-server",
+            "key",
+            "access",
+            "set",
+            "key-1",
+            "--mode",
+            "restricted",
+            "--asset-id",
+            "asset-1",
+            "--asset-id",
+            "asset-2",
+        ])
+        .unwrap();
+
+        let Some(Command::Key {
+            command:
+                KeyCommand::Access {
+                    command:
+                        KeyAccessCommand::Set {
+                            mode, asset_ids, ..
+                        },
+                },
+        }) = cli.command
+        else {
+            panic!("expected key access set");
+        };
+        assert!(matches!(mode, AssetAccessModeArg::Restricted));
+        assert_eq!(asset_ids, vec!["asset-1", "asset-2"]);
     }
 
     #[tokio::test]

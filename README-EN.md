@@ -111,7 +111,19 @@ ssh -p 2222 -N -T -L 127.0.0.1:13306:mysql-prod.hop:3306 hop-host
 
 Interactive TUI, direct connect, and SFTP use Hop-managed credentials to reach SSH targets. ProxyJump and local forwarding are transparent, asset-allowlisted TCP relays. RDP, VNC, MySQL, PostgreSQL, and Redis are presets for ports and client guidance; the core does not parse those application protocols. Generic forwarding supports TCP only, not UDP or dynamic multi-port protocols.
 
-The current authorization model is intentionally minimal: every active Hop SSH key can access every configured asset. Per-key asset assignment is a possible future extension.
+Each active Hop SSH key has its own asset access mode:
+
+- `all`: access every current and future asset. New keys and keys migrated from earlier releases default to this mode, so upgrades do not revoke existing access.
+- `restricted`: access only explicitly assigned assets. An empty assignment allows authentication to Hop but exposes and reaches no assets.
+
+The entry key controls which assets may be reached; the credential attached to an asset controls how Hop authenticates to that target. TUI, direct SSH, SFTP, ProxyJump, and local TCP forwarding all enforce the same policy by stable key and asset IDs. Assign assets from the Admin Web key edit page or use the CLI:
+
+```bash
+hop-server key access show <key-id>
+hop-server key access set <key-id> --mode restricted --asset-id <asset-id>
+hop-server key access set <key-id> --mode restricted  # Clear access
+hop-server key access set <key-id> --mode all         # Include future assets
+```
 
 ## Architecture
 
@@ -131,6 +143,7 @@ systemd/            Production service unit
 hop-server serve                    # Start the server (default)
 hop-server reset-admin              # Reset admin password
 hop-server key add|list|activate|deactivate
+hop-server key access show|set
 hop-server credential add|list|delete
 hop-server asset add|list|delete       # add supports ssh|tcp and common TCP presets
 hop-server export --kind assets --format csv --output dump.csv
@@ -138,6 +151,7 @@ hop-server import --file dump.csv --on-conflict skip
 ```
 
 Credential import/export transfers metadata only, such as `name`, `username`, and `auth_type`; passwords and private keys are never exported.
+Per-key assignments are stored in the `hop.db` relation table and are intentionally excluded from asset and credential transfer formats. Backing up `hop.db` includes these authorization settings.
 Change the admin password from Admin Web Settings; use `hop-server reset-admin` for recovery if you forget it.
 
 ## Docker

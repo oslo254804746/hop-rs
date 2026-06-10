@@ -21,9 +21,12 @@ use super::{
 
 #[derive(Debug, Clone)]
 pub struct AuthInfo {
+    pub key_id: String,
     pub fingerprint: String,
     pub name: String,
 }
+
+pub(crate) const AUTHORIZATION_DENIED: &str = "target not authorized or not found";
 
 #[derive(Debug, Clone, Copy)]
 pub struct PtySize {
@@ -163,12 +166,16 @@ impl HopSshHandler {
     async fn resolve_direct_asset_for_key(
         &self,
         user: &str,
-        _key_name: &str,
+        key_id: &str,
     ) -> Result<Option<Asset>> {
         let Some(request) = parse_direct_username(user)? else {
             return Ok(None);
         };
-        let Some(asset) = find_direct_asset(&self.db, &request.target).await? else {
+        let Some(asset) = self
+            .db
+            .find_direct_asset_for_key(key_id, &request.target)
+            .await?
+        else {
             return Ok(None);
         };
         if asset.credential_id.is_none() {
@@ -186,6 +193,23 @@ impl HopSshHandler {
         mode: ManagedSessionMode,
     ) -> Result<()> {
         let auth = self.auth_info().context("missing authenticated key")?;
+        if !self
+            .db
+            .key_can_access_asset(&auth.key_id, &asset.id)
+            .await?
+        {
+            audit_denied_attempt(
+                &self.db,
+                &auth,
+                managed_session_mode_name(mode),
+                Some(asset.name.clone()),
+                Some(asset.hostname.clone()),
+                Some(asset.port),
+                self.client_ip.clone(),
+            )
+            .await;
+            bail!(AUTHORIZATION_DENIED);
+        }
         let options = ManagedBridgeOptions {
             db: self.db.clone(),
             master_key: self.master_key.clone(),
@@ -205,6 +229,41 @@ impl HopSshHandler {
             .await
             .insert(channel_id, ChannelState::Managed { control });
         Ok(())
+    }
+}
+
+fn managed_session_mode_name(mode: ManagedSessionMode) -> &'static str {
+    match mode {
+        ManagedSessionMode::Tui => "tui-connect",
+        ManagedSessionMode::Direct => "direct",
+        ManagedSessionMode::Sftp => "sftp",
+    }
+}
+
+pub(crate) async fn audit_denied_attempt(
+    db: &HopDb,
+    auth: &AuthInfo,
+    mode: &str,
+    asset_name: Option<String>,
+    target_host: Option<String>,
+    target_port: Option<i64>,
+    client_ip: Option<String>,
+) {
+    if let Ok(session) = db
+        .start_session(NewSession {
+            key_finger: auth.fingerprint.clone(),
+            key_name: Some(auth.name.clone()),
+            mode: mode.to_string(),
+            asset_name,
+            target_host,
+            target_port,
+            client_ip,
+        })
+        .await
+    {
+        let _ = db
+            .finish_session(&session.id, "failed", Some(AUTHORIZATION_DENIED))
+            .await;
     }
 }
 
@@ -248,17 +307,6 @@ fn parse_direct_username(user: &str) -> Result<Option<DirectLoginRequest>> {
     }))
 }
 
-async fn find_direct_asset(db: &HopDb, target: &str) -> Result<Option<Asset>> {
-    if let Some(asset) = db.get_asset_by_name(target).await? {
-        return Ok(Some(asset));
-    }
-    Ok(db
-        .list_assets()
-        .await?
-        .into_iter()
-        .find(|asset| asset.hostname == target))
-}
-
 impl server::Handler for HopSshHandler {
     type Error = anyhow::Error;
 
@@ -280,7 +328,7 @@ impl server::Handler for HopSshHandler {
             return Ok(server::Auth::reject());
         };
         if self
-            .resolve_direct_asset_for_key(user, &key.name)
+            .resolve_direct_asset_for_key(user, &key.id)
             .await
             .is_err()
         {
@@ -301,7 +349,7 @@ impl server::Handler for HopSshHandler {
             .await?
         {
             Some(key) => {
-                let direct_asset = match self.resolve_direct_asset_for_key(user, &key.name).await {
+                let direct_asset = match self.resolve_direct_asset_for_key(user, &key.id).await {
                     Ok(asset) => asset,
                     Err(err) => {
                         warn!(?err, user, "rejected direct login request");
@@ -309,6 +357,7 @@ impl server::Handler for HopSshHandler {
                     }
                 };
                 self.auth = Some(AuthInfo {
+                    key_id: key.id,
                     fingerprint,
                     name: key.name,
                 });
@@ -341,34 +390,25 @@ impl server::Handler for HopSshHandler {
         };
         let target = self
             .db
-            .find_proxy_asset(host_to_connect, i64::from(port_to_connect))
+            .find_proxy_asset_for_key(&auth.key_id, host_to_connect, i64::from(port_to_connect))
             .await?;
         let Some(asset) = target else {
-            if let Ok(session) = self
-                .db
-                .start_session(NewSession {
-                    key_finger: auth.fingerprint,
-                    key_name: Some(auth.name),
-                    mode: "tcp-forward".to_string(),
-                    asset_name: None,
-                    target_host: Some(host_to_connect.to_string()),
-                    target_port: Some(i64::from(port_to_connect)),
-                    client_ip: self.client_ip.clone(),
-                })
-                .await
-            {
-                let _ = self
-                    .db
-                    .finish_session(
-                        &session.id,
-                        "failed",
-                        Some("target not in assets allowlist"),
-                    )
-                    .await;
-            }
+            audit_denied_attempt(
+                &self.db,
+                &auth,
+                "tcp-forward",
+                None,
+                Some(host_to_connect.to_string()),
+                Some(i64::from(port_to_connect)),
+                self.client_ip.clone(),
+            )
+            .await;
             warn!(
+                key_id = auth.key_id,
                 host_to_connect,
-                port_to_connect, "rejected proxy target outside allowlist"
+                port_to_connect,
+                client_ip = ?self.client_ip,
+                "rejected proxy target: {AUTHORIZATION_DENIED}"
             );
             return Ok(false);
         };
@@ -423,7 +463,8 @@ impl server::Handler for HopSshHandler {
             .await?;
             return Ok(());
         }
-        let assets = self.db.list_assets().await?;
+        let auth = self.auth_info().context("missing authenticated key")?;
+        let assets = self.db.list_assets_for_key(&auth.key_id).await?;
         let size = self.pty_size(channel);
         let mut tui = TuiResources::new(size.width, size.height, assets)?;
         send_tui_output(session, channel, tui.enter_screen()?)?;
@@ -680,7 +721,9 @@ fn is_client_disconnect(error: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use hop_core::{AuthType, NewAsset, NewCredential, NewSession};
+    use hop_core::{
+        AssetAccessMode, AuthType, NewAsset, NewAuthorizedKey, NewCredential, NewSession,
+    };
 
     use super::*;
 
@@ -806,8 +849,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_asset_resolution_uses_authenticated_key_metadata_only_for_identity() {
+    async fn direct_asset_resolution_uses_stable_authenticated_key_id() {
         let db = HopDb::in_memory().await.unwrap();
+        let key = db
+            .add_authorized_key(NewAuthorizedKey::new(
+                "laptop",
+                "ssh-ed25519 AAAA-test",
+                "SHA256:test",
+            ))
+            .await
+            .unwrap();
         let credential = db
             .add_credential(NewCredential {
                 id: Some("cred-1".to_string()),
@@ -826,11 +877,49 @@ mod tests {
         let handler = test_handler(db);
 
         let asset = handler
-            .resolve_direct_asset_for_key("web-prod-01", "wangbaofeng")
+            .resolve_direct_asset_for_key("web-prod-01", &key.id)
             .await
             .unwrap()
             .unwrap();
 
         assert_eq!(asset.name, "web-prod-01");
+    }
+
+    #[tokio::test]
+    async fn direct_asset_resolution_rejects_unassigned_asset() {
+        let db = HopDb::in_memory().await.unwrap();
+        let key = db
+            .add_authorized_key(NewAuthorizedKey::new(
+                "laptop",
+                "ssh-ed25519 AAAA-test",
+                "SHA256:test",
+            ))
+            .await
+            .unwrap();
+        let credential = db
+            .add_credential(NewCredential {
+                id: Some("cred-1".to_string()),
+                name: "deploy".to_string(),
+                username: "deploy".to_string(),
+                auth_type: AuthType::Password,
+                password_enc: Some("encrypted-password".to_string()),
+                private_key_enc: None,
+                passphrase_enc: None,
+            })
+            .await
+            .unwrap();
+        let mut asset = NewAsset::new("web-prod-01", "10.0.0.10", 22);
+        asset.credential_id = Some(credential.id);
+        db.add_asset(asset).await.unwrap();
+        db.set_authorized_key_access(&key.id, AssetAccessMode::Restricted, &[])
+            .await
+            .unwrap();
+        let handler = test_handler(db);
+
+        assert!(handler
+            .resolve_direct_asset_for_key("web-prod-01", &key.id)
+            .await
+            .unwrap()
+            .is_none());
     }
 }

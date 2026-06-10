@@ -11,14 +11,79 @@ pub const ASSET_PRESET_MYSQL: &str = "mysql";
 pub const ASSET_PRESET_POSTGRES: &str = "postgres";
 pub const ASSET_PRESET_REDIS: &str = "redis";
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AssetAccessMode {
+    #[default]
+    All,
+    Restricted,
+}
+
+impl AssetAccessMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Restricted => "restricted",
+        }
+    }
+}
+
+impl TryFrom<&str> for AssetAccessMode {
+    type Error = HopCoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "all" => Ok(Self::All),
+            "restricted" => Ok(Self::Restricted),
+            other => Err(HopCoreError::Validation(format!(
+                "asset access mode must be all or restricted, got {other}"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for AssetAccessMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorizedKey {
     pub id: String,
     pub name: String,
     pub public_key: String,
     pub fingerprint: String,
     pub is_active: bool,
+    pub asset_access_mode: AssetAccessMode,
     pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct AuthorizedKeyRow {
+    pub id: String,
+    pub name: String,
+    pub public_key: String,
+    pub fingerprint: String,
+    pub is_active: bool,
+    pub asset_access_mode: String,
+    pub created_at: Option<String>,
+}
+
+impl TryFrom<AuthorizedKeyRow> for AuthorizedKey {
+    type Error = HopCoreError;
+
+    fn try_from(row: AuthorizedKeyRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: row.id,
+            name: row.name,
+            public_key: row.public_key,
+            fingerprint: row.fingerprint,
+            is_active: row.is_active,
+            asset_access_mode: AssetAccessMode::try_from(row.asset_access_mode.as_str())?,
+            created_at: row.created_at,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +91,7 @@ pub struct NewAuthorizedKey {
     pub name: String,
     pub public_key: String,
     pub fingerprint: String,
+    pub asset_access_mode: AssetAccessMode,
 }
 
 impl NewAuthorizedKey {
@@ -38,7 +104,13 @@ impl NewAuthorizedKey {
             name: name.into(),
             public_key: public_key.into(),
             fingerprint: fingerprint.into(),
+            asset_access_mode: AssetAccessMode::All,
         }
+    }
+
+    pub fn with_asset_access_mode(mut self, mode: AssetAccessMode) -> Self {
+        self.asset_access_mode = mode;
+        self
     }
 }
 
@@ -325,6 +397,19 @@ fn has_secret(value: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asset_access_mode_accepts_only_supported_database_values() {
+        assert_eq!(
+            AssetAccessMode::try_from("all").unwrap(),
+            AssetAccessMode::All
+        );
+        assert_eq!(
+            AssetAccessMode::try_from("restricted").unwrap(),
+            AssetAccessMode::Restricted
+        );
+        assert!(AssetAccessMode::try_from("unknown").is_err());
+    }
 
     #[test]
     fn validate_tcp_port_accepts_only_real_tcp_ports() {

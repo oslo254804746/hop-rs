@@ -14,7 +14,7 @@ use tokio::{
     net::TcpStream,
 };
 
-use super::server::AuthInfo;
+use super::server::{audit_denied_attempt, AuthInfo, AUTHORIZATION_DENIED};
 
 #[derive(Debug, Clone, Copy)]
 enum RelayPeer {
@@ -128,10 +128,23 @@ pub async fn bridge_direct_tcpip(
     asset: Asset,
     client_ip: Option<String>,
 ) -> Result<()> {
+    if !db.key_can_access_asset(&auth.key_id, &asset.id).await? {
+        audit_denied_attempt(
+            &db,
+            &auth,
+            "tcp-forward",
+            Some(asset.name.clone()),
+            Some(asset.hostname.clone()),
+            Some(asset.port),
+            client_ip,
+        )
+        .await;
+        anyhow::bail!(AUTHORIZATION_DENIED);
+    }
     let session = db
         .start_session(NewSession {
-            key_finger: auth.fingerprint,
-            key_name: Some(auth.name),
+            key_finger: auth.fingerprint.clone(),
+            key_name: Some(auth.name.clone()),
             mode: "tcp-forward".to_string(),
             asset_name: Some(asset.name.clone()),
             target_host: Some(asset.hostname.clone()),

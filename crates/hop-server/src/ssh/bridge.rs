@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use super::{
     client,
-    server::{start_tui_session, AuthInfo, ChannelState, PtySize},
+    server::{start_tui_session, AuthInfo, ChannelState, PtySize, AUTHORIZATION_DENIED},
 };
 use crate::tui::TuiResources;
 
@@ -96,6 +96,13 @@ async fn run_managed_bridge(
     let session_id = session.as_ref().map(|s| s.id.clone()).ok();
 
     let result = async {
+        if !options
+            .db
+            .key_can_access_asset(&options.auth.key_id, &options.asset.id)
+            .await?
+        {
+            anyhow::bail!(AUTHORIZATION_DENIED);
+        }
         let is_sftp = options.session_mode == ManagedSessionMode::Sftp;
         if !is_sftp {
             let _ = options
