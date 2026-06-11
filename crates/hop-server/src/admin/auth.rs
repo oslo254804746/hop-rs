@@ -90,23 +90,27 @@ fn random_token() -> String {
 
 pub const ADMIN_COOKIE: &str = "hop_admin";
 
-pub fn session_cookie(token: &str) -> String {
-    Cookie::build((ADMIN_COOKIE, token.to_string()))
+pub fn session_cookie(token: &str, secure: bool) -> String {
+    let mut cookie = Cookie::build((ADMIN_COOKIE, token.to_string()))
         .path("/")
         .http_only(true)
-        .same_site(SameSite::Strict)
-        .build()
-        .to_string()
+        .same_site(SameSite::Strict);
+    if secure {
+        cookie = cookie.secure(true);
+    }
+    cookie.build().to_string()
 }
 
-pub fn clear_cookie() -> String {
-    Cookie::build((ADMIN_COOKIE, ""))
+pub fn clear_cookie(secure: bool) -> String {
+    let mut cookie = Cookie::build((ADMIN_COOKIE, ""))
         .path("/")
         .http_only(true)
         .same_site(SameSite::Strict)
-        .max_age(cookie::time::Duration::seconds(0))
-        .build()
-        .to_string()
+        .max_age(cookie::time::Duration::seconds(0));
+    if secure {
+        cookie = cookie.secure(true);
+    }
+    cookie.build().to_string()
 }
 
 pub fn cookie_token(headers: &HeaderMap) -> Option<String> {
@@ -153,5 +157,12 @@ mod tests {
 
         assert!(sessions.validate_csrf(&token, &session.csrf_token).await);
         assert!(!sessions.validate_csrf(&token, "wrong").await);
+    }
+
+    #[test]
+    fn session_cookie_secure_flag_is_configurable() {
+        assert!(!session_cookie("token", false).contains("Secure"));
+        assert!(session_cookie("token", true).contains("Secure"));
+        assert!(clear_cookie(true).contains("Secure"));
     }
 }

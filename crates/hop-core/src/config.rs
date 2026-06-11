@@ -111,12 +111,14 @@ impl Default for SshConfig {
 #[serde(default)]
 pub struct SecurityConfig {
     pub secret_key_file: PathBuf,
+    pub admin_cookie_secure: bool,
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             secret_key_file: PathBuf::from("./hop.secret"),
+            admin_cookie_secure: false,
         }
     }
 }

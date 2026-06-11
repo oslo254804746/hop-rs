@@ -20,6 +20,8 @@ proxy_policy = "assets_only"
 [security]
 # Relative paths use the same working-directory base as database.path.
 secret_key_file = "./hop.secret"
+# Set to true when Admin Web is served through HTTPS, usually behind a reverse proxy.
+admin_cookie_secure = false
 
 [runtime]
 temp_dir = "/tmp/hop"

@@ -270,19 +270,10 @@ pub async fn import_credentials(
                 }
             },
             None => {
-                let auth_type =
-                    AuthType::try_from(row.auth_type.as_str()).map_err(anyhow::Error::msg)?;
-                db.add_credential(NewCredential {
-                    id: None,
-                    name: row.name,
-                    username: row.username,
-                    auth_type,
-                    password_enc: None,
-                    private_key_enc: None,
-                    passphrase_enc: None,
-                })
-                .await?;
-                summary.record_imported();
+                summary.record_error(format!(
+                    "credential metadata import cannot create credential without secrets: {}",
+                    row.name
+                ));
             }
         }
     }
@@ -591,5 +582,24 @@ mod tests {
             updated.passphrase_enc.as_deref(),
             Some("encrypted-passphrase")
         );
+    }
+
+    #[tokio::test]
+    async fn credential_metadata_import_does_not_create_missing_secret_credentials() {
+        let db = HopDb::in_memory().await.unwrap();
+
+        let summary = import_credentials(
+            &db,
+            "name,username,auth_type\ndeploy,deploy,password\n",
+            TransferFormat::Csv,
+            ConflictPolicy::Skip,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.imported, 0);
+        assert_eq!(summary.errors.len(), 1);
+        assert!(summary.errors[0].contains("without secrets"));
+        assert!(db.list_credentials().await.unwrap().is_empty());
     }
 }

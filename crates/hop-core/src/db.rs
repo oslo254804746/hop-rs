@@ -8,9 +8,10 @@ use sqlx::{
 use crate::{
     errors::HopCoreError,
     models::{
-        new_id, normalize_asset_protocol, protocol_supports_managed_credentials, validate_tcp_port,
-        Asset, AssetAccessMode, AssetRow, AuthorizedKey, AuthorizedKeyRow, Credential, KnownHost,
-        NewAsset, NewAuthorizedKey, NewCredential, NewKnownHost, NewSession, Session, Setting,
+        new_id, normalize_asset_protocol, protocol_supports_managed_credentials,
+        validate_credential_material, validate_tcp_port, Asset, AssetAccessMode, AssetRow,
+        AuthorizedKey, AuthorizedKeyRow, Credential, KnownHost, NewAsset, NewAuthorizedKey,
+        NewCredential, NewKnownHost, NewSession, Session, Setting,
     },
     Result,
 };
@@ -287,6 +288,12 @@ impl HopDb {
     }
 
     pub async fn add_credential(&self, credential: NewCredential) -> Result<Credential> {
+        validate_credential_material(
+            &credential.auth_type,
+            credential.password_enc.as_deref(),
+            credential.private_key_enc.as_deref(),
+            credential.passphrase_enc.as_deref(),
+        )?;
         let id = credential.id.unwrap_or_else(new_id);
         sqlx::query(
             r#"
@@ -344,6 +351,12 @@ impl HopDb {
     }
 
     pub async fn update_credential(&self, id: &str, credential: NewCredential) -> Result<()> {
+        validate_credential_material(
+            &credential.auth_type,
+            credential.password_enc.as_deref(),
+            credential.private_key_enc.as_deref(),
+            credential.passphrase_enc.as_deref(),
+        )?;
         sqlx::query(
             r#"
             UPDATE credentials

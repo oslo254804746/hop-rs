@@ -485,7 +485,21 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
     if let Some(message) = admin_bind_exposure_warning(&config)? {
         warn!("{message}");
     }
-    let admin = admin::routes::serve_admin(admin_bind, ssh_bind, db.clone(), master_key.clone());
+    if config.security.admin_cookie_secure {
+        info!("admin session cookies will use the Secure attribute");
+    } else if !admin_bind.ip().is_loopback() {
+        warn!(
+            "admin session cookies are not marked Secure; set security.admin_cookie_secure = true \
+             when serving Admin Web through HTTPS"
+        );
+    }
+    let admin = admin::routes::serve_admin(
+        admin_bind,
+        ssh_bind,
+        db.clone(),
+        master_key.clone(),
+        config.security.admin_cookie_secure,
+    );
     let ssh = ssh::server::serve_ssh(ssh_bind, config, db, master_key);
     info!("starting hop-server");
     tokio::try_join!(admin, ssh)?;

@@ -17,7 +17,7 @@ use hop_core::{
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::{
     auth::{
@@ -36,6 +36,7 @@ pub struct AdminState {
     pub master_key: Arc<MasterKey>,
     pub sessions: AdminSessions,
     pub ssh_port: u16,
+    pub cookie_secure: bool,
 }
 
 pub async fn serve_admin(
@@ -43,12 +44,14 @@ pub async fn serve_admin(
     ssh_bind: SocketAddr,
     db: HopDb,
     master_key: Arc<MasterKey>,
+    cookie_secure: bool,
 ) -> Result<()> {
     let state = AdminState {
         db,
         master_key,
         sessions: AdminSessions::default(),
         ssh_port: ssh_bind.port(),
+        cookie_secure,
     };
     let app = Router::new()
         .route("/", get(index))
@@ -119,10 +122,22 @@ async fn index(State(state): State<AdminState>, headers: HeaderMap) -> Response 
     let Ok(_session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
-    let assets = state.db.list_assets().await.unwrap_or_default();
-    let credentials = state.db.list_credentials().await.unwrap_or_default();
-    let keys = state.db.list_authorized_keys().await.unwrap_or_default();
-    let sessions = state.db.list_sessions(10).await.unwrap_or_default();
+    let assets = match state.db.list_assets().await {
+        Ok(assets) => assets,
+        Err(err) => return admin_db_error("list assets for overview", err),
+    };
+    let credentials = match state.db.list_credentials().await {
+        Ok(credentials) => credentials,
+        Err(err) => return admin_db_error("list credentials for overview", err),
+    };
+    let keys = match state.db.list_authorized_keys().await {
+        Ok(keys) => keys,
+        Err(err) => return admin_db_error("list authorized keys for overview", err),
+    };
+    let sessions = match state.db.list_sessions(10).await {
+        Ok(sessions) => sessions,
+        Err(err) => return admin_db_error("list sessions for overview", err),
+    };
     Html(
         html::overview(
             t,
@@ -158,7 +173,10 @@ async fn login(
             (
                 StatusCode::SEE_OTHER,
                 [
-                    (header::SET_COOKIE, session_cookie(&token)),
+                    (
+                        header::SET_COOKIE,
+                        session_cookie(&token, state.cookie_secure),
+                    ),
                     (header::LOCATION, "/".to_string()),
                 ],
             )
@@ -175,7 +193,7 @@ async fn logout(State(state): State<AdminState>, headers: HeaderMap) -> Response
     (
         StatusCode::SEE_OTHER,
         [
-            (header::SET_COOKIE, clear_cookie()),
+            (header::SET_COOKIE, clear_cookie(state.cookie_secure)),
             (header::LOCATION, "/login".to_string()),
         ],
     )
@@ -223,7 +241,7 @@ async fn update_settings(
             (
                 StatusCode::SEE_OTHER,
                 [
-                    (header::SET_COOKIE, clear_cookie()),
+                    (header::SET_COOKIE, clear_cookie(state.cookie_secure)),
                     (header::LOCATION, "/login".to_string()),
                 ],
             )
@@ -260,10 +278,16 @@ async fn assets(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
-    let all_assets = state.db.list_assets().await.unwrap_or_default();
+    let all_assets = match state.db.list_assets().await {
+        Ok(assets) => assets,
+        Err(err) => return admin_db_error("list assets", err),
+    };
     let all_tags = collect_tags(&all_assets);
     let assets = filter_assets_by_tag(&all_assets, query.tag.as_deref());
-    let credentials = state.db.list_credentials().await.unwrap_or_default();
+    let credentials = match state.db.list_credentials().await {
+        Ok(credentials) => credentials,
+        Err(err) => return admin_db_error("list credentials for assets", err),
+    };
     Html(
         html::assets(
             t,
@@ -319,8 +343,10 @@ async fn create_asset(
     let Some(asset) = new_asset_from_form(form) else {
         return Redirect::to("/assets").into_response();
     };
-    let _ = state.db.add_asset(asset).await;
-    Redirect::to("/assets").into_response()
+    match state.db.add_asset(asset).await {
+        Ok(_) => Redirect::to("/assets").into_response(),
+        Err(err) => admin_db_error("create asset", err),
+    }
 }
 
 async fn edit_asset(
@@ -335,8 +361,14 @@ async fn edit_asset(
     let Ok(Some(asset)) = state.db.get_asset_by_id(&id).await else {
         return Redirect::to("/assets").into_response();
     };
-    let credentials = state.db.list_credentials().await.unwrap_or_default();
-    let all_assets = state.db.list_assets().await.unwrap_or_default();
+    let credentials = match state.db.list_credentials().await {
+        Ok(credentials) => credentials,
+        Err(err) => return admin_db_error("list credentials for asset edit", err),
+    };
+    let all_assets = match state.db.list_assets().await {
+        Ok(assets) => assets,
+        Err(err) => return admin_db_error("list assets for asset edit", err),
+    };
     let all_tags = collect_tags(&all_assets);
     Html(
         html::edit_asset(
@@ -367,8 +399,10 @@ async fn update_asset(
     let Some(asset) = new_asset_from_form(form) else {
         return Redirect::to("/assets").into_response();
     };
-    let _ = state.db.update_asset(&id, asset).await;
-    Redirect::to("/assets").into_response()
+    match state.db.update_asset(&id, asset).await {
+        Ok(()) => Redirect::to("/assets").into_response(),
+        Err(err) => admin_db_error("update asset", err),
+    }
 }
 
 async fn delete_asset(
@@ -383,8 +417,10 @@ async fn delete_asset(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
-    let _ = state.db.delete_asset(&id).await;
-    Redirect::to("/assets").into_response()
+    match state.db.delete_asset(&id).await {
+        Ok(()) => Redirect::to("/assets").into_response(),
+        Err(err) => admin_db_error("delete asset", err),
+    }
 }
 
 async fn bulk_update_asset_tags(
@@ -404,7 +440,7 @@ async fn bulk_update_asset_tags(
     let tags = parse_tags(form.tags);
     for asset_id in form.asset_ids {
         if let Ok(Some(asset)) = state.db.get_asset_by_id(&asset_id).await {
-            let _ = state
+            if let Err(err) = state
                 .db
                 .update_asset(
                     &asset.id,
@@ -419,7 +455,10 @@ async fn bulk_update_asset_tags(
                         credential_id: asset.credential_id,
                     },
                 )
-                .await;
+                .await
+            {
+                return admin_db_error("bulk update asset tags", err);
+            }
         }
     }
     Redirect::to("/assets").into_response()
@@ -430,7 +469,10 @@ async fn credentials(State(state): State<AdminState>, headers: HeaderMap) -> Res
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
-    let credentials = state.db.list_credentials().await.unwrap_or_default();
+    let credentials = match state.db.list_credentials().await {
+        Ok(credentials) => credentials,
+        Err(err) => return admin_db_error("list credentials", err),
+    };
     Html(html::credentials(t, &credentials, &session.csrf_token).into_string()).into_response()
 }
 
@@ -479,7 +521,7 @@ async fn create_credential(
     {
         return Redirect::to("/credentials").into_response();
     }
-    let _ = state
+    match state
         .db
         .add_credential(NewCredential {
             id: Some(id),
@@ -490,8 +532,11 @@ async fn create_credential(
             private_key_enc,
             passphrase_enc,
         })
-        .await;
-    Redirect::to("/credentials").into_response()
+        .await
+    {
+        Ok(_) => Redirect::to("/credentials").into_response(),
+        Err(err) => admin_db_error("create credential", err),
+    }
 }
 
 async fn edit_credential(
@@ -549,7 +594,7 @@ async fn update_credential(
     {
         return Redirect::to("/credentials").into_response();
     }
-    let _ = state
+    match state
         .db
         .update_credential(
             &id,
@@ -563,8 +608,11 @@ async fn update_credential(
                 passphrase_enc,
             },
         )
-        .await;
-    Redirect::to("/credentials").into_response()
+        .await
+    {
+        Ok(()) => Redirect::to("/credentials").into_response(),
+        Err(err) => admin_db_error("update credential", err),
+    }
 }
 
 fn encrypt_optional(
@@ -631,8 +679,10 @@ async fn delete_credential(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
-    let _ = state.db.delete_credential(&id).await;
-    Redirect::to("/credentials").into_response()
+    match state.db.delete_credential(&id).await {
+        Ok(()) => Redirect::to("/credentials").into_response(),
+        Err(err) => admin_db_error("delete credential", err),
+    }
 }
 
 async fn keys(State(state): State<AdminState>, headers: HeaderMap) -> Response {
@@ -640,7 +690,10 @@ async fn keys(State(state): State<AdminState>, headers: HeaderMap) -> Response {
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
-    let keys = state.db.list_authorized_keys().await.unwrap_or_default();
+    let keys = match state.db.list_authorized_keys().await {
+        Ok(keys) => keys,
+        Err(err) => return admin_db_error("list authorized keys", err),
+    };
     Html(html::keys(t, &keys, &session.csrf_token).into_string()).into_response()
 }
 
@@ -672,10 +725,13 @@ async fn create_key(
         return resp;
     }
     if let Ok((public_key, fingerprint)) = parse_public_key_line(&form.public_key) {
-        let _ = state
+        if let Err(err) = state
             .db
             .add_authorized_key(NewAuthorizedKey::new(form.name, public_key, fingerprint))
-            .await;
+            .await
+        {
+            return admin_db_error("create authorized key", err);
+        }
     }
     Redirect::to("/keys").into_response()
 }
@@ -692,12 +748,14 @@ async fn edit_key(
     let Ok(Some(key)) = state.db.get_authorized_key_by_id(&id).await else {
         return Redirect::to("/keys").into_response();
     };
-    let assets = state.db.list_assets().await.unwrap_or_default();
-    let assigned_ids = state
-        .db
-        .list_asset_ids_for_key(&id)
-        .await
-        .unwrap_or_default();
+    let assets = match state.db.list_assets().await {
+        Ok(assets) => assets,
+        Err(err) => return admin_db_error("list assets for key edit", err),
+    };
+    let assigned_ids = match state.db.list_asset_ids_for_key(&id).await {
+        Ok(ids) => ids,
+        Err(err) => return admin_db_error("list key asset assignments", err),
+    };
     Html(html::edit_key(t, &key, &assets, &assigned_ids, &session.csrf_token, None).into_string())
         .into_response()
 }
@@ -786,12 +844,14 @@ async fn render_key_edit_error(
     let Ok(Some(key)) = state.db.get_authorized_key_by_id(id).await else {
         return (StatusCode::BAD_REQUEST, error.to_string()).into_response();
     };
-    let assets = state.db.list_assets().await.unwrap_or_default();
-    let assigned_ids = state
-        .db
-        .list_asset_ids_for_key(id)
-        .await
-        .unwrap_or_default();
+    let assets = match state.db.list_assets().await {
+        Ok(assets) => assets,
+        Err(err) => return admin_db_error("list assets for key edit error", err),
+    };
+    let assigned_ids = match state.db.list_asset_ids_for_key(id).await {
+        Ok(ids) => ids,
+        Err(err) => return admin_db_error("list key assignments for key edit error", err),
+    };
     (
         StatusCode::BAD_REQUEST,
         Html(
@@ -821,8 +881,10 @@ async fn deactivate_key(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
-    let _ = state.db.set_authorized_key_active(&id, false).await;
-    Redirect::to("/keys").into_response()
+    match state.db.set_authorized_key_active(&id, false).await {
+        Ok(()) => Redirect::to("/keys").into_response(),
+        Err(err) => admin_db_error("deactivate authorized key", err),
+    }
 }
 
 async fn activate_key(
@@ -837,8 +899,10 @@ async fn activate_key(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
-    let _ = state.db.set_authorized_key_active(&id, true).await;
-    Redirect::to("/keys").into_response()
+    match state.db.set_authorized_key_active(&id, true).await {
+        Ok(()) => Redirect::to("/keys").into_response(),
+        Err(err) => admin_db_error("activate authorized key", err),
+    }
 }
 
 async fn delete_key(
@@ -853,8 +917,10 @@ async fn delete_key(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
-    let _ = state.db.delete_authorized_key(&id).await;
-    Redirect::to("/keys").into_response()
+    match state.db.delete_authorized_key(&id).await {
+        Ok(()) => Redirect::to("/keys").into_response(),
+        Err(err) => admin_db_error("delete authorized key", err),
+    }
 }
 
 async fn known_hosts(State(state): State<AdminState>, headers: HeaderMap) -> Response {
@@ -862,7 +928,10 @@ async fn known_hosts(State(state): State<AdminState>, headers: HeaderMap) -> Res
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
-    let hosts = state.db.list_known_hosts().await.unwrap_or_default();
+    let hosts = match state.db.list_known_hosts().await {
+        Ok(hosts) => hosts,
+        Err(err) => return admin_db_error("list known hosts", err),
+    };
     Html(html::known_hosts(t, &hosts, &session.csrf_token).into_string()).into_response()
 }
 
@@ -884,11 +953,14 @@ async fn delete_known_host(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
-    let _ = state
+    match state
         .db
         .delete_known_host(&hostname, port, &form.key_type)
-        .await;
-    Redirect::to("/known-hosts").into_response()
+        .await
+    {
+        Ok(()) => Redirect::to("/known-hosts").into_response(),
+        Err(err) => admin_db_error("delete known host", err),
+    }
 }
 
 async fn sessions(State(state): State<AdminState>, headers: HeaderMap) -> Response {
@@ -896,7 +968,10 @@ async fn sessions(State(state): State<AdminState>, headers: HeaderMap) -> Respon
     let Ok(_session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
-    let sessions = state.db.list_sessions(100).await.unwrap_or_default();
+    let sessions = match state.db.list_sessions(100).await {
+        Ok(sessions) => sessions,
+        Err(err) => return admin_db_error("list sessions", err),
+    };
     Html(html::sessions(t, &sessions).into_string()).into_response()
 }
 
@@ -940,12 +1015,15 @@ async fn export_assets(
         .ok()
         .flatten()
         .unwrap_or(TransferFormat::Json);
-    let assets = state.db.list_assets().await.unwrap_or_default();
-    download_response(
-        "hop-assets",
-        format,
-        transfer::export_assets(&assets, format).unwrap_or_default(),
-    )
+    let assets = match state.db.list_assets().await {
+        Ok(assets) => assets,
+        Err(err) => return admin_db_error("list assets for export", err),
+    };
+    let body = match transfer::export_assets(&assets, format) {
+        Ok(body) => body,
+        Err(err) => return admin_db_error("export assets", err),
+    };
+    download_response("hop-assets", format, body)
 }
 
 async fn export_credentials(
@@ -964,12 +1042,15 @@ async fn export_credentials(
         .ok()
         .flatten()
         .unwrap_or(TransferFormat::Json);
-    let credentials = state.db.list_credentials().await.unwrap_or_default();
-    download_response(
-        "hop-credentials",
-        format,
-        transfer::export_credentials(&credentials, format).unwrap_or_default(),
-    )
+    let credentials = match state.db.list_credentials().await {
+        Ok(credentials) => credentials,
+        Err(err) => return admin_db_error("list credentials for export", err),
+    };
+    let body = match transfer::export_credentials(&credentials, format) {
+        Ok(body) => body,
+        Err(err) => return admin_db_error("export credentials", err),
+    };
+    download_response("hop-credentials", format, body)
 }
 
 async fn import_page(State(state): State<AdminState>, headers: HeaderMap) -> Response {
@@ -1061,6 +1142,15 @@ async fn import_data(
 
 fn request_l10n(headers: &HeaderMap) -> &'static super::i18n::L10n {
     l10n(resolve_locale(headers))
+}
+
+fn admin_db_error(context: &'static str, err: impl std::fmt::Display) -> Response {
+    warn!(%context, error = %err, "admin database operation failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "admin database operation failed",
+    )
+        .into_response()
 }
 
 fn language_cookie(value: &str) -> String {

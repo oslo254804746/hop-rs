@@ -44,6 +44,7 @@ impl Drop for MasterKey {
 
 pub fn load_or_create_master_key(path: &Path) -> Result<MasterKey> {
     if path.exists() {
+        check_secret_permissions(path)?;
         let raw = fs::read_to_string(path)?;
         let decoded = STANDARD
             .decode(raw.trim())
@@ -64,6 +65,25 @@ pub fn load_or_create_master_key(path: &Path) -> Result<MasterKey> {
     fs::write(path, STANDARD.encode(key.expose()))?;
     set_secret_permissions(path)?;
     Ok(key)
+}
+
+#[cfg(unix)]
+fn check_secret_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = fs::metadata(path)?.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(HopCoreError::Crypto(format!(
+            "secret key file {} permissions must not allow group or other access; current mode is {mode:o}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_secret_permissions(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -169,5 +189,20 @@ mod tests {
         let first = encrypt_envelope(&key, "cred-1:password", b"secret").unwrap();
         let second = encrypt_envelope(&key, "cred-1:password", b"secret").unwrap();
         assert_ne!(first, second);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_secret_key_rejects_group_or_other_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hop.secret");
+        fs::write(&path, STANDARD.encode(MasterKey::generate().expose())).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = load_or_create_master_key(&path).unwrap_err();
+
+        assert!(err.to_string().contains("permissions must not allow"));
     }
 }
