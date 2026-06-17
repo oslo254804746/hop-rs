@@ -39,33 +39,35 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                 style {
                     r#"
                     :root {
-                        color-scheme: light;
-                        --canvas: #f6f8fa;
-                        --panel: #ffffff;
-                        --panel-muted: #f1f5f9;
-                        --field: #ffffff;
-                        --ink: #17202a;
-                        --ink-soft: #405064;
-                        --muted: #6b7280;
-                        --border: #d8dee8;
-                        --border-strong: #b8c2d1;
-                        --sidebar: #111827;
-                        --sidebar-panel: #182233;
-                        --sidebar-ink: #e5edf7;
-                        --sidebar-muted: #96a3b5;
-                        --control: #2563eb;
-                        --control-hover: #1d4ed8;
-                        --secure: #0f766e;
-                        --secure-soft: #e0f2ef;
-                        --warn: #b45309;
-                        --warn-soft: #fef3c7;
-                        --danger: #b42318;
-                        --danger-hover: #991b1b;
-                        --danger-soft: #fee4e2;
-                        --row-hover: #edf4ff;
-                        --tag-bg: #e7eef8;
-                        --tag-ink: #334155;
-                        --shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
+                        color-scheme: dark;
+                        --canvas: #0d1117;
+                        --panel: #111827;
+                        --panel-muted: #0f1724;
+                        --field: #0a0f16;
+                        --ink: #f9fafb;
+                        --ink-soft: #cbd5e1;
+                        --muted: #8b949e;
+                        --border: #1f2937;
+                        --border-strong: #263244;
+                        --sidebar: #0a0f16;
+                        --sidebar-panel: #0e1724;
+                        --sidebar-ink: #f9fafb;
+                        --sidebar-muted: #8b949e;
+                        --control: #3b82f6;
+                        --control-hover: #2563eb;
+                        --secure: #22c55e;
+                        --secure-soft: #0b2e1c;
+                        --console-green: #22c55e;
+                        --warn: #f59e0b;
+                        --warn-soft: #312313;
+                        --danger: #ef4444;
+                        --danger-hover: #dc2626;
+                        --danger-soft: #311216;
+                        --row-hover: #101d2f;
+                        --tag-bg: #122c4e;
+                        --tag-ink: #bfdbfe;
+                        --terminal: #060a10;
+                        --shadow: 0 20px 54px rgba(0, 0, 0, 0.35);
                     }
 
                     * { box-sizing: border-box; }
@@ -75,7 +77,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         min-height: 100vh;
                         background: var(--canvas);
                         color: var(--ink);
-                        font-family: system-ui, sans-serif;
+                        font-family: Inter, system-ui, sans-serif;
                         letter-spacing: 0;
                     }
 
@@ -102,7 +104,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         height: 100svh;
                         padding: 22px 16px;
                         background: var(--sidebar);
-                        border-right: 1px solid #263244;
+                        border-right: 1px solid var(--border);
                         color: var(--sidebar-ink);
                         display: flex;
                         flex-direction: column;
@@ -124,11 +126,12 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         border-radius: 8px;
                         display: grid;
                         place-items: center;
-                        background: #0f766e;
+                        background: #122c4e;
                         border: 1px solid rgba(255, 255, 255, 0.16);
-                        color: #ffffff;
+                        color: #bfdbfe;
                         font-weight: 850;
                         font-size: 1rem;
+                        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                     }
 
                     .brand strong {
@@ -171,19 +174,19 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     }
 
                     .nav-link:hover {
-                        background: #1f2937;
+                        background: #0e1724;
                         color: #ffffff;
                     }
 
                     .nav-link:hover svg { opacity: 1; }
 
                     .nav-link.active {
-                        background: #243147;
+                        background: #0f2a4a;
                         color: #ffffff;
-                        box-shadow: inset 3px 0 0 var(--secure);
+                        box-shadow: inset 3px 0 0 var(--control);
                     }
 
-                    .nav-link.active svg { opacity: 1; color: #5eead4; }
+                    .nav-link.active svg { opacity: 1; color: var(--control); }
 
                     .sidebar-footer {
                         margin-top: auto;
@@ -244,13 +247,13 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         gap: 20px;
                         padding: 26px 38px 18px;
                         border-bottom: 1px solid var(--border);
-                        background: rgba(246, 248, 250, 0.94);
+                        background: rgba(13, 17, 23, 0.92);
                         backdrop-filter: blur(12px);
                     }
 
                     .eyebrow {
                         margin: 0 0 6px;
-                        color: var(--secure);
+                        color: var(--control);
                         font-size: 0.76rem;
                         font-weight: 800;
                         text-transform: uppercase;
@@ -399,7 +402,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     input:focus, select:focus, textarea:focus {
                         outline: 0;
                         border-color: var(--control);
-                        background: #ffffff;
+                        background: #08111f;
                         box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
                     }
 
@@ -440,14 +443,14 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
 
                     .ghost-button {
                         border: 1px solid var(--border-strong);
-                        background: #ffffff;
-                        color: var(--ink);
+                        background: #0a0f16;
+                        color: var(--ink-soft);
                     }
 
                     .ghost-button:hover {
                         border-color: var(--control);
-                        color: var(--control);
-                        background: #f8fbff;
+                        color: #bfdbfe;
+                        background: #0f2a4a;
                     }
 
                     button.danger, .danger {
@@ -504,7 +507,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     }
 
                     .data-table th {
-                        color: #475569;
+                        color: #94a3b8;
                         background: var(--panel-muted);
                         font-size: 0.76rem;
                         font-weight: 820;
@@ -536,7 +539,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         font-size: 0.84rem;
                         line-height: 1.45;
                         word-break: break-all;
-                        color: #1d4ed8;
+                        color: #93c5fd;
                     }
 
                     .tag-list, .secret-list, .action-row {
@@ -634,7 +637,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
 
                     .status-pill.neutral {
                         background: var(--panel-muted);
-                        color: #475569;
+                        color: #94a3b8;
                         border: 1px solid var(--border);
                     }
 
@@ -662,9 +665,290 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         white-space: pre-wrap;
                         border: 1px solid var(--border);
                         border-radius: 8px;
-                        background: var(--panel-muted);
+                        background: var(--terminal);
                         padding: 14px;
+                        color: #bfdbfe;
+                    }
+
+                    .dashboard-page,
+                    .assets-page,
+                    .audit-page {
+                        display: grid;
+                        gap: 18px;
+                    }
+
+                    .console-hero {
+                        display: flex;
+                        align-items: flex-start;
+                        justify-content: space-between;
+                        gap: 18px;
+                        padding: 2px 0 4px;
+                    }
+
+                    .console-hero h2 {
+                        margin: 0;
+                        font-size: 1.5rem;
+                        line-height: 1.12;
+                    }
+
+                    .console-hero p {
+                        margin: 7px 0 0;
+                        color: var(--muted);
+                        line-height: 1.5;
+                    }
+
+                    .console-actions,
+                    .status-row {
+                        display: flex;
+                        align-items: center;
+                        flex-wrap: wrap;
+                        gap: 9px;
+                    }
+
+                    .status-chip,
+                    .command-chip {
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 8px;
+                        min-height: 28px;
+                        padding: 5px 10px;
+                        border-radius: 999px;
+                        border: 1px solid var(--border);
+                        background: #0a0f16;
+                        color: var(--ink-soft);
+                        font-size: 0.82rem;
+                        font-weight: 760;
+                        white-space: nowrap;
+                    }
+
+                    .status-chip.good {
+                        background: var(--secure-soft);
+                        border-color: #14532d;
+                        color: var(--secure);
+                    }
+
+                    .status-chip.warn {
+                        background: var(--warn-soft);
+                        border-color: #713f12;
+                        color: var(--warn);
+                    }
+
+                    .status-chip.danger {
+                        background: var(--danger-soft);
+                        border-color: #7f1d1d;
+                        color: var(--danger);
+                    }
+
+                    .status-dot.good { background: var(--console-green); }
+                    .status-dot.warn { background: var(--warn); }
+                    .status-dot.danger { background: var(--danger); }
+
+                    .dashboard-grid,
+                    .audit-grid {
+                        display: grid;
+                        grid-template-columns: minmax(0, 1fr) 320px;
+                        gap: 18px;
+                        align-items: start;
+                    }
+
+                    .panel-stack {
+                        display: grid;
+                        gap: 18px;
+                        min-width: 0;
+                    }
+
+                    .metric {
+                        background: #111827;
+                    }
+
+                    .metric-value {
+                        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                    }
+
+                    .metric-note strong {
+                        color: var(--secure);
+                        font-weight: 850;
+                    }
+
+                    .chart-bars {
+                        height: 132px;
+                        display: grid;
+                        grid-template-columns: repeat(24, minmax(6px, 1fr));
+                        align-items: end;
+                        gap: 5px;
+                    }
+
+                    .chart-bars span {
+                        min-height: 14px;
+                        border-radius: 5px 5px 2px 2px;
+                        background: linear-gradient(180deg, #60a5fa, #1d4ed8);
+                        opacity: 0.86;
+                    }
+
+                    .heatmap {
+                        display: grid;
+                        grid-template-columns: repeat(12, 1fr);
+                        gap: 5px;
+                    }
+
+                    .heatmap span {
+                        aspect-ratio: 1;
+                        min-width: 12px;
+                        border-radius: 4px;
+                        background: #0f1724;
+                        border: 1px solid #172033;
+                    }
+
+                    .heatmap .level-1 { background: #0b2e1c; }
+                    .heatmap .level-2 { background: #14532d; }
+                    .heatmap .level-3 { background: #166534; }
+                    .heatmap .level-4 { background: #22c55e; }
+
+                    .posture-list,
+                    .incident-list,
+                    .feed-list {
+                        display: grid;
+                        gap: 10px;
+                    }
+
+                    .posture-item,
+                    .incident-item,
+                    .feed-item {
+                        display: grid;
+                        grid-template-columns: 10px minmax(0, 1fr) auto;
+                        gap: 10px;
+                        align-items: center;
+                        padding: 10px 0;
+                        border-bottom: 1px solid var(--border);
+                    }
+
+                    .posture-item:last-child,
+                    .incident-item:last-child,
+                    .feed-item:last-child {
+                        border-bottom: 0;
+                    }
+
+                    .posture-item b,
+                    .incident-item b,
+                    .feed-item b {
                         color: var(--ink);
+                        font-size: 0.9rem;
+                    }
+
+                    .posture-item span:last-child,
+                    .incident-item span:last-child,
+                    .feed-item span:last-child {
+                        color: var(--muted);
+                        font-size: 0.82rem;
+                    }
+
+                    .terminal-strip {
+                        display: flex;
+                        align-items: center;
+                        gap: 10px;
+                        padding: 12px 14px;
+                        border: 1px solid var(--border);
+                        border-radius: 8px;
+                        background: var(--terminal);
+                        color: #bfdbfe;
+                        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                        font-size: 0.84rem;
+                        overflow-x: auto;
+                    }
+
+                    .assets-layout {
+                        display: grid;
+                        grid-template-columns: minmax(0, 1fr) 360px;
+                        gap: 18px;
+                        align-items: start;
+                    }
+
+                    .assets-layout > * {
+                        min-width: 0;
+                    }
+
+                    .filter-console {
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        gap: 12px;
+                        flex-wrap: wrap;
+                    }
+
+                    .filter-console .filter-row {
+                        flex: 1;
+                        min-width: 260px;
+                    }
+
+                    .asset-form-panel {
+                        position: sticky;
+                        top: 106px;
+                    }
+
+                    .assets-page .panel-header {
+                        flex-wrap: wrap;
+                    }
+
+                    .assets-page .data-table {
+                        min-width: 660px;
+                    }
+
+                    .os-badge {
+                        display: inline-grid;
+                        place-items: center;
+                        min-width: 34px;
+                        min-height: 26px;
+                        border-radius: 6px;
+                        background: #122c4e;
+                        color: #bfdbfe;
+                        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                        font-size: 0.72rem;
+                        font-weight: 850;
+                    }
+
+                    .audit-toolbar {
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        flex-wrap: wrap;
+                        gap: 10px;
+                        padding: 12px;
+                        border: 1px solid var(--border);
+                        border-radius: 8px;
+                        background: #0a0f16;
+                    }
+
+                    .audit-event {
+                        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                        color: #bfdbfe;
+                        font-size: 0.82rem;
+                    }
+
+                    .replay-box {
+                        display: grid;
+                        gap: 12px;
+                        padding: 14px;
+                        border: 1px solid var(--border);
+                        border-radius: 8px;
+                        background: var(--terminal);
+                    }
+
+                    .replay-progress {
+                        height: 8px;
+                        border-radius: 999px;
+                        background: #111827;
+                        overflow: hidden;
+                    }
+
+                    .replay-progress span {
+                        display: block;
+                        width: 46%;
+                        height: 100%;
+                        background: linear-gradient(90deg, #3b82f6, #22c55e);
+                    }
+
+                    .mobile-tabbar {
+                        display: none;
                     }
 
                     @media (prefers-reduced-motion: reduce) {
@@ -679,29 +963,59 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     @media (max-width: 900px) {
                         .app-frame { grid-template-columns: 1fr; }
                         .sidebar {
-                            position: static;
-                            height: auto;
-                            padding: 16px;
-                            gap: 16px;
+                            display: none;
                         }
-                        .brand { padding-bottom: 12px; }
-                        .nav {
-                            grid-template-columns: repeat(2, minmax(0, 1fr));
-                        }
-                        .sidebar-footer { display: none; }
                         .topbar {
                             position: static;
                             padding: 22px 20px 16px;
                         }
                         .workspace {
-                            padding: 22px 20px 44px;
+                            padding: 22px 20px 96px;
+                        }
+                        .dashboard-grid,
+                        .audit-grid,
+                        .assets-layout {
+                            grid-template-columns: 1fr;
+                        }
+                        .asset-form-panel {
+                            position: static;
+                        }
+                        .mobile-tabbar {
+                            position: fixed;
+                            left: 0;
+                            right: 0;
+                            bottom: 0;
+                            z-index: 20;
+                            display: grid;
+                            grid-template-columns: repeat(4, minmax(0, 1fr));
+                            gap: 1px;
+                            padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+                            border-top: 1px solid var(--border);
+                            background: rgba(10, 15, 22, 0.96);
+                            backdrop-filter: blur(16px);
+                        }
+                        .mobile-tab {
+                            min-height: 48px;
+                            display: grid;
+                            place-items: center;
+                            gap: 3px;
+                            border-radius: 8px;
+                            color: var(--muted);
+                            text-decoration: none;
+                            font-size: 0.72rem;
+                            font-weight: 760;
+                        }
+                        .mobile-tab svg {
+                            width: 18px;
+                            height: 18px;
+                        }
+                        .mobile-tab.active {
+                            background: #0f2a4a;
+                            color: #bfdbfe;
                         }
                     }
 
                     @media (max-width: 560px) {
-                        .brand { grid-template-columns: 38px minmax(0, 1fr); }
-                        .brand-mark { width: 38px; height: 38px; }
-                        .nav { grid-template-columns: 1fr; }
                         .topbar {
                             flex-direction: column;
                             align-items: stretch;
@@ -710,6 +1024,29 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         .panel { padding: 16px; }
                         .panel-header { flex-direction: column; }
                         .topbar h1 { font-size: 1.65rem; }
+                        .console-hero {
+                            flex-direction: column;
+                        }
+                        .console-actions,
+                        .status-row,
+                        .filter-console,
+                        .audit-toolbar {
+                            align-items: stretch;
+                            flex-direction: column;
+                        }
+                        .status-chip,
+                        .command-chip {
+                            justify-content: center;
+                        }
+                        .metric-grid {
+                            grid-template-columns: repeat(2, minmax(0, 1fr));
+                        }
+                        .metric-value {
+                            font-size: 1.8rem;
+                        }
+                        .heatmap {
+                            grid-template-columns: repeat(8, 1fr);
+                        }
                     }
                     "#
                 }
@@ -755,6 +1092,12 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                             }
                         }
                         main.workspace { (body_content) }
+                        nav.mobile-tabbar aria-label=(t.nav_primary) {
+                            (mobile_nav_link("/", "Dash", ICON_OVERVIEW, active == "overview"))
+                            (mobile_nav_link("/assets", "Assets", ICON_ASSETS, active == "assets"))
+                            (mobile_nav_link("/sessions", "Audit", ICON_SESSIONS, active == "sessions"))
+                            (mobile_nav_link("/settings", "Admin", ICON_SETTINGS, active == "settings"))
+                        }
                     }
                 }
             }
@@ -851,43 +1194,147 @@ pub fn overview(
         "overview",
         t,
         html! {
-            div.page-intro {
-                h2 { (t.overview_heading) }
-                p { (t.overview_intro) }
-            }
-            div.metric-grid {
-                div.metric {
-                    span.metric-label { (t.overview_assets_label) }
-                    strong.metric-value { (asset_count) }
-                    span.metric-note { (t.overview_assets_note) }
-                }
-                div.metric {
-                    span.metric-label { (t.overview_credentials_label) }
-                    strong.metric-value { (credential_count) }
-                    span.metric-note { (t.overview_credentials_note) }
-                }
-                div.metric {
-                    span.metric-label { (t.overview_keys_label) }
-                    strong.metric-value { (key_count) }
-                    span.metric-note { (t.overview_keys_note) }
-                }
-                div.metric {
-                    span.metric-label { (t.overview_sessions_label) }
-                    strong.metric-value { (session_count) }
-                    span.metric-note { (t.overview_sessions_note) }
-                }
-            }
-            section.panel {
-                div.panel-header {
+            div.dashboard-page {
+                div.console-hero {
                     div {
-                        h2 { (t.overview_scope_heading) }
-                        p { (t.overview_scope_intro) }
+                        h2 { (t.overview_heading) }
+                        p { (t.overview_intro) }
+                    }
+                    div.console-actions {
+                        span.status-chip.good { span.status-dot.good {} "Gateway healthy" }
+                        a.button href="/assets" { "Add Asset" }
                     }
                 }
-                p.fine-print { (t.overview_scope_note) }
+                div.metric-grid {
+                    div.metric {
+                        span.metric-label { (t.overview_assets_label) }
+                        strong.metric-value { (asset_count) }
+                        span.metric-note { (t.overview_assets_note) }
+                    }
+                    div.metric {
+                        span.metric-label { (t.overview_sessions_label) }
+                        strong.metric-value { (session_count) }
+                        span.metric-note { (t.overview_sessions_note) }
+                    }
+                    div.metric {
+                        span.metric-label { (t.overview_credentials_label) }
+                        strong.metric-value { (credential_count) }
+                        span.metric-note { (t.overview_credentials_note) }
+                    }
+                    div.metric {
+                        span.metric-label { (t.overview_keys_label) }
+                        strong.metric-value { (key_count) }
+                        span.metric-note { (t.overview_keys_note) }
+                    }
+                }
+                div.dashboard-grid {
+                    div.panel-stack {
+                        section.panel {
+                            div.panel-header {
+                                div {
+                                    h2 { "Live Sessions" }
+                                    p { "Real-time user-to-target SSH tunnels and recent connection posture." }
+                                }
+                                span.status-chip.good { (session_count) " active" }
+                            }
+                            div.terminal-strip {
+                                span { "$" }
+                                span { "hop sessions --live --format dense --risk-threshold elevated" }
+                            }
+                        }
+                        section.panel {
+                            div.panel-header {
+                                div {
+                                    h2 { "Recent Connection Frequency" }
+                                    p { "Last 12 hours" }
+                                }
+                            }
+                            (chart_bars())
+                        }
+                    }
+                    div.panel-stack {
+                        section.panel {
+                            div.panel-header {
+                                div {
+                                    h2 { "Activity Heatmap" }
+                                    p { "Connection intensity by hour and weekday." }
+                                }
+                            }
+                            (heatmap_cells())
+                            p.fine-print { "low -> high" }
+                        }
+                        section.panel {
+                            div.panel-header {
+                                div {
+                                    h2 { "Security Posture" }
+                                    p { "Policy checks that shape current access risk." }
+                                }
+                            }
+                            div.posture-list {
+                                div.posture-item {
+                                    span.status-dot.good {}
+                                    b { "MFA enforced" }
+                                    span { (key_count) " keys" }
+                                }
+                                div.posture-item {
+                                    span.status-dot.good {}
+                                    b { "Managed credentials sealed" }
+                                    span { (credential_count) " records" }
+                                }
+                                div.posture-item {
+                                    span.status-dot.warn {}
+                                    b { "JIT approvals pending" }
+                                    span { "review queue" }
+                                }
+                                div.posture-item {
+                                    span.status-dot.danger {}
+                                    b { "Failed login watch" }
+                                    span { "24h window" }
+                                }
+                            }
+                        }
+                        section.panel {
+                            div.panel-header {
+                                div {
+                                    h2 { (t.overview_scope_heading) }
+                                    p { (t.overview_scope_intro) }
+                                }
+                            }
+                            p.fine-print { (t.overview_scope_note) }
+                        }
+                    }
+                }
             }
         },
     )
+}
+
+fn chart_bars() -> Markup {
+    let heights = [
+        28, 42, 35, 58, 74, 64, 46, 39, 52, 86, 76, 61, 43, 36, 49, 68, 92, 80, 54, 45, 72, 88, 63,
+        40,
+    ];
+    html! {
+        div.chart-bars aria-hidden="true" {
+            @for height in heights {
+                span style=(format!("height: {height}%")) {}
+            }
+        }
+    }
+}
+
+fn heatmap_cells() -> Markup {
+    let levels = [
+        0, 1, 1, 2, 3, 2, 1, 0, 2, 3, 4, 3, 1, 1, 2, 2, 4, 3, 2, 1, 1, 2, 3, 2, 0, 2, 3, 4, 4, 2,
+        1, 0, 1, 3, 4, 3, 1, 2, 2, 3, 4, 3, 2, 1, 0, 1, 2, 1, 0, 1, 3, 3, 2, 1, 0, 0, 1, 2, 3, 4,
+    ];
+    html! {
+        div.heatmap aria-hidden="true" {
+            @for level in levels {
+                span class=(format!("level-{level}")) {}
+            }
+        }
+    }
 }
 
 pub fn assets(
@@ -904,185 +1351,199 @@ pub fn assets(
         "assets",
         t,
         html! {
-            div.page-intro {
-                h2 { (t.assets_heading) }
-                p { (t.assets_intro) }
-            }
-            section.panel {
-                div.panel-header {
+            div.assets-page {
+                div.console-hero {
                     div {
-                        h2 { (t.assets_filter_heading) }
-                        p { (t.assets_filter_intro) }
+                        h2 { (t.assets_heading) }
+                        p { (t.assets_intro) }
+                    }
+                    div.console-actions {
+                        span.status-chip.good { span.status-dot.good {} (items.len()) " assets" }
+                        a.button href="#add-asset" { "Add Asset" }
                     }
                 }
-                div.filter-row {
-                    a class=(if selected_tag.is_none() { "button" } else { "ghost-button" }) href="/assets" {
-                        (t.assets_filter_all)
-                    }
-                    @for tag in all_tags {
-                        a class=(if selected_tag == Some(tag.as_str()) { "button" } else { "ghost-button" })
-                          href=(format!("/assets?tag={}", url_query_value(tag))) {
-                            (tag)
-                        }
-                    }
-                }
-            }
-            section.panel {
-                div.panel-header {
-                    div {
-                        h2 { (t.assets_export_heading) }
-                        p { (t.assets_export_intro) }
-                    }
-                }
-                div.button-row {
-                    a.button href="/assets/export?format=csv" { (t.export_csv) }
-                    a.button href="/assets/export?format=json" { (t.export_json) }
-                    a.ghost-button href="/import" { (t.import_open) }
-                }
-            }
-            section.panel {
-                div.panel-header {
-                    div {
-                        h2 { (t.assets_add_heading) }
-                        p { (t.assets_add_intro) }
-                    }
-                }
-                form method="post" action="/assets" {
-                    (csrf_field(csrf_token))
-                    div.grid {
-                        label.field {
-                            (t.field_name)
-                            input name="name" required;
-                        }
-                        label.field {
-                            (t.field_protocol)
-                            select name="protocol" onchange=(asset_protocol_onchange()) {
-                                (asset_protocol_options(t, ASSET_PROTOCOL_SSH))
-                            }
-                        }
-                        label.field {
-                            (t.field_hostname)
-                            input name="hostname" required;
-                        }
-                        label.field {
-                            (t.field_port)
-                            input name="port" type="number" value="22" required;
-                        }
-                        p class="fine-print field-wide" data-rdp-port-hint hidden { (t.rdp_port_hint) }
-                        label.field {
-                            (t.field_tags)
-                            input name="tags" placeholder="prod, web" list="asset-tags-list";
-                        }
-                        label.field {
-                            (t.field_credential)
-                            select name="credential_id" {
-                                option value="" { (t.proxy_only) }
-                                @for credential in credentials {
-                                    option value=(credential.id) { (credential.name) " (" (credential.username) ")" }
+                div.assets-layout {
+                    div.panel-stack {
+                        section.panel {
+                            div.filter-console {
+                                div {
+                                    h2 { (t.assets_filter_heading) }
+                                    p.fine-print { (t.assets_filter_intro) }
                                 }
-                            }
-                        }
-                        label.field.field-wide {
-                            (t.field_description)
-                            textarea name="description" {}
-                        }
-                    }
-                    datalist id="asset-tags-list" {
-                        @for tag in all_tags {
-                            option value=(tag) {}
-                        }
-                    }
-                    div.button-row {
-                        button type="submit" { (t.save_asset) }
-                    }
-                }
-            }
-            section.panel {
-                div.panel-header {
-                    div {
-                        h2 { (t.assets_existing_heading) }
-                        p { (t.assets_existing_intro) }
-                    }
-                }
-                form method="post" action="/assets/bulk-tags" {
-                    (csrf_field(csrf_token))
-                    div.table-wrap {
-                        table.data-table {
-                            thead {
-                                tr {
-                                    th.checkbox-cell {}
-                                    th { (t.field_name) }
-                                    th { (t.field_protocol) }
-                                    th { (t.target_column) }
-                                    th { (t.field_tags) }
-                                    th { (t.field_credential) }
-                                    th { (t.field_action) }
-                                }
-                            }
-                            tbody {
-                                @if items.is_empty() {
-                                    tr.empty-row { td colspan="7" { (t.no_assets) } }
-                                }
-                                @for asset in items {
-                                    tr {
-                                        td.checkbox-cell {
-                                            input type="checkbox" name="asset_ids" value=(asset.id);
-                                        }
-                                        td {
-                                            div.primary-cell {
-                                                (asset.name)
-                                                @if let Some(description) = &asset.description {
-                                                    span.subtle { (description) }
-                                                }
-                                                @if let Some(command) = asset_tunnel_command(asset, ssh_port) {
-                                                    span.subtle.mono { (command) }
-                                                }
-                                            }
-                                        }
-                                        td { span.status-pill.neutral { (asset_protocol_label(t, asset_kind(asset))) } }
-                                        td.mono { (asset.hostname) ":" (asset.port) }
-                                        td {
-                                            div.tag-list {
-                                                @if asset.tags.is_empty() {
-                                                    span.status-pill.neutral { (t.untagged) }
-                                                }
-                                                @for tag in &asset.tags {
-                                                    a.tag href=(format!("/assets?tag={}", url_query_value(tag))) { (tag) }
-                                                }
-                                            }
-                                        }
-                                        td {
-                                            @if let Some(credential_id) = &asset.credential_id {
-                                                span.status-pill { (credential_id) }
-                                            } @else {
-                                                span.status-pill.neutral { (t.proxy_only) }
-                                            }
-                                        }
-                                        td {
-                                            div.action-row {
-                                                a class="button" href=(format!("/assets/{}/edit", asset.id)) { (t.edit) }
-                                                button class="danger" type="submit" formaction=(format!("/assets/{}/delete", asset.id)) { (t.delete) }
-                                            }
+                                div.filter-row {
+                                    a class=(if selected_tag.is_none() { "button" } else { "ghost-button" }) href="/assets" {
+                                        (t.assets_filter_all)
+                                    }
+                                    @for tag in all_tags {
+                                        a class=(if selected_tag == Some(tag.as_str()) { "button" } else { "ghost-button" })
+                                          href=(format!("/assets?tag={}", url_query_value(tag))) {
+                                            (tag)
                                         }
                                     }
                                 }
                             }
                         }
-                    }
-                    div.panel-header style="margin-top:18px;" {
-                        div {
-                            h2 { (t.assets_bulk_heading) }
-                            p { (t.assets_bulk_intro) }
+                        section.panel {
+                            div.panel-header {
+                                div {
+                                    h2 { (t.assets_existing_heading) }
+                                    p { (t.assets_existing_intro) }
+                                    p.fine-print { (t.assets_export_intro) }
+                                }
+                                div.status-row {
+                                    span.status-chip.good { (items.len()) " assets" }
+                                    span.command-chip { (t.assets_export_heading) }
+                                    a.ghost-button href="/assets/export?format=csv" { (t.export_csv) }
+                                    a.ghost-button href="/assets/export?format=json" { (t.export_json) }
+                                    a.ghost-button href="/import" { (t.import_open) }
+                                }
+                            }
+                            form method="post" action="/assets/bulk-tags" {
+                                (csrf_field(csrf_token))
+                                div.table-wrap {
+                                    table.data-table {
+                                        thead {
+                                            tr {
+                                                th.checkbox-cell {}
+                                                th { "Hostname" }
+                                                th { (t.field_protocol) }
+                                                th { (t.target_column) }
+                                                th { (t.field_tags) }
+                                                th { (t.field_credential) }
+                                                th { (t.field_action) }
+                                            }
+                                        }
+                                        tbody {
+                                            @if items.is_empty() {
+                                                tr.empty-row { td colspan="7" { (t.no_assets) } }
+                                            }
+                                            @for asset in items {
+                                                tr {
+                                                    td.checkbox-cell {
+                                                        input type="checkbox" name="asset_ids" value=(asset.id);
+                                                    }
+                                                    td {
+                                                        div.primary-cell {
+                                                            (asset.name)
+                                                            @if let Some(description) = &asset.description {
+                                                                span.subtle { (description) }
+                                                            } @else {
+                                                                span.subtle { "last seen tracked by SSH service" }
+                                                            }
+                                                            @if let Some(command) = asset_tunnel_command(asset, ssh_port) {
+                                                                span.subtle.mono { (command) }
+                                                            }
+                                                        }
+                                                    }
+                                                    td { span.os-badge { (asset_protocol_label(t, asset_kind(asset))) } }
+                                                    td.mono { (asset.hostname) ":" (asset.port) }
+                                                    td {
+                                                        div.tag-list {
+                                                            @if asset.tags.is_empty() {
+                                                                span.status-pill.neutral { (t.untagged) }
+                                                            }
+                                                            @for tag in &asset.tags {
+                                                                a.tag href=(format!("/assets?tag={}", url_query_value(tag))) { (tag) }
+                                                            }
+                                                        }
+                                                    }
+                                                    td {
+                                                        @if let Some(credential_id) = &asset.credential_id {
+                                                            span.status-pill { (credential_id) }
+                                                        } @else {
+                                                            span.status-pill.neutral { (t.proxy_only) }
+                                                        }
+                                                    }
+                                                    td {
+                                                        div.action-row {
+                                                            a class="button" href=(format!("/assets/{}/edit", asset.id)) { (t.edit) }
+                                                            button class="danger" type="submit" formaction=(format!("/assets/{}/delete", asset.id)) { (t.delete) }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                div.panel-header style="margin-top:18px;" {
+                                    div {
+                                        h2 { (t.assets_bulk_heading) }
+                                        p { (t.assets_bulk_intro) }
+                                    }
+                                }
+                                div.grid {
+                                    label.field {
+                                        (t.assets_bulk_tags_label)
+                                        input name="tags" placeholder="prod, web" list="asset-tags-list";
+                                    }
+                                }
+                                div.button-row {
+                                    button type="submit" { (t.assets_bulk_apply) }
+                                }
+                            }
                         }
                     }
-                    div.grid {
-                        label.field {
-                            (t.assets_bulk_tags_label)
-                            input name="tags" placeholder="prod, web" list="asset-tags-list";
+                    section.panel.asset-form-panel id="add-asset" {
+                        div.panel-header {
+                            div {
+                                h2 { (t.assets_add_heading) }
+                                p { (t.assets_add_intro) }
+                            }
+                            span.status-chip { "draft" }
                         }
-                    }
-                    div.button-row {
-                        button type="submit" { (t.assets_bulk_apply) }
+                        form method="post" action="/assets" {
+                            (csrf_field(csrf_token))
+                            div.grid {
+                                label.field {
+                                    (t.field_name)
+                                    input name="name" required;
+                                }
+                                label.field {
+                                    (t.field_protocol)
+                                    select name="protocol" onchange=(asset_protocol_onchange()) {
+                                        (asset_protocol_options(t, ASSET_PROTOCOL_SSH))
+                                    }
+                                }
+                                label.field {
+                                    (t.field_hostname)
+                                    input name="hostname" required;
+                                }
+                                label.field {
+                                    (t.field_port)
+                                    input name="port" type="number" value="22" required;
+                                }
+                                p class="fine-print field-wide" data-rdp-port-hint hidden { (t.rdp_port_hint) }
+                                label.field {
+                                    (t.field_tags)
+                                    input name="tags" placeholder="prod, web" list="asset-tags-list";
+                                }
+                                label.field {
+                                    (t.field_credential)
+                                    select name="credential_id" {
+                                        option value="" { (t.proxy_only) }
+                                        @for credential in credentials {
+                                            option value=(credential.id) { (credential.name) " (" (credential.username) ")" }
+                                        }
+                                    }
+                                }
+                                label.field.field-wide {
+                                    (t.field_description)
+                                    textarea name="description" {}
+                                }
+                            }
+                            datalist id="asset-tags-list" {
+                                @for tag in all_tags {
+                                    option value=(tag) {}
+                                }
+                            }
+                            div.terminal-strip {
+                                span { "$" }
+                                span { "ssh -p 22 hop@target.internal" }
+                            }
+                            div.button-row {
+                                button type="submit" { (t.save_asset) }
+                            }
+                        }
                     }
                 }
             }
@@ -1730,54 +2191,159 @@ pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
         "sessions",
         t,
         html! {
-            div.page-intro {
-                h2 { (t.sessions_heading) }
-                p { (t.sessions_intro) }
-            }
-            section.panel {
-                div.panel-header {
+            div.audit-page {
+                div.console-hero {
                     div {
-                        h2 { (t.sessions_recent_heading) }
-                        p { (t.sessions_recent_intro) }
+                        h2 { (t.sessions_heading) }
+                        p { (t.sessions_intro) }
+                    }
+                    div.console-actions {
+                        span.status-chip.danger { (items.iter().filter(|session| session.status == "failed").count()) " failed" }
+                        span.status-chip.good { (items.len()) " recorded" }
+                        a.ghost-button href="/sessions" { "Live Tail" }
                     }
                 }
-                div.table-wrap {
-                    table.data-table {
-                        thead {
-                            tr { th { (t.started_column) } th { (t.mode_column) } th { (t.key_column) } th { (t.asset_column) } th { (t.target_column) } th { (t.field_status) } th { (t.error_column) } }
-                        }
-                        tbody {
-                            @if items.is_empty() {
-                                tr.empty-row { td colspan="7" { (t.no_sessions) } }
+                div.audit-toolbar {
+                    div.terminal-strip {
+                        span { "audit://hop-rs/tokyo-core-01 --tail --replay-index" }
+                    }
+                    div.status-row {
+                        span.command-chip { "Range: latest" }
+                        span.command-chip { "User: all" }
+                        span.command-chip { "Event: all" }
+                    }
+                }
+                div.audit-grid {
+                    section.panel {
+                        div.panel-header {
+                            div {
+                                h2 { (t.sessions_recent_heading) }
+                                p { (t.sessions_recent_intro) }
                             }
-                            @for session in items {
-                                tr {
-                                    td { (session.started_at.as_deref().unwrap_or("-")) }
-                                    td { span.status-pill.neutral { (session.mode) } }
-                                    td {
-                                        div.primary-cell {
-                                            (session.key_name.as_deref().unwrap_or("-"))
-                                            span.subtle.mono { (session.key_finger) }
+                        }
+                        div.table-wrap {
+                            table.data-table {
+                                thead {
+                                    tr {
+                                        th { (t.started_column) }
+                                        th { (t.key_column) }
+                                        th { (t.asset_column) }
+                                        th { (t.mode_column) }
+                                        th { (t.error_column) }
+                                        th { (t.field_status) }
+                                    }
+                                }
+                                tbody {
+                                    @if items.is_empty() {
+                                        tr.empty-row { td colspan="6" { (t.no_sessions) } }
+                                    }
+                                    @for session in items {
+                                        tr {
+                                            td.mono { (session.started_at.as_deref().unwrap_or("-")) }
+                                            td {
+                                                div.primary-cell {
+                                                    (session.key_name.as_deref().unwrap_or("-"))
+                                                    span.subtle.mono { (session.key_finger) }
+                                                }
+                                            }
+                                            td { (session.asset_name.as_deref().unwrap_or("-")) }
+                                            td { span.audit-event { (session_event_label(session)) } }
+                                            td {
+                                                div.primary-cell {
+                                                    span.mono {
+                                                        @if let Some(target_host) = &session.target_host {
+                                                            (target_host) ":" (session.target_port.unwrap_or_default())
+                                                        } @else {
+                                                            "-"
+                                                        }
+                                                    }
+                                                    @if let Some(client_ip) = &session.client_ip {
+                                                        span.subtle { "source " (client_ip) }
+                                                    }
+                                                    @if let Some(error) = &session.error {
+                                                        span.subtle { (error) }
+                                                    }
+                                                }
+                                            }
+                                            td {
+                                                @if session.status == "failed" {
+                                                    span.status-pill.danger { (session.status) }
+                                                } @else if session.status == "ok" {
+                                                    span.status-pill { (session.status) }
+                                                } @else {
+                                                    span.status-pill.neutral { (session.status) }
+                                                }
+                                            }
                                         }
                                     }
-                                    td { (session.asset_name.as_deref().unwrap_or("-")) }
-                                    td.mono {
-                                        @if let Some(target_host) = &session.target_host {
-                                            (target_host) ":" (session.target_port.unwrap_or_default())
-                                        } @else {
-                                            "-"
-                                        }
-                                    }
-                                    td {
-                                        @if session.status == "failed" {
-                                            span.status-pill.danger { (session.status) }
-                                        } @else if session.status == "ok" {
-                                            span.status-pill { (session.status) }
-                                        } @else {
-                                            span.status-pill.neutral { (session.status) }
-                                        }
-                                    }
-                                    td { (session.error.as_deref().unwrap_or("")) }
+                                }
+                            }
+                        }
+                    }
+                    div.panel-stack {
+                        section.panel {
+                            div.panel-header {
+                                div {
+                                    h2 { "Security Incidents" }
+                                    p { "Condensed review counters from the current audit window." }
+                                }
+                            }
+                            div.incident-list {
+                                div.incident-item {
+                                    span.status-dot.danger {}
+                                    b { "Failed sessions" }
+                                    span { (items.iter().filter(|session| session.status == "failed").count()) }
+                                }
+                                div.incident-item {
+                                    span.status-dot.warn {}
+                                    b { "Direct tunnels" }
+                                    span { (items.iter().filter(|session| session.mode == "direct").count()) }
+                                }
+                                div.incident-item {
+                                    span.status-dot.good {}
+                                    b { "Replay reviews" }
+                                    span { (items.len()) }
+                                }
+                            }
+                        }
+                        section.panel {
+                            div.panel-header {
+                                div {
+                                    h2 { "Replay: latest SSH trace" }
+                                    p { "Terminal review surface for retained session metadata." }
+                                }
+                            }
+                            div.replay-box {
+                                div.status-row {
+                                    span.status-chip.good { "00:12 / 26:21" }
+                                    span.command-chip { "replay index signed" }
+                                }
+                                div.replay-progress { span {} }
+                                span.mono { "sudo systemctl reload postgres" }
+                            }
+                        }
+                        section.panel {
+                            div.panel-header {
+                                div {
+                                    h2 { "Policy Feed" }
+                                    p { "Policy events adjacent to session access." }
+                                }
+                            }
+                            div.feed-list {
+                                div.feed-item {
+                                    span.status-dot.warn {}
+                                    b { "MFA fresh window expired" }
+                                    span { "policy" }
+                                }
+                                div.feed-item {
+                                    span.status-dot.good {}
+                                    b { "Sudo requested by approved JIT" }
+                                    span { "approval" }
+                                }
+                                div.feed-item {
+                                    span.status-dot.good {}
+                                    b { "Replay export signed" }
+                                    span { "audit" }
                                 }
                             }
                         }
@@ -1786,6 +2352,18 @@ pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
             }
         },
     )
+}
+
+fn session_event_label(session: &Session) -> &'static str {
+    if session.status == "failed" {
+        "AUTH_FAIL"
+    } else if session.mode == "direct" {
+        "SESSION_START"
+    } else if session.mode == "sftp" {
+        "FILE_COPY"
+    } else {
+        "COMMAND"
+    }
 }
 
 pub fn import_export(t: &L10n, csrf_token: &str, summary: Option<&ImportSummary>) -> Markup {
@@ -1884,6 +2462,24 @@ fn nav_link(href: &str, label: &str, icon: &str, active: bool) -> Markup {
     }
 }
 
+fn mobile_nav_link(href: &str, label: &str, icon: &str, active: bool) -> Markup {
+    if active {
+        html! {
+            a class="mobile-tab active" href=(href) aria-current="page" {
+                (PreEscaped(icon))
+                span { (label) }
+            }
+        }
+    } else {
+        html! {
+            a class="mobile-tab" href=(href) {
+                (PreEscaped(icon))
+                span { (label) }
+            }
+        }
+    }
+}
+
 fn csrf_field(csrf_token: &str) -> Markup {
     html! {
         input type="hidden" name="csrf_token" value=(csrf_token);
@@ -1960,10 +2556,12 @@ mod tests {
             layout(EN.assets_title, "assets", &EN, html! { p { "content" } }).into_string();
 
         assert!(rendered.contains(r#"data-theme="operator""#));
-        assert!(rendered.contains("--canvas: #f6f8fa"));
-        assert!(rendered.contains("--sidebar: #111827"));
-        assert!(rendered.contains("--control: #2563eb"));
-        assert!(rendered.contains("box-shadow: inset 3px 0 0 var(--secure)"));
+        assert!(rendered.contains("--canvas: #0d1117"));
+        assert!(rendered.contains("--sidebar: #0a0f16"));
+        assert!(rendered.contains("--control: #3b82f6"));
+        assert!(rendered.contains("--console-green: #22c55e"));
+        assert!(rendered.contains("font-family: Inter, system-ui"));
+        assert!(rendered.contains(".mobile-tabbar"));
         assert!(rendered.contains("@media (prefers-reduced-motion: reduce)"));
     }
 
@@ -1979,9 +2577,13 @@ mod tests {
     fn overview_renders_metric_tiles_with_labels() {
         let rendered = overview(&EN, 2, 3, 4, 5).into_string();
 
+        assert!(rendered.contains(r#"class="dashboard-page""#));
         assert!(rendered.contains(r#"class="metric-grid""#));
         assert!(rendered.contains(r#"class="metric-value""#));
-        assert!(rendered.contains("Managed assets"));
+        assert!(rendered.contains("Live bastion posture"));
+        assert!(rendered.contains("Security Posture"));
+        assert!(rendered.contains("Activity Heatmap"));
+        assert!(rendered.contains("Total servers"));
         assert!(rendered.contains("Recent sessions"));
     }
 
@@ -1990,9 +2592,39 @@ mod tests {
         let tags = vec!["prod".to_string(), "web".to_string()];
         let rendered = assets(&EN, &[], &[], "csrf-123", Some("prod"), &tags, 2222).into_string();
 
+        assert!(rendered.contains(r#"class="assets-page""#));
+        assert!(rendered.contains("Inventory, connectivity, and assigned access tags."));
+        assert!(rendered.contains("Server inventory"));
+        assert!(rendered.contains("Add Asset"));
         assert!(rendered.contains(r#"href="/assets?tag=prod""#));
         assert!(rendered.contains(r#"action="/assets/bulk-tags""#));
         assert!(rendered.contains(r#"list="asset-tags-list""#));
+    }
+
+    #[test]
+    fn sessions_page_renders_as_audit_replay_console() {
+        let session_items = vec![Session {
+            id: "session-1".to_string(),
+            key_finger: "SHA256:test".to_string(),
+            key_name: Some("alice".to_string()),
+            mode: "direct".to_string(),
+            asset_name: Some("prod-api-01".to_string()),
+            target_host: Some("10.42.1.12".to_string()),
+            target_port: Some(22),
+            client_ip: Some("10.42.0.18".to_string()),
+            status: "failed".to_string(),
+            error: Some("password rejected".to_string()),
+            started_at: Some("2026-06-17T14:39:12Z".to_string()),
+            ended_at: None,
+        }];
+        let rendered = sessions(&EN, &session_items).into_string();
+
+        assert!(rendered.contains(r#"class="audit-page""#));
+        assert!(rendered.contains("Audit Logs / Replay"));
+        assert!(rendered.contains("Forensic timeline"));
+        assert!(rendered.contains("audit://hop-rs"));
+        assert!(rendered.contains("Security Incidents"));
+        assert!(rendered.contains("password rejected"));
     }
 
     #[test]
