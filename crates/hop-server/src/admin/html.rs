@@ -1093,10 +1093,10 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         }
                         main.workspace { (body_content) }
                         nav.mobile-tabbar aria-label=(t.nav_primary) {
-                            (mobile_nav_link("/", "Dash", ICON_OVERVIEW, active == "overview"))
-                            (mobile_nav_link("/assets", "Assets", ICON_ASSETS, active == "assets"))
-                            (mobile_nav_link("/sessions", "Audit", ICON_SESSIONS, active == "sessions"))
-                            (mobile_nav_link("/settings", "Admin", ICON_SETTINGS, active == "settings"))
+                            (mobile_nav_link("/", t.nav_overview, ICON_OVERVIEW, active == "overview"))
+                            (mobile_nav_link("/assets", t.nav_assets, ICON_ASSETS, active == "assets"))
+                            (mobile_nav_link("/sessions", t.nav_sessions, ICON_SESSIONS, active == "sessions"))
+                            (mobile_nav_link("/settings", t.nav_settings, ICON_SETTINGS, active == "settings"))
                         }
                     }
                 }
@@ -1201,8 +1201,8 @@ pub fn overview(
                         p { (t.overview_intro) }
                     }
                     div.console-actions {
-                        span.status-chip.good { span.status-dot.good {} "Gateway healthy" }
-                        a.button href="/assets" { "Add Asset" }
+                        span.status-chip.good { span.status-dot.good {} (t.overview_gateway_status) }
+                        a.button href="/assets" { (t.assets_add_heading) }
                     }
                 }
                 div.metric-grid {
@@ -1232,64 +1232,40 @@ pub fn overview(
                         section.panel {
                             div.panel-header {
                                 div {
-                                    h2 { "Live Sessions" }
-                                    p { "Real-time user-to-target SSH tunnels and recent connection posture." }
+                                    h2 { (t.overview_session_activity_heading) }
+                                    p { (t.overview_session_activity_intro) }
                                 }
-                                span.status-chip.good { (session_count) " active" }
+                                span.status-chip.good { (session_count) " " (t.overview_recorded_suffix) }
                             }
                             div.terminal-strip {
                                 span { "$" }
-                                span { "hop sessions --live --format dense --risk-threshold elevated" }
+                                span { "hop admin sessions --limit 100" }
                             }
-                        }
-                        section.panel {
-                            div.panel-header {
-                                div {
-                                    h2 { "Recent Connection Frequency" }
-                                    p { "Last 12 hours" }
-                                }
-                            }
-                            (chart_bars())
                         }
                     }
                     div.panel-stack {
                         section.panel {
                             div.panel-header {
                                 div {
-                                    h2 { "Activity Heatmap" }
-                                    p { "Connection intensity by hour and weekday." }
-                                }
-                            }
-                            (heatmap_cells())
-                            p.fine-print { "low -> high" }
-                        }
-                        section.panel {
-                            div.panel-header {
-                                div {
-                                    h2 { "Security Posture" }
-                                    p { "Policy checks that shape current access risk." }
+                                    h2 { (t.overview_inventory_health_heading) }
+                                    p { (t.overview_inventory_health_intro) }
                                 }
                             }
                             div.posture-list {
                                 div.posture-item {
                                     span.status-dot.good {}
-                                    b { "MFA enforced" }
-                                    span { (key_count) " keys" }
+                                    b { (t.overview_assets_summary) }
+                                    span { (asset_count) }
                                 }
                                 div.posture-item {
                                     span.status-dot.good {}
-                                    b { "Managed credentials sealed" }
-                                    span { (credential_count) " records" }
+                                    b { (t.overview_credentials_summary) }
+                                    span { (credential_count) }
                                 }
                                 div.posture-item {
-                                    span.status-dot.warn {}
-                                    b { "JIT approvals pending" }
-                                    span { "review queue" }
-                                }
-                                div.posture-item {
-                                    span.status-dot.danger {}
-                                    b { "Failed login watch" }
-                                    span { "24h window" }
+                                    span.status-dot.good {}
+                                    b { (t.overview_keys_summary) }
+                                    span { (key_count) }
                                 }
                             }
                         }
@@ -1307,34 +1283,6 @@ pub fn overview(
             }
         },
     )
-}
-
-fn chart_bars() -> Markup {
-    let heights = [
-        28, 42, 35, 58, 74, 64, 46, 39, 52, 86, 76, 61, 43, 36, 49, 68, 92, 80, 54, 45, 72, 88, 63,
-        40,
-    ];
-    html! {
-        div.chart-bars aria-hidden="true" {
-            @for height in heights {
-                span style=(format!("height: {height}%")) {}
-            }
-        }
-    }
-}
-
-fn heatmap_cells() -> Markup {
-    let levels = [
-        0, 1, 1, 2, 3, 2, 1, 0, 2, 3, 4, 3, 1, 1, 2, 2, 4, 3, 2, 1, 1, 2, 3, 2, 0, 2, 3, 4, 4, 2,
-        1, 0, 1, 3, 4, 3, 1, 2, 2, 3, 4, 3, 2, 1, 0, 1, 2, 1, 0, 1, 3, 3, 2, 1, 0, 0, 1, 2, 3, 4,
-    ];
-    html! {
-        div.heatmap aria-hidden="true" {
-            @for level in levels {
-                span class=(format!("level-{level}")) {}
-            }
-        }
-    }
 }
 
 pub fn assets(
@@ -1358,8 +1306,8 @@ pub fn assets(
                         p { (t.assets_intro) }
                     }
                     div.console-actions {
-                        span.status-chip.good { span.status-dot.good {} (items.len()) " assets" }
-                        a.button href="#add-asset" { "Add Asset" }
+                        span.status-chip.good { span.status-dot.good {} (items.len()) " " (t.assets_count_suffix) }
+                        a.button href="#add-asset" { (t.assets_add_heading) }
                     }
                 }
                 div.assets-layout {
@@ -1391,7 +1339,7 @@ pub fn assets(
                                     p.fine-print { (t.assets_export_intro) }
                                 }
                                 div.status-row {
-                                    span.status-chip.good { (items.len()) " assets" }
+                                    span.status-chip.good { (items.len()) " " (t.assets_count_suffix) }
                                     span.command-chip { (t.assets_export_heading) }
                                     a.ghost-button href="/assets/export?format=csv" { (t.export_csv) }
                                     a.ghost-button href="/assets/export?format=json" { (t.export_json) }
@@ -1405,7 +1353,7 @@ pub fn assets(
                                         thead {
                                             tr {
                                                 th.checkbox-cell {}
-                                                th { "Hostname" }
+                                                th { (t.field_hostname) }
                                                 th { (t.field_protocol) }
                                                 th { (t.target_column) }
                                                 th { (t.field_tags) }
@@ -1428,7 +1376,7 @@ pub fn assets(
                                                             @if let Some(description) = &asset.description {
                                                                 span.subtle { (description) }
                                                             } @else {
-                                                                span.subtle { "last seen tracked by SSH service" }
+                                                                span.subtle { (t.asset_activity_placeholder) }
                                                             }
                                                             @if let Some(command) = asset_tunnel_command(asset, ssh_port) {
                                                                 span.subtle.mono { (command) }
@@ -1489,7 +1437,7 @@ pub fn assets(
                                 h2 { (t.assets_add_heading) }
                                 p { (t.assets_add_intro) }
                             }
-                            span.status-chip { "draft" }
+                            span.status-chip { (t.draft_status) }
                         }
                         form method="post" action="/assets" {
                             (csrf_field(csrf_token))
@@ -2198,19 +2146,19 @@ pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
                         p { (t.sessions_intro) }
                     }
                     div.console-actions {
-                        span.status-chip.danger { (items.iter().filter(|session| session.status == "failed").count()) " failed" }
-                        span.status-chip.good { (items.len()) " recorded" }
-                        a.ghost-button href="/sessions" { "Live Tail" }
+                        span.status-chip.danger { (items.iter().filter(|session| session.status == "failed").count()) " " (t.sessions_failed_suffix) }
+                        span.status-chip.good { (items.len()) " " (t.sessions_recorded_suffix) }
+                        a.ghost-button href="/sessions" { (t.sessions_live_tail) }
                     }
                 }
                 div.audit-toolbar {
                     div.terminal-strip {
-                        span { "audit://hop-rs/tokyo-core-01 --tail --replay-index" }
+                        span { "hop admin sessions --limit 100" }
                     }
                     div.status-row {
-                        span.command-chip { "Range: latest" }
-                        span.command-chip { "User: all" }
-                        span.command-chip { "Event: all" }
+                        span.command-chip { (t.sessions_range_latest) }
+                        span.command-chip { (t.sessions_user_all) }
+                        span.command-chip { (t.sessions_event_all) }
                     }
                 }
                 div.audit-grid {
@@ -2258,7 +2206,7 @@ pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
                                                         }
                                                     }
                                                     @if let Some(client_ip) = &session.client_ip {
-                                                        span.subtle { "source " (client_ip) }
+                                                        span.subtle { (t.sessions_source_prefix) " " (client_ip) }
                                                     }
                                                     @if let Some(error) = &session.error {
                                                         span.subtle { (error) }
@@ -2284,66 +2232,25 @@ pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
                         section.panel {
                             div.panel-header {
                                 div {
-                                    h2 { "Security Incidents" }
-                                    p { "Condensed review counters from the current audit window." }
+                                    h2 { (t.sessions_summary_heading) }
+                                    p { (t.sessions_summary_intro) }
                                 }
                             }
                             div.incident-list {
                                 div.incident-item {
                                     span.status-dot.danger {}
-                                    b { "Failed sessions" }
+                                    b { (t.sessions_failed_heading) }
                                     span { (items.iter().filter(|session| session.status == "failed").count()) }
                                 }
                                 div.incident-item {
                                     span.status-dot.warn {}
-                                    b { "Direct tunnels" }
+                                    b { (t.sessions_direct_heading) }
                                     span { (items.iter().filter(|session| session.mode == "direct").count()) }
                                 }
                                 div.incident-item {
                                     span.status-dot.good {}
-                                    b { "Replay reviews" }
-                                    span { (items.len()) }
-                                }
-                            }
-                        }
-                        section.panel {
-                            div.panel-header {
-                                div {
-                                    h2 { "Replay: latest SSH trace" }
-                                    p { "Terminal review surface for retained session metadata." }
-                                }
-                            }
-                            div.replay-box {
-                                div.status-row {
-                                    span.status-chip.good { "00:12 / 26:21" }
-                                    span.command-chip { "replay index signed" }
-                                }
-                                div.replay-progress { span {} }
-                                span.mono { "sudo systemctl reload postgres" }
-                            }
-                        }
-                        section.panel {
-                            div.panel-header {
-                                div {
-                                    h2 { "Policy Feed" }
-                                    p { "Policy events adjacent to session access." }
-                                }
-                            }
-                            div.feed-list {
-                                div.feed-item {
-                                    span.status-dot.warn {}
-                                    b { "MFA fresh window expired" }
-                                    span { "policy" }
-                                }
-                                div.feed-item {
-                                    span.status-dot.good {}
-                                    b { "Sudo requested by approved JIT" }
-                                    span { "approval" }
-                                }
-                                div.feed-item {
-                                    span.status-dot.good {}
-                                    b { "Replay export signed" }
-                                    span { "audit" }
+                                    b { (t.sessions_completed_heading) }
+                                    span { (items.iter().filter(|session| session.ended_at.is_some()).count()) }
                                 }
                             }
                         }
@@ -2354,16 +2261,8 @@ pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
     )
 }
 
-fn session_event_label(session: &Session) -> &'static str {
-    if session.status == "failed" {
-        "AUTH_FAIL"
-    } else if session.mode == "direct" {
-        "SESSION_START"
-    } else if session.mode == "sftp" {
-        "FILE_COPY"
-    } else {
-        "COMMAND"
-    }
+fn session_event_label(session: &Session) -> &str {
+    session.mode.as_str()
 }
 
 pub fn import_export(t: &L10n, csrf_token: &str, summary: Option<&ImportSummary>) -> Markup {
@@ -2527,7 +2426,7 @@ fn url_query_value(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::i18n::EN;
+    use super::super::i18n::{EN, ZH};
     use super::*;
 
     #[test]
@@ -2574,17 +2473,36 @@ mod tests {
     }
 
     #[test]
+    fn layout_localizes_mobile_navigation_labels() {
+        let rendered =
+            layout(ZH.assets_title, "assets", &ZH, html! { p { "content" } }).into_string();
+
+        assert!(rendered.contains("概览"));
+        assert!(rendered.contains("资产"));
+        assert!(rendered.contains("审计日志"));
+        assert!(rendered.contains("设置"));
+        assert!(!rendered.contains(">Dash<"));
+        assert!(!rendered.contains(">Assets<"));
+        assert!(!rendered.contains(">Audit<"));
+        assert!(!rendered.contains(">Admin<"));
+    }
+
+    #[test]
     fn overview_renders_metric_tiles_with_labels() {
         let rendered = overview(&EN, 2, 3, 4, 5).into_string();
 
         assert!(rendered.contains(r#"class="dashboard-page""#));
         assert!(rendered.contains(r#"class="metric-grid""#));
         assert!(rendered.contains(r#"class="metric-value""#));
-        assert!(rendered.contains("Live bastion posture"));
-        assert!(rendered.contains("Security Posture"));
-        assert!(rendered.contains("Activity Heatmap"));
+        assert!(rendered.contains("Bastion posture"));
         assert!(rendered.contains("Total servers"));
         assert!(rendered.contains("Recent sessions"));
+        assert!(rendered.contains("5 recorded"));
+        assert!(!rendered.contains("5 active"));
+        assert!(!rendered.contains("Live Sessions"));
+        assert!(!rendered.contains("Activity Heatmap"));
+        assert!(!rendered.contains("JIT approvals pending"));
+        assert!(!rendered.contains("Failed login watch"));
     }
 
     #[test]
@@ -2620,11 +2538,15 @@ mod tests {
         let rendered = sessions(&EN, &session_items).into_string();
 
         assert!(rendered.contains(r#"class="audit-page""#));
-        assert!(rendered.contains("Audit Logs / Replay"));
+        assert!(rendered.contains("Audit Logs"));
         assert!(rendered.contains("Forensic timeline"));
-        assert!(rendered.contains("audit://hop-rs"));
-        assert!(rendered.contains("Security Incidents"));
+        assert!(rendered.contains("hop admin sessions --limit 100"));
+        assert!(rendered.contains("direct"));
         assert!(rendered.contains("password rejected"));
+        assert!(!rendered.contains("AUTH_FAIL"));
+        assert!(!rendered.contains("Replay: latest SSH trace"));
+        assert!(!rendered.contains("sudo systemctl reload postgres"));
+        assert!(!rendered.contains("Policy Feed"));
     }
 
     #[test]

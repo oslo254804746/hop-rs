@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::{Path as StdPath, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{ensure, Result};
 use axum::{
@@ -16,7 +20,7 @@ use hop_core::{
 };
 use serde::Deserialize;
 use tokio::net::TcpListener;
-use tower_http::trace::TraceLayer;
+use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{info, warn};
 
 use super::{
@@ -53,7 +57,24 @@ pub async fn serve_admin(
         ssh_port: ssh_bind.port(),
         cookie_secure,
     };
-    let app = Router::new()
+    let app = admin_router(state);
+
+    let listener = TcpListener::bind(bind).await?;
+    info!(%bind, "admin web listening");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn admin_router(state: AdminState) -> Router {
+    admin_router_with_static_dir(state, admin_static_dist_dir())
+}
+
+fn admin_static_dist_dir() -> PathBuf {
+    StdPath::new(env!("CARGO_MANIFEST_DIR")).join("../../web/admin/dist")
+}
+
+fn admin_router_with_static_dir(state: AdminState, static_dir: impl Into<PathBuf>) -> Router {
+    Router::new()
         .route("/", get(index))
         .route("/login", get(login_page).post(login))
         .route("/logout", get(logout))
@@ -83,13 +104,9 @@ pub async fn serve_admin(
         .route("/sessions", get(sessions))
         .route("/import", get(import_page).post(import_data))
         .route("/settings", get(settings).post(update_settings))
+        .nest_service("/admin-static", ServeDir::new(static_dir.into()))
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
-
-    let listener = TcpListener::bind(bind).await?;
-    info!(%bind, "admin web listening");
-    axum::serve(listener, app).await?;
-    Ok(())
+        .with_state(state)
 }
 
 async fn guard(
@@ -1235,6 +1252,52 @@ fn parse_bulk_tags_body(body: &[u8]) -> Result<BulkTagsForm> {
 mod tests {
     use super::bootstrap::AdminPasswordChangeError;
     use super::*;
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
+    use std::fs;
+    use tower::ServiceExt;
+
+    async fn test_admin_state() -> AdminState {
+        AdminState {
+            db: HopDb::in_memory().await.unwrap(),
+            master_key: Arc::new(MasterKey::from_bytes([0; 32])),
+            sessions: AdminSessions::default(),
+            ssh_port: 2222,
+            cookie_secure: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_router_serves_built_frontend_assets() {
+        let dist = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dist.path().join("assets")).unwrap();
+        fs::write(
+            dist.path().join("assets/admin.css"),
+            b"body{background:#0d1117}",
+        )
+        .unwrap();
+
+        let app = admin_router_with_static_dir(test_admin_state().await, dist.path());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin-static/assets/admin.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/css"
+        );
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"body{background:#0d1117}");
+    }
 
     #[test]
     fn bulk_tags_form_parses_repeated_asset_ids() {
