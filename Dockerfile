@@ -1,7 +1,17 @@
+FROM node:24-bookworm-slim AS admin-web
+
+WORKDIR /src/web/admin
+COPY web/admin/package.json web/admin/package-lock.json ./
+RUN npm ci
+COPY web/admin/index.html web/admin/tsconfig.json ./
+COPY web/admin/src ./src
+RUN npm run build
+
 FROM rust:1.90-bookworm AS build
 
 WORKDIR /src
 COPY . .
+COPY --from=admin-web /src/web/admin/dist web/admin/dist
 ARG SERVER_BIN=hop-server
 RUN cargo build --release -p hop-server \
     && install -m 0755 "target/release/${SERVER_BIN}" /usr/local/bin/hop-server
@@ -13,7 +23,10 @@ RUN useradd --system --create-home --home-dir /data hop \
     && chown -R hop:hop /data
 WORKDIR /data
 
+ENV HOP_ADMIN_STATIC_DIR=/usr/share/hop/admin-web
+
 COPY --from=build /usr/local/bin/hop-server /usr/local/bin/hop-server
+COPY --from=admin-web /src/web/admin/dist /usr/share/hop/admin-web
 COPY config.docker.toml /usr/share/hop/config.docker.toml
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 

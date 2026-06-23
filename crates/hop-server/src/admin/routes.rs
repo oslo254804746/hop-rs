@@ -70,6 +70,10 @@ fn admin_router(state: AdminState) -> Router {
 }
 
 fn admin_static_dist_dir() -> PathBuf {
+    if let Some(static_dir) = std::env::var_os("HOP_ADMIN_STATIC_DIR") {
+        return PathBuf::from(static_dir);
+    }
+
     StdPath::new(env!("CARGO_MANIFEST_DIR")).join("../../web/admin/dist")
 }
 
@@ -1297,6 +1301,17 @@ mod tests {
         );
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
         assert_eq!(&body[..], b"body{background:#0d1117}");
+    }
+
+    #[test]
+    fn admin_static_dist_dir_uses_runtime_env_override() {
+        let dist = tempfile::tempdir().unwrap();
+        std::env::set_var("HOP_ADMIN_STATIC_DIR", dist.path());
+
+        let resolved = admin_static_dist_dir();
+
+        std::env::remove_var("HOP_ADMIN_STATIC_DIR");
+        assert_eq!(resolved, dist.path());
     }
 
     #[test]

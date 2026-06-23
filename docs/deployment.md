@@ -33,11 +33,15 @@ admin_bind = "127.0.0.1:8080"   # Loopback only — see "Admin Web Access"
 HOP_VERSION=vX.Y.Z
 curl -fL -o hop-server \
   "https://github.com/oslo254804746/hop-rs/releases/download/${HOP_VERSION}/hop-server-linux-amd64"
+curl -fL -o hop-admin-web-static.tar.gz \
+  "https://github.com/oslo254804746/hop-rs/releases/download/${HOP_VERSION}/hop-admin-web-static.tar.gz"
 chmod 0755 hop-server
 
 # Or build from source
 cargo build --release -p hop-server
 cp target/release/hop-server ./hop-server
+(cd web/admin && npm ci && npm run build)
+tar -C web/admin/dist -czf hop-admin-web-static.tar.gz .
 ```
 
 ### 2. Install
@@ -46,9 +50,11 @@ cp target/release/hop-server ./hop-server
 sudo useradd --system --home-dir /var/lib/hop --shell /usr/sbin/nologin hop
 sudo install -d -o hop -g hop -m 0750 /var/lib/hop
 sudo install -d -m 0755 /etc/hop
+sudo install -d -m 0755 /usr/share/hop/admin-web
 
 sudo install -m 0755 hop-server /usr/local/bin/hop-server
 sudo install -m 0644 config.example.toml /etc/hop/config.toml
+sudo tar -C /usr/share/hop/admin-web -xzf hop-admin-web-static.tar.gz
 ```
 
 ### 3. Enable service

@@ -2,6 +2,8 @@
 .github
 .claude
 target
+web/admin/dist
+web/admin/node_modules
 data
 *.db
 *.db-shm
