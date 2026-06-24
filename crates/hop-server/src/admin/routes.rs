@@ -33,11 +33,15 @@ use super::{
     local_cli::parse_public_key_line,
     transfer::{self, ConflictPolicy, ImportSummary, TransferFormat, TransferKind},
 };
+use crate::ssh::session_registry::{
+    ActiveSessionRegistry, TerminateSessionResult, TERMINATED_BY_ADMIN,
+};
 
 #[derive(Clone)]
 pub struct AdminState {
     pub db: HopDb,
     pub master_key: Arc<MasterKey>,
+    pub active_sessions: ActiveSessionRegistry,
     pub sessions: AdminSessions,
     pub ssh_port: u16,
     pub cookie_secure: bool,
@@ -48,11 +52,13 @@ pub async fn serve_admin(
     ssh_bind: SocketAddr,
     db: HopDb,
     master_key: Arc<MasterKey>,
+    active_sessions: ActiveSessionRegistry,
     cookie_secure: bool,
 ) -> Result<()> {
     let state = AdminState {
         db,
         master_key,
+        active_sessions,
         sessions: AdminSessions::default(),
         ssh_port: ssh_bind.port(),
         cookie_secure,
@@ -106,6 +112,8 @@ fn admin_router_with_static_dir(state: AdminState, static_dir: impl Into<PathBuf
             post(delete_known_host),
         )
         .route("/sessions", get(sessions))
+        .route("/sessions/terminate-all", post(terminate_all_sessions))
+        .route("/sessions/{id}/terminate", post(terminate_session))
         .route("/import", get(import_page).post(import_data))
         .route("/settings", get(settings).post(update_settings))
         .nest_service("/admin-static", ServeDir::new(static_dir.into()))
@@ -140,7 +148,7 @@ async fn csrf_guard(
 
 async fn index(State(state): State<AdminState>, headers: HeaderMap) -> Response {
     let t = request_l10n(&headers);
-    let Ok(_session) = guard(&headers, &state).await else {
+    let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
     let assets = match state.db.list_assets().await {
@@ -155,17 +163,27 @@ async fn index(State(state): State<AdminState>, headers: HeaderMap) -> Response 
         Ok(keys) => keys,
         Err(err) => return admin_db_error("list authorized keys for overview", err),
     };
-    let sessions = match state.db.list_sessions(10).await {
+    let known_hosts = match state.db.list_known_hosts().await {
+        Ok(hosts) => hosts,
+        Err(err) => return admin_db_error("list known hosts for overview", err),
+    };
+    let sessions = match state.db.list_sessions(100).await {
         Ok(sessions) => sessions,
         Err(err) => return admin_db_error("list sessions for overview", err),
     };
+    let active_session_ids = state.active_sessions.active_ids().await;
     Html(
         html::overview(
             t,
-            assets.len(),
-            credentials.len(),
-            keys.len(),
-            sessions.len(),
+            html::DashboardData {
+                assets: &assets,
+                credentials: &credentials,
+                keys: &keys,
+                known_hosts: &known_hosts,
+                sessions: &sessions,
+                active_session_ids: &active_session_ids,
+                csrf_token: &session.csrf_token,
+            },
         )
         .into_string(),
     )
@@ -287,7 +305,10 @@ async fn update_settings(
 
 #[derive(Deserialize)]
 struct AssetsQuery {
+    q: Option<String>,
+    status: Option<String>,
     tag: Option<String>,
+    port: Option<i64>,
 }
 
 async fn assets(
@@ -304,7 +325,11 @@ async fn assets(
         Err(err) => return admin_db_error("list assets", err),
     };
     let all_tags = collect_tags(&all_assets);
-    let assets = filter_assets_by_tag(&all_assets, query.tag.as_deref());
+    let retained_sessions = match state.db.list_sessions(100).await {
+        Ok(sessions) => sessions,
+        Err(err) => return admin_db_error("list sessions for assets", err),
+    };
+    let assets = filter_assets_by_query(&all_assets, &retained_sessions, &query);
     let credentials = match state.db.list_credentials().await {
         Ok(credentials) => credentials,
         Err(err) => return admin_db_error("list credentials for assets", err),
@@ -312,12 +337,20 @@ async fn assets(
     Html(
         html::assets(
             t,
-            &assets,
-            &credentials,
-            &session.csrf_token,
-            query.tag.as_deref(),
-            &all_tags,
-            state.ssh_port,
+            html::AssetsData {
+                items: &assets,
+                credentials: &credentials,
+                sessions: &retained_sessions,
+                csrf_token: &session.csrf_token,
+                filters: html::AssetFilters {
+                    q: query.q.as_deref(),
+                    status: query.status.as_deref(),
+                    tag: query.tag.as_deref(),
+                    port: query.port,
+                },
+                all_tags: &all_tags,
+                ssh_port: state.ssh_port,
+            },
         )
         .into_string(),
     )
@@ -984,7 +1017,20 @@ async fn delete_known_host(
     }
 }
 
-async fn sessions(State(state): State<AdminState>, headers: HeaderMap) -> Response {
+#[derive(Deserialize)]
+struct SessionsQuery {
+    q: Option<String>,
+    range: Option<String>,
+    user: Option<String>,
+    event: Option<String>,
+    target: Option<String>,
+}
+
+async fn sessions(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Query(query): Query<SessionsQuery>,
+) -> Response {
     let t = request_l10n(&headers);
     let Ok(_session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
@@ -993,7 +1039,76 @@ async fn sessions(State(state): State<AdminState>, headers: HeaderMap) -> Respon
         Ok(sessions) => sessions,
         Err(err) => return admin_db_error("list sessions", err),
     };
-    Html(html::sessions(t, &sessions).into_string()).into_response()
+    let filtered = filter_sessions_by_query(&sessions, &query);
+    Html(
+        html::sessions(
+            t,
+            &filtered,
+            html::SessionFilters {
+                q: query.q.as_deref(),
+                range: query.range.as_deref(),
+                user: query.user.as_deref(),
+                event: query.event.as_deref(),
+                target: query.target.as_deref(),
+            },
+        )
+        .into_string(),
+    )
+    .into_response()
+}
+
+async fn terminate_session(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Form(form): Form<CsrfForm>,
+) -> Response {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
+        return resp;
+    }
+
+    match state.active_sessions.terminate(&id).await {
+        TerminateSessionResult::Signaled => {
+            if let Err(err) = state
+                .db
+                .finish_session(&id, "terminated", Some(TERMINATED_BY_ADMIN))
+                .await
+            {
+                return admin_db_error("terminate session", err);
+            }
+            Redirect::to("/").into_response()
+        }
+        TerminateSessionResult::NotFound => {
+            (StatusCode::NOT_FOUND, "active session not found").into_response()
+        }
+    }
+}
+
+async fn terminate_all_sessions(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Form(form): Form<CsrfForm>,
+) -> Response {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
+        return resp;
+    }
+
+    for session_id in state.active_sessions.terminate_all().await {
+        if let Err(err) = state
+            .db
+            .finish_session(&session_id, "terminated", Some(TERMINATED_BY_ADMIN))
+            .await
+        {
+            return admin_db_error("terminate session", err);
+        }
+    }
+    Redirect::to("/").into_response()
 }
 
 #[derive(Deserialize)]
@@ -1223,15 +1338,177 @@ fn collect_tags(assets: &[hop_core::Asset]) -> Vec<String> {
     tags
 }
 
-fn filter_assets_by_tag(assets: &[hop_core::Asset], tag: Option<&str>) -> Vec<hop_core::Asset> {
-    let Some(tag) = tag.map(str::trim).filter(|tag| !tag.is_empty()) else {
-        return assets.to_vec();
-    };
+fn filter_assets_by_query(
+    assets: &[hop_core::Asset],
+    sessions: &[hop_core::Session],
+    query: &AssetsQuery,
+) -> Vec<hop_core::Asset> {
+    let q = query
+        .q
+        .as_deref()
+        .map(normalize_filter)
+        .filter(|value| !value.is_empty());
+    let status = query
+        .status
+        .as_deref()
+        .map(normalize_filter)
+        .filter(|value| !value.is_empty() && value != "all");
+    let tag = query
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
     assets
         .iter()
-        .filter(|asset| asset.tags.iter().any(|asset_tag| asset_tag == tag))
+        .filter(|asset| {
+            q.as_deref()
+                .map(|q| asset_matches_search(asset, q))
+                .unwrap_or(true)
+        })
+        .filter(|asset| {
+            tag.map(|tag| asset.tags.iter().any(|asset_tag| asset_tag == tag))
+                .unwrap_or(true)
+        })
+        .filter(|asset| query.port.map(|port| asset.port == port).unwrap_or(true))
+        .filter(|asset| {
+            status
+                .as_deref()
+                .map(|status| route_asset_status(asset, sessions) == status)
+                .unwrap_or(true)
+        })
         .cloned()
         .collect()
+}
+
+fn filter_sessions_by_query(
+    sessions: &[hop_core::Session],
+    query: &SessionsQuery,
+) -> Vec<hop_core::Session> {
+    let q = query
+        .q
+        .as_deref()
+        .map(normalize_filter)
+        .filter(|value| !value.is_empty());
+    let user = query
+        .user
+        .as_deref()
+        .map(normalize_filter)
+        .filter(|value| !value.is_empty() && value != "all");
+    let event = query
+        .event
+        .as_deref()
+        .map(normalize_filter)
+        .filter(|value| !value.is_empty() && value != "all");
+    let target = query
+        .target
+        .as_deref()
+        .map(normalize_filter)
+        .filter(|value| !value.is_empty() && value != "all");
+
+    sessions
+        .iter()
+        .filter(|session| {
+            q.as_deref()
+                .map(|q| session_matches_search(session, q))
+                .unwrap_or(true)
+        })
+        .filter(|session| {
+            user.as_deref()
+                .map(|user| {
+                    session
+                        .key_name
+                        .as_deref()
+                        .map(normalize_filter)
+                        .is_some_and(|value| value.contains(user))
+                })
+                .unwrap_or(true)
+        })
+        .filter(|session| {
+            event
+                .as_deref()
+                .map(|event| normalize_filter(&session.mode).contains(event))
+                .unwrap_or(true)
+        })
+        .filter(|session| {
+            target
+                .as_deref()
+                .map(|target| {
+                    session
+                        .asset_name
+                        .as_deref()
+                        .map(normalize_filter)
+                        .is_some_and(|value| value.contains(target))
+                        || session
+                            .target_host
+                            .as_deref()
+                            .map(normalize_filter)
+                            .is_some_and(|value| value.contains(target))
+                })
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+fn asset_matches_search(asset: &hop_core::Asset, q: &str) -> bool {
+    [
+        asset.name.as_str(),
+        asset.hostname.as_str(),
+        asset.protocol.as_str(),
+        asset.preset.as_deref().unwrap_or_default(),
+        asset.description.as_deref().unwrap_or_default(),
+        asset.credential_id.as_deref().unwrap_or_default(),
+    ]
+    .iter()
+    .any(|value| normalize_filter(value).contains(q))
+        || asset
+            .tags
+            .iter()
+            .any(|tag| normalize_filter(tag).contains(q))
+        || asset.port.to_string().contains(q)
+}
+
+fn session_matches_search(session: &hop_core::Session, q: &str) -> bool {
+    [
+        session.id.as_str(),
+        session.key_finger.as_str(),
+        session.key_name.as_deref().unwrap_or_default(),
+        session.mode.as_str(),
+        session.asset_name.as_deref().unwrap_or_default(),
+        session.target_host.as_deref().unwrap_or_default(),
+        session.client_ip.as_deref().unwrap_or_default(),
+        session.status.as_str(),
+        session.error.as_deref().unwrap_or_default(),
+    ]
+    .iter()
+    .any(|value| normalize_filter(value).contains(q))
+        || session
+            .target_port
+            .map(|port| port.to_string().contains(q))
+            .unwrap_or(false)
+}
+
+fn route_asset_status(asset: &hop_core::Asset, sessions: &[hop_core::Session]) -> &'static str {
+    sessions
+        .iter()
+        .find(|session| route_session_matches_asset(session, asset))
+        .map(|session| match session.status.as_str() {
+            "failed" => "degraded",
+            "ok" | "started" => "online",
+            _ => "unknown",
+        })
+        .unwrap_or("unknown")
+}
+
+fn route_session_matches_asset(session: &hop_core::Session, asset: &hop_core::Asset) -> bool {
+    session.asset_name.as_deref() == Some(asset.name.as_str())
+        || (session.target_host.as_deref() == Some(asset.hostname.as_str())
+            && session.target_port == Some(asset.port))
+}
+
+fn normalize_filter(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
 }
 
 fn parse_bulk_tags_body(body: &[u8]) -> Result<BulkTagsForm> {
@@ -1267,6 +1544,7 @@ mod tests {
         AdminState {
             db: HopDb::in_memory().await.unwrap(),
             master_key: Arc::new(MasterKey::from_bytes([0; 32])),
+            active_sessions: ActiveSessionRegistry::default(),
             sessions: AdminSessions::default(),
             ssh_port: 2222,
             cookie_secure: false,
@@ -1364,6 +1642,167 @@ mod tests {
         assert!(asset.credential_id.is_none());
     }
 
+    #[tokio::test]
+    async fn assets_route_filters_by_search_status_tag_and_port() {
+        let state = test_admin_state().await;
+        let prod = state
+            .db
+            .add_asset(NewAsset {
+                name: "prod-api-01".to_string(),
+                protocol: ASSET_PROTOCOL_SSH.to_string(),
+                preset: None,
+                hostname: "10.42.1.12".to_string(),
+                port: 22,
+                description: None,
+                tags: vec!["prod".to_string(), "api".to_string()],
+                credential_id: None,
+            })
+            .await
+            .unwrap();
+        let staging = state
+            .db
+            .add_asset(NewAsset {
+                name: "prod-db-legacy".to_string(),
+                protocol: ASSET_PROTOCOL_SSH.to_string(),
+                preset: None,
+                hostname: "10.42.9.20".to_string(),
+                port: 2222,
+                description: None,
+                tags: vec!["prod".to_string(), "db".to_string()],
+                credential_id: None,
+            })
+            .await
+            .unwrap();
+        seed_session(&state, "ok", "alice", &prod).await;
+        seed_session(&state, "failed", "blocked", &staging).await;
+
+        let cookie = session_cookie(&state.sessions.create().await, false);
+        let app = admin_router_with_static_dir(state, tempfile::tempdir().unwrap().path());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets?q=prod&status=online&tag=prod&port=22")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+        let rendered = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(rendered.contains("prod-api-01"));
+        assert!(rendered.contains("Online"));
+        assert!(rendered.contains(r#"value="prod""#));
+        assert!(rendered.contains(r#"value="22""#));
+        assert!(!rendered.contains("prod-db-legacy"));
+    }
+
+    #[tokio::test]
+    async fn sessions_route_filters_by_query_event_user_and_target() {
+        let state = test_admin_state().await;
+        let prod = state
+            .db
+            .add_asset(NewAsset {
+                name: "prod-api-01".to_string(),
+                protocol: ASSET_PROTOCOL_SSH.to_string(),
+                preset: None,
+                hostname: "10.42.1.12".to_string(),
+                port: 22,
+                description: None,
+                tags: vec!["prod".to_string()],
+                credential_id: None,
+            })
+            .await
+            .unwrap();
+        let staging = state
+            .db
+            .add_asset(NewAsset {
+                name: "staging-bastion".to_string(),
+                protocol: ASSET_PROTOCOL_SSH.to_string(),
+                preset: None,
+                hostname: "203.0.113.9".to_string(),
+                port: 22,
+                description: None,
+                tags: vec!["staging".to_string()],
+                credential_id: None,
+            })
+            .await
+            .unwrap();
+        seed_session(&state, "ok", "alice", &prod).await;
+        seed_session(&state, "failed", "blocked", &staging).await;
+
+        let cookie = session_cookie(&state.sessions.create().await, false);
+        let app = admin_router_with_static_dir(state, tempfile::tempdir().unwrap().path());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions?q=alice&event=direct&user=alice&target=prod")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+        let rendered = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(rendered.contains("alice"));
+        assert!(rendered.contains("prod-api-01"));
+        assert!(!rendered.contains("blocked"));
+        assert!(!rendered.contains("staging-bastion"));
+    }
+
+    #[tokio::test]
+    async fn terminate_session_route_signals_registry_and_marks_session_terminated() {
+        let state = test_admin_state().await;
+        let session = state
+            .db
+            .start_session(hop_core::NewSession {
+                key_finger: "SHA256:alice".to_string(),
+                key_name: Some("alice".to_string()),
+                mode: "direct".to_string(),
+                asset_name: Some("prod-api-01".to_string()),
+                target_host: Some("10.42.1.12".to_string()),
+                target_port: Some(22),
+                client_ip: Some("10.42.0.18".to_string()),
+            })
+            .await
+            .unwrap();
+        let (terminate_tx, mut terminate_rx) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .active_sessions
+            .register(session.id.clone(), terminate_tx)
+            .await;
+        let token = state.sessions.create().await;
+        let admin_session = state.sessions.authenticate(&token).await.unwrap();
+        let cookie = session_cookie(&token, false);
+        let app = admin_router_with_static_dir(state.clone(), tempfile::tempdir().unwrap().path());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{}/terminate", session.id))
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "csrf_token={}",
+                        admin_session.csrf_token
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(terminate_rx.recv().await, Some(()));
+        let finished = state.db.get_session(&session.id).await.unwrap().unwrap();
+        assert_eq!(finished.status, "terminated");
+        assert_eq!(finished.error.as_deref(), Some(TERMINATED_BY_ADMIN));
+        assert!(finished.ended_at.is_some());
+    }
+
     #[test]
     fn settings_password_errors_map_to_localized_messages() {
         assert_eq!(
@@ -1387,5 +1826,37 @@ mod tests {
             ),
             super::super::i18n::EN.settings_password_confirmation_mismatch
         );
+    }
+
+    async fn seed_session(
+        state: &AdminState,
+        status: &str,
+        key_name: &str,
+        asset: &hop_core::Asset,
+    ) {
+        let session = state
+            .db
+            .start_session(hop_core::NewSession {
+                key_finger: format!("SHA256:{key_name}"),
+                key_name: Some(key_name.to_string()),
+                mode: "direct".to_string(),
+                asset_name: Some(asset.name.clone()),
+                target_host: Some(asset.hostname.clone()),
+                target_port: Some(asset.port),
+                client_ip: Some("10.42.0.18".to_string()),
+            })
+            .await
+            .unwrap();
+        if status != "started" {
+            state
+                .db
+                .finish_session(
+                    &session.id,
+                    status,
+                    (status == "failed").then_some("password rejected"),
+                )
+                .await
+                .unwrap();
+        }
     }
 }

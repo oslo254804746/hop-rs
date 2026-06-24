@@ -7,7 +7,10 @@ use russh::{
     server::{self, Msg, Server as _, Session},
     Channel, ChannelId, Pty,
 };
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc, Mutex},
+};
 use tracing::{error, info, warn};
 
 use crate::tui::{TuiAction, TuiResources};
@@ -17,6 +20,7 @@ use super::{
         self, BridgeControl, BridgeInput, ManagedBridgeOptions, ManagedSessionMode, SharedChannels,
     },
     host_key, proxy,
+    session_registry::{ActiveSessionRegistry, TERMINATED_BY_ADMIN},
 };
 
 #[derive(Debug, Clone)]
@@ -63,6 +67,10 @@ impl ActiveTuiSession {
         Self { id }
     }
 
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
     pub(crate) async fn finish(self, db: &HopDb, status: &str, error: Option<&str>) -> Result<()> {
         db.finish_session(&self.id, status, error).await?;
         Ok(())
@@ -74,6 +82,7 @@ pub struct HopSshServer {
     db: HopDb,
     config: HopConfig,
     master_key: Arc<MasterKey>,
+    active_sessions: ActiveSessionRegistry,
 }
 
 pub async fn serve_ssh(
@@ -81,6 +90,7 @@ pub async fn serve_ssh(
     config: HopConfig,
     db: HopDb,
     master_key: Arc<MasterKey>,
+    active_sessions: ActiveSessionRegistry,
 ) -> Result<()> {
     let host_key =
         host_key::load_or_generate(&config.ssh.host_key_file, &config.ssh.host_key_type)?;
@@ -97,6 +107,7 @@ pub async fn serve_ssh(
         db,
         config,
         master_key,
+        active_sessions,
     };
     let listener = TcpListener::bind(bind).await?;
     info!(%bind, "ssh server listening");
@@ -121,6 +132,7 @@ impl server::Server for HopSshServer {
             db: self.db.clone(),
             config: self.config.clone(),
             master_key: self.master_key.clone(),
+            active_sessions: self.active_sessions.clone(),
             auth: None,
             direct_asset: None,
             client_ip: peer_addr.map(|addr| addr.to_string()),
@@ -142,6 +154,7 @@ pub struct HopSshHandler {
     db: HopDb,
     config: HopConfig,
     master_key: Arc<MasterKey>,
+    active_sessions: ActiveSessionRegistry,
     auth: Option<AuthInfo>,
     direct_asset: Option<Asset>,
     client_ip: Option<String>,
@@ -213,6 +226,7 @@ impl HopSshHandler {
         let options = ManagedBridgeOptions {
             db: self.db.clone(),
             master_key: self.master_key.clone(),
+            active_sessions: self.active_sessions.clone(),
             auth,
             client_ip: self.client_ip.clone(),
             asset,
@@ -284,6 +298,51 @@ pub(crate) async fn start_tui_session(
         })
         .await?;
     Ok(ActiveTuiSession::new(session.id))
+}
+
+fn spawn_tui_termination_watcher(
+    db: HopDb,
+    active_sessions: ActiveSessionRegistry,
+    session_id: String,
+    channels: SharedChannels,
+    channel_id: ChannelId,
+    handle: russh::server::Handle,
+    mut terminate: mpsc::UnboundedReceiver<()>,
+) {
+    tokio::spawn(async move {
+        let Some(()) = terminate.recv().await else {
+            return;
+        };
+
+        let terminated = {
+            let mut channels = channels.lock().await;
+            match channels.remove(&channel_id) {
+                Some(ChannelState::Tui { mut tui, audit }) => {
+                    let mut output = tui.leave_screen().unwrap_or_default();
+                    output.extend_from_slice(format!("\r\n{TERMINATED_BY_ADMIN}\r\n").as_bytes());
+                    Some((audit, output))
+                }
+                Some(state) => {
+                    channels.insert(channel_id, state);
+                    None
+                }
+                None => None,
+            }
+        };
+
+        if let Some((audit, output)) = terminated {
+            if !output.is_empty() {
+                let _ = handle.data(channel_id, output).await;
+            }
+            let _ = audit
+                .finish(&db, "terminated", Some(TERMINATED_BY_ADMIN))
+                .await;
+            let _ = handle.exit_status_request(channel_id, 255).await;
+            let _ = handle.eof(channel_id).await;
+            let _ = handle.close(channel_id).await;
+        }
+        active_sessions.unregister(&session_id).await;
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -414,9 +473,12 @@ impl server::Handler for HopSshHandler {
         };
 
         let db = self.db.clone();
+        let active_sessions = self.active_sessions.clone();
         let client_ip = self.client_ip.clone();
         tokio::spawn(async move {
-            if let Err(err) = proxy::bridge_direct_tcpip(channel, db, auth, asset, client_ip).await
+            if let Err(err) =
+                proxy::bridge_direct_tcpip(channel, db, active_sessions, auth, asset, client_ip)
+                    .await
             {
                 warn!(?err, "proxy bridge failed");
             }
@@ -469,6 +531,8 @@ impl server::Handler for HopSshHandler {
         let mut tui = TuiResources::new(size.width, size.height, assets)?;
         send_tui_output(session, channel, tui.enter_screen()?)?;
         let audit = self.start_tui_session().await?;
+        let session_id = audit.id().to_string();
+        let (terminate_tx, terminate_rx) = mpsc::unbounded_channel();
         self.channels.lock().await.insert(
             channel,
             ChannelState::Tui {
@@ -476,6 +540,18 @@ impl server::Handler for HopSshHandler {
                 audit,
             },
         );
+        spawn_tui_termination_watcher(
+            self.db.clone(),
+            self.active_sessions.clone(),
+            session_id.clone(),
+            self.channels.clone(),
+            channel,
+            session.handle(),
+            terminate_rx,
+        );
+        self.active_sessions
+            .register(session_id, terminate_tx)
+            .await;
         Ok(())
     }
 
@@ -577,7 +653,9 @@ impl server::Handler for HopSshHandler {
         }
         send_tui_output(session, channel, output)?;
         if let Some((audit, status, error)) = finish_tui {
+            let session_id = audit.id().to_string();
             let _ = audit.finish(&self.db, status, error.as_deref()).await;
+            self.active_sessions.unregister(&session_id).await;
         }
         if close {
             session.exit_status_request(channel, 0)?;
@@ -621,7 +699,9 @@ impl server::Handler for HopSshHandler {
             }
         }
         if let Some(audit) = finish_tui {
+            let session_id = audit.id().to_string();
             let _ = audit.finish(&self.db, "ok", None).await;
+            self.active_sessions.unregister(&session_id).await;
         }
         Ok(())
     }
@@ -636,7 +716,9 @@ impl server::Handler for HopSshHandler {
             if let Ok(output) = tui.leave_screen() {
                 let _ = send_tui_output(session, channel, output);
             }
+            let session_id = audit.id().to_string();
             let _ = audit.finish(&self.db, "ok", None).await;
+            self.active_sessions.unregister(&session_id).await;
         }
         Ok(())
     }
@@ -732,6 +814,7 @@ mod tests {
             db,
             config: HopConfig::default(),
             master_key: Arc::new(MasterKey::from_bytes([0; 32])),
+            active_sessions: ActiveSessionRegistry::default(),
             auth: None,
             direct_asset: None,
             client_ip: None,

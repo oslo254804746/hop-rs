@@ -493,14 +493,16 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
              when serving Admin Web through HTTPS"
         );
     }
+    let active_sessions = ssh::session_registry::ActiveSessionRegistry::default();
     let admin = admin::routes::serve_admin(
         admin_bind,
         ssh_bind,
         db.clone(),
         master_key.clone(),
+        active_sessions.clone(),
         config.security.admin_cookie_secure,
     );
-    let ssh = ssh::server::serve_ssh(ssh_bind, config, db, master_key);
+    let ssh = ssh::server::serve_ssh(ssh_bind, config, db, master_key, active_sessions);
     info!("starting hop-server");
     tokio::try_join!(admin, ssh)?;
     Ok(())

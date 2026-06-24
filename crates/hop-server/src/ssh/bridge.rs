@@ -7,6 +7,7 @@ use tokio::sync::{mpsc, Mutex};
 use super::{
     client,
     server::{start_tui_session, AuthInfo, ChannelState, PtySize, AUTHORIZATION_DENIED},
+    session_registry::{ActiveSessionRegistry, TERMINATED_BY_ADMIN},
 };
 use crate::tui::TuiResources;
 
@@ -39,6 +40,7 @@ mod tests {
 pub struct ManagedBridgeOptions {
     pub db: HopDb,
     pub master_key: Arc<MasterKey>,
+    pub active_sessions: ActiveSessionRegistry,
     pub auth: AuthInfo,
     pub client_ip: Option<String>,
     pub asset: Asset,
@@ -94,7 +96,15 @@ async fn run_managed_bridge(
         })
         .await;
     let session_id = session.as_ref().map(|s| s.id.clone()).ok();
+    let (terminate_tx, mut terminate) = mpsc::unbounded_channel();
+    if let Some(session_id) = &session_id {
+        options
+            .active_sessions
+            .register(session_id.clone(), terminate_tx)
+            .await;
+    }
 
+    let mut terminated = false;
     let result = async {
         if !options
             .db
@@ -111,27 +121,48 @@ async fn run_managed_bridge(
                 .await;
         }
         let mut target = if is_sftp {
-            client::connect_asset_sftp(
-                options.db.clone(),
-                options.master_key.clone(),
-                &options.asset,
-                options.connect_timeout,
-            )
-            .await?
+            tokio::select! {
+                Some(()) = terminate.recv() => {
+                    terminated = true;
+                    return Ok(());
+                }
+                target = client::connect_asset_sftp(
+                    options.db.clone(),
+                    options.master_key.clone(),
+                    &options.asset,
+                    options.connect_timeout,
+                ) => target?
+            }
         } else {
-            client::connect_asset_shell(
-                options.db.clone(),
-                options.master_key.clone(),
-                &options.asset,
-                options.pty.width as u32,
-                options.pty.height as u32,
-                options.connect_timeout,
-            )
-            .await?
+            tokio::select! {
+                Some(()) = terminate.recv() => {
+                    terminated = true;
+                    return Ok(());
+                }
+                target = client::connect_asset_shell(
+                    options.db.clone(),
+                    options.master_key.clone(),
+                    &options.asset,
+                    options.pty.width as u32,
+                    options.pty.height as u32,
+                    options.connect_timeout,
+                ) => target?
+            }
         };
 
         loop {
             tokio::select! {
+                Some(()) = terminate.recv() => {
+                    terminated = true;
+                    let _ = options
+                        .handle
+                        .data(
+                            options.channel_id,
+                            format!("\r\n{TERMINATED_BY_ADMIN}\r\n").into_bytes(),
+                        )
+                        .await;
+                    break;
+                }
                 Some(input) = inbound.recv() => {
                     match input {
                         BridgeInput::Data(data) => target.channel.data_bytes(data).await?,
@@ -161,13 +192,25 @@ async fn run_managed_bridge(
                 }
             }
         }
-        target.session.disconnect(russh::Disconnect::ByApplication, "target closed", "en").await.ok();
+        let reason = if terminated {
+            TERMINATED_BY_ADMIN
+        } else {
+            "target closed"
+        };
+        target.session.disconnect(russh::Disconnect::ByApplication, reason, "en").await.ok();
         Ok::<(), anyhow::Error>(())
     }
     .await;
 
     if let Some(session_id) = session_id {
+        options.active_sessions.unregister(&session_id).await;
         let _ = match &result {
+            _ if terminated => {
+                options
+                    .db
+                    .finish_session(&session_id, "terminated", Some(TERMINATED_BY_ADMIN))
+                    .await
+            }
             Ok(_) => options.db.finish_session(&session_id, "ok", None).await,
             Err(err) => {
                 options
@@ -178,7 +221,14 @@ async fn run_managed_bridge(
         };
     }
 
-    if let Some((channels, mut tui)) = options.return_to_tui.take() {
+    if terminated {
+        let _ = options
+            .handle
+            .exit_status_request(options.channel_id, 255)
+            .await;
+        let _ = options.handle.eof(options.channel_id).await;
+        let _ = options.handle.close(options.channel_id).await;
+    } else if let Some((channels, mut tui)) = options.return_to_tui.take() {
         let message = match &result {
             Ok(_) => "\r\nTarget session ended. Returning to Hop...\r\n",
             Err(err) => {

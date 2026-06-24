@@ -1,3 +1,4 @@
+use chrono::{DateTime, Datelike, NaiveDateTime, Timelike};
 use hop_core::{
     Asset, AssetAccessMode, AuthorizedKey, Credential, KnownHost, Session, ASSET_PRESET_MYSQL,
     ASSET_PRESET_POSTGRES, ASSET_PRESET_RDP, ASSET_PRESET_REDIS, ASSET_PRESET_VNC,
@@ -26,7 +27,61 @@ const ICON_IMPORT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 
 
 const ICON_SETTINGS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 .6 1.65 1.65 0 0 0-.33 1.82V22a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 8.6 20a1.65 1.65 0 0 0-1.82-.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-.6-1 1.65 1.65 0 0 0-1.82-.33H2a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4 8.6a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 8.6 4a1.65 1.65 0 0 0 1-.6 1.65 1.65 0 0 0 .33-1.82V2a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 8.6a1.65 1.65 0 0 0 .6 1 1.65 1.65 0 0 0 1.82.33H22a2 2 0 1 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15z"/></svg>"#;
 
+pub struct DashboardData<'a> {
+    pub assets: &'a [Asset],
+    pub credentials: &'a [Credential],
+    pub keys: &'a [AuthorizedKey],
+    pub known_hosts: &'a [KnownHost],
+    pub sessions: &'a [Session],
+    pub active_session_ids: &'a [String],
+    pub csrf_token: &'a str,
+}
+
+pub struct AssetsData<'a> {
+    pub items: &'a [Asset],
+    pub credentials: &'a [Credential],
+    pub sessions: &'a [Session],
+    pub csrf_token: &'a str,
+    pub filters: AssetFilters<'a>,
+    pub all_tags: &'a [String],
+    pub ssh_port: u16,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct AssetFilters<'a> {
+    pub q: Option<&'a str>,
+    pub status: Option<&'a str>,
+    pub tag: Option<&'a str>,
+    pub port: Option<i64>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct SessionFilters<'a> {
+    pub q: Option<&'a str>,
+    pub range: Option<&'a str>,
+    pub user: Option<&'a str>,
+    pub event: Option<&'a str>,
+    pub target: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AssetStatus {
+    Online,
+    Degraded,
+    Unknown,
+}
+
 pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Markup {
+    layout_with_shell(title, active, t, None, body_content)
+}
+
+fn layout_with_shell(
+    title: &str,
+    active: &str,
+    t: &L10n,
+    active_sessions: Option<usize>,
+    body_content: Markup,
+) -> Markup {
     let alternate = t.locale.alternate();
     let language_href = language_switch_href(alternate, active);
     html! {
@@ -75,6 +130,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     body.admin-shell {
                         margin: 0;
                         min-height: 100vh;
+                        overflow-x: hidden;
                         background: var(--canvas);
                         color: var(--ink);
                         font-family: Inter, system-ui, sans-serif;
@@ -113,7 +169,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
 
                     .brand {
                         display: grid;
-                        grid-template-columns: 40px minmax(0, 1fr);
+                        grid-template-columns: 40px minmax(0, 1fr) auto;
                         gap: 12px;
                         align-items: center;
                         padding: 0 6px 14px;
@@ -188,6 +244,70 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
 
                     .nav-link.active svg { opacity: 1; color: var(--control); }
 
+                    .nav-label {
+                        min-width: 0;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                    }
+
+                    .nav-badge {
+                        margin-left: auto;
+                        min-width: 28px;
+                        justify-content: center;
+                        background: #063b23;
+                        color: #34d399;
+                    }
+
+                    .sidebar-collapse-toggle {
+                        width: 40px;
+                        min-height: 36px;
+                        padding: 0;
+                        border-color: var(--border-strong);
+                        background: var(--sidebar-panel);
+                        color: #bfdbfe;
+                    }
+
+                    .sidebar-collapse-toggle svg {
+                        width: 18px;
+                        height: 18px;
+                    }
+
+                    .admin-shell.sidebar-collapsed .app-frame {
+                        grid-template-columns: 80px minmax(0, 1fr);
+                    }
+
+                    .admin-shell.sidebar-collapsed .sidebar {
+                        padding-inline: 14px;
+                        align-items: center;
+                    }
+
+                    .admin-shell.sidebar-collapsed .brand {
+                        grid-template-columns: 40px;
+                        padding-inline: 0;
+                    }
+
+                    .admin-shell.sidebar-collapsed .brand-copy,
+                    .admin-shell.sidebar-collapsed .nav-label,
+                    .admin-shell.sidebar-collapsed .sidebar-footer {
+                        display: none;
+                    }
+
+                    .admin-shell.sidebar-collapsed .nav-link {
+                        width: 44px;
+                        justify-content: center;
+                        padding-inline: 0;
+                    }
+
+                    .admin-shell.sidebar-collapsed .nav-badge {
+                        position: absolute;
+                        top: 4px;
+                        right: 2px;
+                        min-width: 18px;
+                        min-height: 18px;
+                        padding: 0 4px;
+                        font-size: 0.68rem;
+                    }
+
                     .sidebar-footer {
                         margin-top: auto;
                         padding: 14px;
@@ -235,6 +355,10 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     .content-shell {
                         min-width: 0;
                         background: var(--canvas);
+                    }
+
+                    .mobile-top-header {
+                        display: none;
                     }
 
                     .topbar {
@@ -290,6 +414,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     }
 
                     .panel {
+                        min-width: 0;
                         margin: 0 0 18px;
                         padding: 20px;
                         border: 1px solid var(--border);
@@ -486,6 +611,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     }
 
                     .table-wrap {
+                        max-width: 100%;
                         overflow-x: auto;
                         border: 1px solid var(--border);
                         border-radius: 8px;
@@ -746,7 +872,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     .dashboard-grid,
                     .audit-grid {
                         display: grid;
-                        grid-template-columns: minmax(0, 1fr) 320px;
+                        grid-template-columns: minmax(0, 1fr) minmax(300px, 320px);
                         gap: 18px;
                         align-items: start;
                     }
@@ -770,6 +896,49 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         font-weight: 850;
                     }
 
+                    .dashboard-toolbar,
+                    .asset-filter-grid,
+                    .audit-search-form {
+                        display: grid;
+                        grid-template-columns: minmax(220px, 1fr) repeat(3, max-content);
+                        align-items: center;
+                        gap: 10px;
+                    }
+
+                    .dashboard-toolbar input,
+                    .asset-filter-grid input,
+                    .asset-filter-grid select,
+                    .audit-search-form input,
+                    .audit-search-form select {
+                        min-width: 0;
+                    }
+
+                    .table-action {
+                        white-space: nowrap;
+                    }
+
+                    .status-row form,
+                    .data-table form {
+                        margin: 0;
+                    }
+
+                    .compact-button,
+                    .disabled-button {
+                        min-height: 32px;
+                        padding: 6px 10px;
+                        border-radius: 7px;
+                        font-size: 0.82rem;
+                    }
+
+                    .disabled-button,
+                    button:disabled {
+                        border-color: var(--border);
+                        background: #111827;
+                        color: var(--muted);
+                        cursor: not-allowed;
+                        box-shadow: none;
+                    }
+
                     .chart-bars {
                         height: 132px;
                         display: grid;
@@ -787,13 +956,13 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
 
                     .heatmap {
                         display: grid;
-                        grid-template-columns: repeat(12, 1fr);
-                        gap: 5px;
+                        grid-template-columns: repeat(24, minmax(0, 1fr));
+                        gap: 4px;
                     }
 
                     .heatmap span {
                         aspect-ratio: 1;
-                        min-width: 12px;
+                        min-width: 0;
                         border-radius: 4px;
                         background: #0f1724;
                         border: 1px solid #172033;
@@ -856,9 +1025,15 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         overflow-x: auto;
                     }
 
+                    .mobile-overview-grid,
+                    .mobile-live-sessions,
+                    .mobile-security-feed {
+                        display: none;
+                    }
+
                     .assets-layout {
                         display: grid;
-                        grid-template-columns: minmax(0, 1fr) 360px;
+                        grid-template-columns: minmax(0, 1fr) 320px;
                         gap: 18px;
                         align-items: start;
                     }
@@ -885,12 +1060,21 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         top: 106px;
                     }
 
+                    .asset-drawer {
+                        background: #0c1421;
+                    }
+
                     .assets-page .panel-header {
                         flex-wrap: wrap;
                     }
 
                     .assets-page .data-table {
-                        min-width: 660px;
+                        min-width: 680px;
+                    }
+
+                    .dashboard-page .data-table,
+                    .audit-page .data-table {
+                        min-width: 620px;
                     }
 
                     .os-badge {
@@ -904,6 +1088,42 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                         font-size: 0.72rem;
                         font-weight: 850;
+                    }
+
+                    .connect-command {
+                        display: grid;
+                        gap: 6px;
+                        min-width: 0;
+                        max-width: 150px;
+                    }
+
+                    .connect-command .mono {
+                        white-space: normal;
+                        word-break: break-all;
+                    }
+
+                    .copy-command {
+                        width: 32px;
+                        min-height: 32px;
+                        padding: 0;
+                    }
+
+                    .status-pill.online {
+                        background: #063b23;
+                        color: #22c55e;
+                        border: 1px solid #14532d;
+                    }
+
+                    .status-pill.degraded {
+                        background: #3b2605;
+                        color: #f59e0b;
+                        border: 1px solid #713f12;
+                    }
+
+                    .status-pill.unknown {
+                        background: #111827;
+                        color: #94a3b8;
+                        border: 1px solid var(--border);
                     }
 
                     .audit-toolbar {
@@ -951,6 +1171,31 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         display: none;
                     }
 
+                    .mobile-segments {
+                        display: grid;
+                        grid-template-columns: repeat(3, minmax(0, 1fr));
+                        gap: 4px;
+                        padding: 4px;
+                        border-radius: 8px;
+                        background: #111827;
+                    }
+
+                    .mobile-segments a {
+                        min-height: 36px;
+                        display: grid;
+                        place-items: center;
+                        border-radius: 7px;
+                        color: var(--ink-soft);
+                        text-decoration: none;
+                        font-size: 0.82rem;
+                        font-weight: 760;
+                    }
+
+                    .mobile-segments a.active {
+                        background: #153c70;
+                        color: #ffffff;
+                    }
+
                     @media (prefers-reduced-motion: reduce) {
                         *, *::before, *::after {
                             scroll-behavior: auto !important;
@@ -965,12 +1210,35 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         .sidebar {
                             display: none;
                         }
+                        .mobile-top-header {
+                            display: grid;
+                            gap: 16px;
+                            padding: 26px 28px 10px;
+                        }
+                        .mobile-brand-row {
+                            display: grid;
+                            grid-template-columns: 40px minmax(0, 1fr) auto auto;
+                            gap: 10px;
+                            align-items: center;
+                        }
+                        .mobile-brand-row strong {
+                            display: block;
+                            font-size: 1.02rem;
+                        }
+                        .mobile-brand-row span {
+                            color: var(--muted);
+                            font-size: 0.78rem;
+                        }
+                        .mobile-header-action {
+                            width: 36px;
+                            min-height: 36px;
+                            padding: 0;
+                        }
                         .topbar {
-                            position: static;
-                            padding: 22px 20px 16px;
+                            display: none;
                         }
                         .workspace {
-                            padding: 22px 20px 96px;
+                            padding: 18px 28px 96px;
                         }
                         .dashboard-grid,
                         .audit-grid,
@@ -979,6 +1247,27 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         }
                         .asset-form-panel {
                             position: static;
+                        }
+                        .dashboard-toolbar,
+                        .asset-filter-grid,
+                        .audit-search-form {
+                            grid-template-columns: 1fr;
+                        }
+                        .mobile-overview-grid {
+                            display: none;
+                        }
+                        .mobile-live-sessions,
+                        .mobile-security-feed {
+                            display: grid;
+                            gap: 10px;
+                        }
+                        .live-session-card,
+                        .security-feed-card {
+                            display: grid;
+                            gap: 8px;
+                            padding: 12px;
+                            border-radius: 8px;
+                            background: #0f1724;
                         }
                         .mobile-tabbar {
                             position: fixed;
@@ -1016,14 +1305,16 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     }
 
                     @media (max-width: 560px) {
-                        .topbar {
-                            flex-direction: column;
-                            align-items: stretch;
-                        }
+                        .mobile-top-header { padding-inline: 28px 4px; }
                         .ghost-button, .button, button { width: 100%; }
+                        .sidebar-collapse-toggle,
+                        .mobile-header-action,
+                        .copy-command,
+                        .mobile-tab {
+                            width: auto;
+                        }
                         .panel { padding: 16px; }
                         .panel-header { flex-direction: column; }
-                        .topbar h1 { font-size: 1.65rem; }
                         .console-hero {
                             flex-direction: column;
                         }
@@ -1041,11 +1332,15 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         .metric-grid {
                             grid-template-columns: repeat(2, minmax(0, 1fr));
                         }
+                        .metric {
+                            min-height: 80px;
+                            padding: 14px;
+                        }
                         .metric-value {
                             font-size: 1.8rem;
                         }
                         .heatmap {
-                            grid-template-columns: repeat(8, 1fr);
+                            grid-template-columns: repeat(12, 1fr);
                         }
                     }
                     "#
@@ -1056,9 +1351,12 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     aside.sidebar {
                         div.brand {
                             div.brand-mark { "H" }
-                            div {
+                            div.brand-copy {
                                 strong { "Hop" }
                                 span { (t.admin_console) }
+                            }
+                            button.sidebar-collapse-toggle type="button" data-sidebar-toggle aria-label=(t.sidebar_collapse) title=(t.sidebar_collapse) {
+                                (PreEscaped(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>"#))
                             }
                         }
                         nav.nav aria-label=(t.nav_primary) {
@@ -1067,7 +1365,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                             (nav_link("/credentials", t.nav_credentials, ICON_CREDENTIALS, active == "credentials"))
                             (nav_link("/keys", t.nav_keys, ICON_KEYS, active == "keys"))
                             (nav_link("/known-hosts", t.nav_known_hosts, ICON_KNOWN_HOSTS, active == "known-hosts"))
-                            (nav_link("/sessions", t.nav_sessions, ICON_SESSIONS, active == "sessions"))
+                            (nav_link_with_badge("/sessions", t.nav_sessions, ICON_SESSIONS, active == "sessions", active_sessions))
                             (nav_link("/import", t.nav_import_export, ICON_IMPORT, active == "import"))
                             (nav_link("/settings", t.nav_settings, ICON_SETTINGS, active == "settings"))
                         }
@@ -1082,6 +1380,24 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         }
                     }
                     div.content-shell {
+                        header.mobile-top-header {
+                            div.mobile-brand-row {
+                                div.brand-mark { "H" }
+                                div {
+                                    strong { "hop-rs" }
+                                    span { "tokyo-core-01" }
+                                }
+                                span.status-chip.good { span.status-dot.good {} (t.mobile_live) }
+                                a.ghost-button.mobile-header-action href="/settings" aria-label=(t.nav_settings) title=(t.nav_settings) {
+                                    (PreEscaped(ICON_SETTINGS))
+                                }
+                            }
+                            nav.mobile-segments aria-label=(t.nav_primary) {
+                                a href="/" class=(if active == "overview" { "active" } else { "" }) { (t.mobile_segment_overview) }
+                                a href="/assets" class=(if active == "assets" { "active" } else { "" }) { (t.mobile_segment_assets) }
+                                a href="/sessions" class=(if active == "sessions" { "active" } else { "" }) { (t.mobile_segment_audit) }
+                            }
+                        }
                         header.topbar {
                             div {
                                 p.eyebrow { (t.admin_web) }
@@ -1093,13 +1409,14 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         }
                         main.workspace { (body_content) }
                         nav.mobile-tabbar aria-label=(t.nav_primary) {
-                            (mobile_nav_link("/", t.nav_overview, ICON_OVERVIEW, active == "overview"))
-                            (mobile_nav_link("/assets", t.nav_assets, ICON_ASSETS, active == "assets"))
-                            (mobile_nav_link("/sessions", t.nav_sessions, ICON_SESSIONS, active == "sessions"))
-                            (mobile_nav_link("/settings", t.nav_settings, ICON_SETTINGS, active == "settings"))
+                            (mobile_nav_link("/", t.mobile_nav_dash, ICON_OVERVIEW, active == "overview"))
+                            (mobile_nav_link("/assets", t.mobile_nav_assets, ICON_ASSETS, active == "assets"))
+                            (mobile_nav_link("/keys", t.mobile_nav_ssh, ICON_KEYS, matches!(active, "keys" | "credentials" | "known-hosts")))
+                            (mobile_nav_link("/sessions", t.mobile_nav_audit, ICON_SESSIONS, active == "sessions"))
                         }
                     }
                 }
+                script { (PreEscaped(shell_script())) }
             }
         }
     }
@@ -1182,17 +1499,31 @@ pub fn settings(t: &L10n, csrf_token: &str, error: Option<&str>) -> Markup {
     )
 }
 
-pub fn overview(
-    t: &L10n,
-    asset_count: usize,
-    credential_count: usize,
-    key_count: usize,
-    session_count: usize,
-) -> Markup {
-    layout(
+pub fn overview(t: &L10n, data: DashboardData<'_>) -> Markup {
+    let asset_count = data.assets.len();
+    let credential_count = data.credentials.len();
+    let key_count = data.keys.len();
+    let active_sessions = data
+        .sessions
+        .iter()
+        .filter(|session| is_runtime_active_session(session, data.active_session_ids))
+        .collect::<Vec<_>>();
+    let active_count = active_sessions.len();
+    let failed_count = data
+        .sessions
+        .iter()
+        .filter(|session| session.status == "failed")
+        .count();
+    let proxy_only_assets = data
+        .assets
+        .iter()
+        .filter(|asset| asset.credential_id.is_none())
+        .count();
+    layout_with_shell(
         t.overview_title,
         "overview",
         t,
+        Some(active_count),
         html! {
             div.dashboard-page {
                 div.console-hero {
@@ -1200,43 +1531,103 @@ pub fn overview(
                         h2 { (t.overview_heading) }
                         p { (t.overview_intro) }
                     }
-                    div.console-actions {
-                        span.status-chip.good { span.status-dot.good {} (t.overview_gateway_status) }
+                    form.dashboard-toolbar method="get" action="/assets" {
+                        input type="search" name="q" placeholder=(t.overview_search_placeholder) aria-label=(t.overview_search_placeholder);
+                        span.status-chip.good { span.status-dot.good {} (t.overview_ha_active) }
                         a.button href="/assets" { (t.assets_add_heading) }
                     }
                 }
                 div.metric-grid {
-                    div.metric {
-                        span.metric-label { (t.overview_assets_label) }
-                        strong.metric-value { (asset_count) }
-                        span.metric-note { (t.overview_assets_note) }
-                    }
-                    div.metric {
-                        span.metric-label { (t.overview_sessions_label) }
-                        strong.metric-value { (session_count) }
-                        span.metric-note { (t.overview_sessions_note) }
-                    }
-                    div.metric {
-                        span.metric-label { (t.overview_credentials_label) }
-                        strong.metric-value { (credential_count) }
-                        span.metric-note { (t.overview_credentials_note) }
-                    }
-                    div.metric {
-                        span.metric-label { (t.overview_keys_label) }
-                        strong.metric-value { (key_count) }
-                        span.metric-note { (t.overview_keys_note) }
-                    }
+                    (metric_card(t.overview_assets_label, asset_count, t.overview_assets_note))
+                    (metric_card(t.overview_active_sessions_label, active_count, t.overview_active_sessions_note))
+                    (metric_card(t.overview_credentials_label, credential_count, t.overview_credentials_note))
+                    (metric_card(t.overview_failed_sessions_label, failed_count, t.overview_failed_sessions_note))
+                }
+                div.mobile-overview-grid {
+                    (metric_card(t.overview_assets_label, asset_count, t.overview_assets_note))
+                    (metric_card(t.overview_active_sessions_label, active_count, t.overview_active_sessions_note))
+                    (metric_card(t.overview_credentials_label, credential_count, t.overview_credentials_note))
+                    (metric_card(t.overview_failed_sessions_label, failed_count, t.overview_failed_sessions_note))
                 }
                 div.dashboard-grid {
                     div.panel-stack {
                         section.panel {
                             div.panel-header {
                                 div {
-                                    h2 { (t.overview_session_activity_heading) }
-                                    p { (t.overview_session_activity_intro) }
+                                    h2 { (t.overview_live_sessions_heading) }
+                                    p { (t.overview_live_sessions_intro) }
                                 }
-                                span.status-chip.good { (session_count) " " (t.overview_recorded_suffix) }
+                                div.status-row {
+                                    span.status-chip.good { span.status-dot.good {} (active_count) " active" }
+                                    form method="post" action="/sessions/terminate-all" {
+                                        (csrf_field(data.csrf_token))
+                                        button.danger.compact-button type="submit" disabled[active_sessions.is_empty()] { (t.overview_terminate_all) }
+                                    }
+                                }
                             }
+                            div.table-wrap {
+                                table.data-table {
+                                    thead {
+                                        tr {
+                                            th { (t.key_column) }
+                                            th { "Source IP" }
+                                            th { (t.asset_column) }
+                                            th { (t.started_column) }
+                                            th { (t.field_status) }
+                                            th { (t.field_action) }
+                                        }
+                                    }
+                                    tbody {
+                                        @if active_sessions.is_empty() {
+                                            tr.empty-row { td colspan="6" { (t.overview_no_live_sessions) } }
+                                        }
+                                        @for session in &active_sessions {
+                                            tr {
+                                                td { (session_user_label(session)) }
+                                                td.mono { (session.client_ip.as_deref().unwrap_or("-")) }
+                                                td { (session_target_label(session)) }
+                                                td.mono { (session.started_at.as_deref().unwrap_or("-")) }
+                                                td { span.status-pill.online { (session.status) } }
+                                                td {
+                                                    form method="post" action=(format!("/sessions/{}/terminate", session.id)) {
+                                                        (csrf_field(data.csrf_token))
+                                                        button.danger.table-action.compact-button type="submit" {
+                                                            (t.overview_terminate)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            div.mobile-live-sessions {
+                                div.panel-header {
+                                    div {
+                                        h2 { (t.overview_live_sessions_heading) }
+                                    }
+                                    span.status-chip.good { (active_count) }
+                                }
+                                @if active_sessions.is_empty() {
+                                    div.live-session-card { (t.overview_no_live_sessions) }
+                                }
+                                @for session in active_sessions.iter().take(3) {
+                                    div.live-session-card {
+                                        strong { (session_user_label(session)) " -> " (session_target_label(session)) }
+                                        span.subtle.mono { (session.client_ip.as_deref().unwrap_or("-")) " / " (session.started_at.as_deref().unwrap_or("-")) }
+                                        span.status-pill.online { "low" }
+                                    }
+                                }
+                            }
+                        }
+                        section.panel {
+                            div.panel-header {
+                                div {
+                                    h2 { (t.overview_frequency_heading) }
+                                }
+                                span.command-chip { (t.overview_frequency_window) }
+                            }
+                            (chart_bars(data.sessions))
                             div.terminal-strip {
                                 span { "$" }
                                 span { "hop admin sessions --limit 100" }
@@ -1247,36 +1638,53 @@ pub fn overview(
                         section.panel {
                             div.panel-header {
                                 div {
-                                    h2 { (t.overview_inventory_health_heading) }
-                                    p { (t.overview_inventory_health_intro) }
+                                    h2 { (t.overview_heatmap_heading) }
+                                    p { (t.overview_heatmap_intro) }
+                                }
+                            }
+                            (heatmap_cells(data.sessions))
+                        }
+                        section.panel {
+                            div.panel-header {
+                                div {
+                                    h2 { (t.overview_security_posture_heading) }
                                 }
                             }
                             div.posture-list {
-                                div.posture-item {
-                                    span.status-dot.good {}
-                                    b { (t.overview_assets_summary) }
-                                    span { (asset_count) }
-                                }
-                                div.posture-item {
-                                    span.status-dot.good {}
-                                    b { (t.overview_credentials_summary) }
-                                    span { (credential_count) }
-                                }
-                                div.posture-item {
-                                    span.status-dot.good {}
-                                    b { (t.overview_keys_summary) }
-                                    span { (key_count) }
-                                }
+                                (dot_list_row("good", t.overview_keys_summary, key_count.to_string()))
+                                (dot_list_row("warn", t.overview_failed_sessions_label, failed_count.to_string()))
+                                (dot_list_row("warn", t.overview_assets_without_credentials, proxy_only_assets.to_string()))
+                                (dot_list_row("good", t.overview_known_hosts_summary, data.known_hosts.len().to_string()))
                             }
                         }
                         section.panel {
                             div.panel-header {
                                 div {
-                                    h2 { (t.overview_scope_heading) }
-                                    p { (t.overview_scope_intro) }
+                                    h2 { (t.overview_runtime_load_heading) }
+                                    p { (t.overview_runtime_unavailable) }
                                 }
                             }
-                            p.fine-print { (t.overview_scope_note) }
+                            div.replay-box {
+                                span.status-pill.neutral { (t.overview_runtime_unavailable) }
+                                div.replay-progress { span style="width:0%;" {} }
+                            }
+                        }
+                        section.panel.mobile-security-feed {
+                            div.panel-header {
+                                div {
+                                    h2 { (t.overview_mobile_security_feed) }
+                                }
+                            }
+                            @let failed = data.sessions.iter().filter(|session| session.status == "failed").take(3).collect::<Vec<_>>();
+                            @if failed.is_empty() {
+                                div.security-feed-card { (t.overview_no_security_events) }
+                            }
+                            @for session in failed {
+                                div.security-feed-card {
+                                    span.mono { "AUTH_FAIL " (session_target_label(session)) }
+                                    span.subtle { (session.started_at.as_deref().unwrap_or("-")) }
+                                }
+                            }
                         }
                     }
                 }
@@ -1285,19 +1693,148 @@ pub fn overview(
     )
 }
 
-pub fn assets(
-    t: &L10n,
-    items: &[Asset],
-    credentials: &[Credential],
-    csrf_token: &str,
-    selected_tag: Option<&str>,
-    all_tags: &[String],
-    ssh_port: u16,
-) -> Markup {
-    layout(
+fn metric_card(label: &str, value: usize, note: &str) -> Markup {
+    html! {
+        div.metric {
+            span.metric-label { (label) }
+            strong.metric-value { (value) }
+            span.metric-note { (note) }
+        }
+    }
+}
+
+fn dot_list_row(tone: &str, label: &str, value: String) -> Markup {
+    html! {
+        div.posture-item {
+            span class=(format!("status-dot {tone}")) {}
+            b { (label) }
+            span { (value) }
+        }
+    }
+}
+
+fn is_active_session(session: &Session) -> bool {
+    session.status == "started" && session.ended_at.is_none()
+}
+
+fn is_runtime_active_session(session: &Session, active_session_ids: &[String]) -> bool {
+    session.status == "started"
+        && session.ended_at.is_none()
+        && active_session_ids
+            .iter()
+            .any(|session_id| session_id == &session.id)
+}
+
+fn session_user_label(session: &Session) -> &str {
+    session.key_name.as_deref().unwrap_or("unknown")
+}
+
+fn session_target_label(session: &Session) -> String {
+    session
+        .asset_name
+        .clone()
+        .or_else(|| session.target_host.clone())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn chart_bars(sessions: &[Session]) -> Markup {
+    let mut buckets = [0usize; 24];
+    for (index, session) in sessions.iter().enumerate() {
+        let bucket = session_time_parts(session)
+            .map(|(_, hour)| hour)
+            .unwrap_or(index % 24);
+        buckets[bucket] += 1;
+    }
+    let max = buckets.iter().copied().max().unwrap_or(0).max(1);
+    html! {
+        div.chart-bars aria-hidden="true" {
+            @for count in buckets {
+                @let height = 14 + (count * 86 / max);
+                span style=(format!("height:{height}%")) {}
+            }
+        }
+    }
+}
+
+fn heatmap_cells(sessions: &[Session]) -> Markup {
+    let mut buckets = [[0usize; 24]; 7];
+    for (index, session) in sessions.iter().enumerate() {
+        let (day, hour) = session_time_parts(session).unwrap_or((index % 7, index % 24));
+        buckets[day][hour] += 1;
+    }
+    let max = buckets
+        .iter()
+        .flat_map(|row| row.iter())
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    html! {
+        div.heatmap aria-hidden="true" {
+            @for row in buckets {
+                @for count in row {
+                    @let level = heat_level(count, max);
+                    span class=(format!("level-{level}")) {}
+                }
+            }
+        }
+    }
+}
+
+fn heat_level(count: usize, max: usize) -> usize {
+    if count == 0 {
+        0
+    } else {
+        ((count * 4).div_ceil(max)).clamp(1, 4)
+    }
+}
+
+fn session_time_parts(session: &Session) -> Option<(usize, usize)> {
+    let raw = session.started_at.as_deref()?;
+    if let Ok(value) = DateTime::parse_from_rfc3339(raw) {
+        return Some((
+            value.weekday().num_days_from_monday() as usize,
+            value.hour() as usize,
+        ));
+    }
+    NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|value| {
+            (
+                value.weekday().num_days_from_monday() as usize,
+                value.hour() as usize,
+            )
+        })
+}
+
+pub fn assets(t: &L10n, data: AssetsData<'_>) -> Markup {
+    let AssetsData {
+        items,
+        credentials,
+        sessions,
+        csrf_token,
+        filters,
+        all_tags,
+        ssh_port,
+    } = data;
+    let online_count = items
+        .iter()
+        .filter(|asset| asset_status(asset, sessions) == AssetStatus::Online)
+        .count();
+    let degraded_count = items
+        .iter()
+        .filter(|asset| asset_status(asset, sessions) == AssetStatus::Degraded)
+        .count();
+    layout_with_shell(
         t.assets_title,
         "assets",
         t,
+        Some(
+            sessions
+                .iter()
+                .filter(|session| is_active_session(session))
+                .count(),
+        ),
         html! {
             div.assets-page {
                 div.console-hero {
@@ -1306,27 +1843,49 @@ pub fn assets(
                         p { (t.assets_intro) }
                     }
                     div.console-actions {
-                        span.status-chip.good { span.status-dot.good {} (items.len()) " " (t.assets_count_suffix) }
+                        span.status-chip.good { span.status-dot.good {} (online_count) " " (t.assets_status_online) }
+                        span.status-chip.warn { span.status-dot.warn {} (degraded_count) " " (t.assets_status_degraded) }
                         a.button href="#add-asset" { (t.assets_add_heading) }
                     }
                 }
                 div.assets-layout {
                     div.panel-stack {
                         section.panel {
-                            div.filter-console {
-                                div {
-                                    h2 { (t.assets_filter_heading) }
-                                    p.fine-print { (t.assets_filter_intro) }
-                                }
-                                div.filter-row {
-                                    a class=(if selected_tag.is_none() { "button" } else { "ghost-button" }) href="/assets" {
-                                        (t.assets_filter_all)
+                            form.asset-filter-grid method="get" action="/assets" {
+                                input type="search" name="q" value=(filters.q.unwrap_or("")) placeholder=(t.assets_search_placeholder) aria-label=(t.assets_search_placeholder);
+                                label.field {
+                                    (t.assets_status_label)
+                                    select name="status" {
+                                        (asset_status_option(t.assets_status_all, "", filters.status))
+                                        (asset_status_option(t.assets_status_online, "online", filters.status))
+                                        (asset_status_option(t.assets_status_degraded, "degraded", filters.status))
+                                        (asset_status_option(t.assets_status_unknown, "unknown", filters.status))
                                     }
-                                    @for tag in all_tags {
-                                        a class=(if selected_tag == Some(tag.as_str()) { "button" } else { "ghost-button" })
-                                          href=(format!("/assets?tag={}", url_query_value(tag))) {
-                                            (tag)
+                                }
+                                label.field {
+                                    (t.assets_tag_label)
+                                    select name="tag" {
+                                        option value="" selected[filters.tag.is_none()] { (t.assets_filter_all) }
+                                        @for tag in all_tags {
+                                            option value=(tag) selected[filters.tag == Some(tag.as_str())] { (tag) }
                                         }
+                                    }
+                                }
+                                label.field {
+                                    (t.assets_port_label)
+                                    input name="port" type="number" value=(filters.port.map(|port| port.to_string()).unwrap_or_default()) placeholder=(t.assets_port_any);
+                                }
+                                button type="submit" { (t.assets_filter_all) }
+                                a.ghost-button href="/import" { (t.assets_bulk_import) }
+                            }
+                            div.filter-row style="margin-top:12px;" {
+                                a class=(if filters.tag.is_none() { "button" } else { "ghost-button" }) href="/assets" {
+                                    (t.assets_filter_all)
+                                }
+                                @for tag in all_tags {
+                                    a class=(if filters.tag == Some(tag.as_str()) { "button" } else { "ghost-button" })
+                                      href=(format!("/assets?tag={}", url_query_value(tag))) {
+                                        (tag)
                                     }
                                 }
                             }
@@ -1354,18 +1913,21 @@ pub fn assets(
                                             tr {
                                                 th.checkbox-cell {}
                                                 th { (t.field_hostname) }
-                                                th { (t.field_protocol) }
-                                                th { (t.target_column) }
+                                                th { (t.assets_ip_column) }
+                                                th { (t.assets_os_column) }
+                                                th { (t.field_port) }
+                                                th { (t.field_status) }
                                                 th { (t.field_tags) }
-                                                th { (t.field_credential) }
                                                 th { (t.field_action) }
                                             }
                                         }
                                         tbody {
                                             @if items.is_empty() {
-                                                tr.empty-row { td colspan="7" { (t.no_assets) } }
+                                                tr.empty-row { td colspan="8" { (t.no_assets) } }
                                             }
                                             @for asset in items {
+                                                @let status = asset_status(asset, sessions);
+                                                @let command = asset_connect_command(asset, ssh_port);
                                                 tr {
                                                     td.checkbox-cell {
                                                         input type="checkbox" name="asset_ids" value=(asset.id);
@@ -1376,15 +1938,14 @@ pub fn assets(
                                                             @if let Some(description) = &asset.description {
                                                                 span.subtle { (description) }
                                                             } @else {
-                                                                span.subtle { (t.asset_activity_placeholder) }
-                                                            }
-                                                            @if let Some(command) = asset_tunnel_command(asset, ssh_port) {
-                                                                span.subtle.mono { (command) }
+                                                                span.subtle { (asset_activity_summary(t, asset, sessions)) }
                                                             }
                                                         }
                                                     }
+                                                    td.mono { (asset.hostname) }
                                                     td { span.os-badge { (asset_protocol_label(t, asset_kind(asset))) } }
-                                                    td.mono { (asset.hostname) ":" (asset.port) }
+                                                    td.mono { (asset.port) }
+                                                    td { (asset_status_pill(t, status)) }
                                                     td {
                                                         div.tag-list {
                                                             @if asset.tags.is_empty() {
@@ -1396,15 +1957,15 @@ pub fn assets(
                                                         }
                                                     }
                                                     td {
-                                                        @if let Some(credential_id) = &asset.credential_id {
-                                                            span.status-pill { (credential_id) }
-                                                        } @else {
-                                                            span.status-pill.neutral { (t.proxy_only) }
-                                                        }
-                                                    }
-                                                    td {
                                                         div.action-row {
-                                                            a class="button" href=(format!("/assets/{}/edit", asset.id)) { (t.edit) }
+                                                            div.connect-command {
+                                                                button.compact-button type="button" data-copy-command=(&command) { (t.assets_connect) }
+                                                                span.mono { (&command) }
+                                                            }
+                                                            button.ghost-button.copy-command type="button" title=(t.assets_copy_command) data-copy-command=(&command) {
+                                                                (PreEscaped(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>"#))
+                                                            }
+                                                            a class="ghost-button compact-button" href=(format!("/assets/{}/edit", asset.id)) { (t.edit) }
                                                             button class="danger" type="submit" formaction=(format!("/assets/{}/delete", asset.id)) { (t.delete) }
                                                         }
                                                     }
@@ -1431,7 +1992,7 @@ pub fn assets(
                             }
                         }
                     }
-                    section.panel.asset-form-panel id="add-asset" {
+                    section.panel.asset-form-panel.asset-drawer id="add-asset" {
                         div.panel-header {
                             div {
                                 h2 { (t.assets_add_heading) }
@@ -1474,6 +2035,13 @@ pub fn assets(
                                         }
                                     }
                                 }
+                                div.field-wide {
+                                    span.metric-label { (t.assets_authentication) }
+                                    div.status-row style="margin-top:8px;" {
+                                        span.status-chip.good { "SSH Key" }
+                                        span.status-chip.neutral { "Password" }
+                                    }
+                                }
                                 label.field.field-wide {
                                     (t.field_description)
                                     textarea name="description" {}
@@ -1482,6 +2050,17 @@ pub fn assets(
                             datalist id="asset-tags-list" {
                                 @for tag in all_tags {
                                     option value=(tag) {}
+                                }
+                            }
+                            div {
+                                span.metric-label { (t.assets_assigned_tags) }
+                                div.tag-list style="margin-top:8px;" {
+                                    @for tag in all_tags.iter().take(4) {
+                                        span.tag { (tag) }
+                                    }
+                                    @if all_tags.is_empty() {
+                                        span.status-pill.neutral { (t.untagged) }
+                                    }
                                 }
                             }
                             div.terminal-strip {
@@ -1655,6 +2234,67 @@ fn asset_tunnel_target(asset: &Asset) -> String {
     } else {
         asset.hostname.clone()
     }
+}
+
+fn asset_direct_target(asset: &Asset) -> &str {
+    if asset
+        .name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        &asset.name
+    } else {
+        &asset.hostname
+    }
+}
+
+fn asset_connect_command(asset: &Asset, ssh_port: u16) -> String {
+    asset_tunnel_command(asset, ssh_port)
+        .unwrap_or_else(|| format!("ssh -p {ssh_port} {}@hop-host", asset_direct_target(asset)))
+}
+
+fn asset_status(asset: &Asset, sessions: &[Session]) -> AssetStatus {
+    sessions
+        .iter()
+        .find(|session| session_matches_asset(session, asset))
+        .map(|session| match session.status.as_str() {
+            "failed" => AssetStatus::Degraded,
+            "ok" | "started" => AssetStatus::Online,
+            _ => AssetStatus::Unknown,
+        })
+        .unwrap_or(AssetStatus::Unknown)
+}
+
+fn session_matches_asset(session: &Session, asset: &Asset) -> bool {
+    session.asset_name.as_deref() == Some(asset.name.as_str())
+        || (session.target_host.as_deref() == Some(asset.hostname.as_str())
+            && session.target_port == Some(asset.port))
+}
+
+fn asset_status_pill(t: &L10n, status: AssetStatus) -> Markup {
+    let (class_name, label) = match status {
+        AssetStatus::Online => ("status-pill online", t.assets_status_online),
+        AssetStatus::Degraded => ("status-pill degraded", t.assets_status_degraded),
+        AssetStatus::Unknown => ("status-pill unknown", t.assets_status_unknown),
+    };
+    html! {
+        span class=(class_name) { (label) }
+    }
+}
+
+fn asset_status_option(label: &str, value: &str, selected: Option<&str>) -> Markup {
+    html! {
+        option value=(value) selected[selected.unwrap_or_default() == value] { (label) }
+    }
+}
+
+fn asset_activity_summary(t: &L10n, asset: &Asset, sessions: &[Session]) -> String {
+    sessions
+        .iter()
+        .find(|session| session_matches_asset(session, asset))
+        .and_then(|session| session.started_at.as_ref())
+        .map(|started| format!("last seen {started}"))
+        .unwrap_or_else(|| t.asset_activity_placeholder.to_string())
 }
 
 pub fn credentials(t: &L10n, items: &[Credential], csrf_token: &str) -> Markup {
@@ -2133,11 +2773,17 @@ pub fn known_hosts(t: &L10n, items: &[KnownHost], csrf_token: &str) -> Markup {
     )
 }
 
-pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
-    layout(
+pub fn sessions(t: &L10n, items: &[Session], filters: SessionFilters<'_>) -> Markup {
+    layout_with_shell(
         t.sessions_title,
         "sessions",
         t,
+        Some(
+            items
+                .iter()
+                .filter(|session| is_active_session(session))
+                .count(),
+        ),
         html! {
             div.audit-page {
                 div.console-hero {
@@ -2147,18 +2793,40 @@ pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
                     }
                     div.console-actions {
                         span.status-chip.danger { (items.iter().filter(|session| session.status == "failed").count()) " " (t.sessions_failed_suffix) }
-                        span.status-chip.good { (items.len()) " " (t.sessions_recorded_suffix) }
-                        a.ghost-button href="/sessions" { (t.sessions_live_tail) }
+                        span.status-chip.good { "0 " (t.sessions_replayable_suffix) }
+                        button.disabled-button type="button" disabled title=(t.sessions_replay_unavailable_intro) { (t.export_csv) }
+                        button.disabled-button type="button" disabled title=(t.sessions_replay_unavailable_intro) { (t.sessions_create_report) }
                     }
+                }
+                form.audit-search-form method="get" action="/sessions" {
+                    input type="search" name="q" value=(filters.q.unwrap_or("")) placeholder=(t.sessions_search_placeholder) aria-label=(t.sessions_search_placeholder);
+                    label.field {
+                        (t.sessions_range_label)
+                        select name="range" {
+                            option value="latest" selected[filters.range.unwrap_or("latest") == "latest"] { (t.sessions_range_latest) }
+                            option value="24h" selected[filters.range == Some("24h")] { "24h" }
+                        }
+                    }
+                    label.field {
+                        (t.sessions_user_label)
+                        input name="user" value=(filters.user.unwrap_or("")) placeholder="all";
+                    }
+                    label.field {
+                        (t.sessions_event_label)
+                        input name="event" value=(filters.event.unwrap_or("")) placeholder="all";
+                    }
+                    label.field {
+                        (t.sessions_target_label)
+                        input name="target" value=(filters.target.unwrap_or("")) placeholder=(t.sessions_target_all);
+                    }
+                    button type="submit" { (t.sessions_live_tail) }
                 }
                 div.audit-toolbar {
                     div.terminal-strip {
-                        span { "hop admin sessions --limit 100" }
-                    }
-                    div.status-row {
-                        span.command-chip { (t.sessions_range_latest) }
-                        span.command-chip { (t.sessions_user_all) }
-                        span.command-chip { (t.sessions_event_all) }
+                        span.status-dot.danger {}
+                        span.status-dot.warn {}
+                        span.status-dot.good {}
+                        span { (t.sessions_terminal_title) }
                     }
                 }
                 div.audit-grid {
@@ -2176,9 +2844,9 @@ pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
                                         th { (t.started_column) }
                                         th { (t.key_column) }
                                         th { (t.asset_column) }
-                                        th { (t.mode_column) }
+                                        th { (t.sessions_event_label) }
                                         th { (t.error_column) }
-                                        th { (t.field_status) }
+                                        th { "" }
                                     }
                                 }
                                 tbody {
@@ -2195,7 +2863,10 @@ pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
                                                 }
                                             }
                                             td { (session.asset_name.as_deref().unwrap_or("-")) }
-                                            td { span.audit-event { (session_event_label(session)) } }
+                                            td {
+                                                span.audit-event { (session_event_label(session)) }
+                                                span.subtle { " " (session.mode) }
+                                            }
                                             td {
                                                 div.primary-cell {
                                                     span.mono {
@@ -2214,12 +2885,8 @@ pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
                                                 }
                                             }
                                             td {
-                                                @if session.status == "failed" {
-                                                    span.status-pill.danger { (session.status) }
-                                                } @else if session.status == "ok" {
-                                                    span.status-pill { (session.status) }
-                                                } @else {
-                                                    span.status-pill.neutral { (session.status) }
+                                                a.ghost-button.compact-button href=(format!("/sessions?q={}", url_query_value(&session.id))) title=(t.sessions_replay_unavailable_intro) {
+                                                    (PreEscaped(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg>"#))
                                                 }
                                             }
                                         }
@@ -2232,25 +2899,52 @@ pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
                         section.panel {
                             div.panel-header {
                                 div {
-                                    h2 { (t.sessions_summary_heading) }
+                                    h2 { (t.sessions_security_incidents_heading) }
                                     p { (t.sessions_summary_intro) }
                                 }
                             }
                             div.incident-list {
                                 div.incident-item {
                                     span.status-dot.danger {}
-                                    b { (t.sessions_failed_heading) }
-                                    span { (items.iter().filter(|session| session.status == "failed").count()) }
+                                    b { (t.sessions_policy_denies_heading) }
+                                    span { (items.iter().filter(|session| session.error.as_deref().unwrap_or("").contains("denied")).count()) }
                                 }
                                 div.incident-item {
                                     span.status-dot.warn {}
-                                    b { (t.sessions_direct_heading) }
-                                    span { (items.iter().filter(|session| session.mode == "direct").count()) }
+                                    b { (t.sessions_failed_sources_heading) }
+                                    span { (items.iter().filter(|session| session.status == "failed").count()) }
                                 }
                                 div.incident-item {
                                     span.status-dot.good {}
-                                    b { (t.sessions_completed_heading) }
-                                    span { (items.iter().filter(|session| session.ended_at.is_some()).count()) }
+                                    b { (t.sessions_replay_reviews_heading) }
+                                    span { "0" }
+                                }
+                            }
+                        }
+                        section.panel {
+                            div.panel-header {
+                                div {
+                                    h2 { (t.sessions_replay_unavailable_heading) }
+                                    p { (t.sessions_replay_unavailable_intro) }
+                                }
+                            }
+                            div.replay-box {
+                                span.status-pill.neutral { (t.sessions_replay_unavailable_heading) }
+                                div.replay-progress { span style="width:0%;" {} }
+                                p.fine-print { (t.sessions_replay_unavailable_intro) }
+                            }
+                        }
+                        section.panel {
+                            div.panel-header {
+                                div {
+                                    h2 { (t.sessions_policy_feed_heading) }
+                                }
+                            }
+                            div.feed-list {
+                                div.feed-item {
+                                    span.status-dot.warn {}
+                                    b { (t.sessions_policy_feed_unavailable) }
+                                    span { "0" }
                                 }
                             }
                         }
@@ -2262,7 +2956,20 @@ pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
 }
 
 fn session_event_label(session: &Session) -> &str {
-    session.mode.as_str()
+    if session.status == "failed" {
+        return "AUTH_FAIL";
+    }
+    if session.status == "started" {
+        return match session.mode.as_str() {
+            "tcp-forward" => "PORT_FORWARD",
+            _ => "SESSION_START",
+        };
+    }
+    match session.mode.as_str() {
+        "tcp-forward" => "PORT_FORWARD",
+        "sftp" => "FILE_COPY",
+        _ => "SESSION_END",
+    }
 }
 
 pub fn import_export(t: &L10n, csrf_token: &str, summary: Option<&ImportSummary>) -> Markup {
@@ -2344,18 +3051,34 @@ pub fn import_export(t: &L10n, csrf_token: &str, summary: Option<&ImportSummary>
 }
 
 fn nav_link(href: &str, label: &str, icon: &str, active: bool) -> Markup {
+    nav_link_with_badge(href, label, icon, active, None)
+}
+
+fn nav_link_with_badge(
+    href: &str,
+    label: &str,
+    icon: &str,
+    active: bool,
+    badge: Option<usize>,
+) -> Markup {
     if active {
         html! {
-            a class="nav-link active" href=(href) aria-current="page" {
+            a class="nav-link active" href=(href) aria-current="page" title=(label) {
                 (PreEscaped(icon))
-                (label)
+                span.nav-label { (label) }
+                @if let Some(count) = badge {
+                    span.nav-badge.status-pill title=(format!("{count} {}", label)) { (count) }
+                }
             }
         }
     } else {
         html! {
-            a class="nav-link" href=(href) {
+            a class="nav-link" href=(href) title=(label) {
                 (PreEscaped(icon))
-                (label)
+                span.nav-label { (label) }
+                @if let Some(count) = badge {
+                    span.nav-badge.status-pill title=(format!("{count} {}", label)) { (count) }
+                }
             }
         }
     }
@@ -2383,6 +3106,40 @@ fn csrf_field(csrf_token: &str) -> Markup {
     html! {
         input type="hidden" name="csrf_token" value=(csrf_token);
     }
+}
+
+fn shell_script() -> &'static str {
+    r#"
+(function(){
+  const key='hop-admin-sidebar-collapsed';
+  const body=document.body;
+  const button=document.querySelector('[data-sidebar-toggle]');
+  const apply=(collapsed)=>{
+    body.classList.toggle('sidebar-collapsed', collapsed);
+    if(button){
+      button.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
+      button.setAttribute('aria-label', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+      button.setAttribute('title', collapsed ? 'Expand sidebar' : 'Collapse sidebar');
+    }
+  };
+  apply(localStorage.getItem(key)==='1');
+  if(button){
+    button.addEventListener('click',()=>{
+      const collapsed=!body.classList.contains('sidebar-collapsed');
+      localStorage.setItem(key, collapsed ? '1' : '0');
+      apply(collapsed);
+    });
+  }
+  document.querySelectorAll('[data-copy-command]').forEach((button)=>{
+    button.addEventListener('click', async ()=>{
+      const command=button.getAttribute('data-copy-command') || '';
+      if(navigator.clipboard && command){
+        await navigator.clipboard.writeText(command);
+      }
+    });
+  });
+})();
+"#
 }
 
 fn language_switch_href(locale: Locale, active: &str) -> String {
@@ -2431,7 +3188,19 @@ mod tests {
 
     #[test]
     fn mutating_forms_include_csrf_token() {
-        let rendered = assets(&EN, &[], &[], "csrf-123", None, &[], 2222).into_string();
+        let rendered = assets(
+            &EN,
+            AssetsData {
+                items: &[],
+                credentials: &[],
+                sessions: &[],
+                csrf_token: "csrf-123",
+                filters: AssetFilters::default(),
+                all_tags: &[],
+                ssh_port: 2222,
+            },
+        )
+        .into_string();
 
         assert!(rendered.contains(r#"name="csrf_token""#));
         assert!(rendered.contains(r#"value="csrf-123""#));
@@ -2460,7 +3229,13 @@ mod tests {
         assert!(rendered.contains("--control: #3b82f6"));
         assert!(rendered.contains("--console-green: #22c55e"));
         assert!(rendered.contains("font-family: Inter, system-ui"));
+        assert!(rendered.contains(".sidebar-collapse-toggle"));
+        assert!(rendered.contains(".admin-shell.sidebar-collapsed"));
         assert!(rendered.contains(".mobile-tabbar"));
+        assert!(rendered.contains(".mobile-top-header"));
+        assert!(rendered.contains(".mobile-overview-grid"));
+        assert!(rendered.contains(".live-session-card"));
+        assert!(rendered.contains(".heatmap"));
         assert!(rendered.contains("@media (prefers-reduced-motion: reduce)"));
     }
 
@@ -2477,43 +3252,122 @@ mod tests {
         let rendered =
             layout(ZH.assets_title, "assets", &ZH, html! { p { "content" } }).into_string();
 
-        assert!(rendered.contains("概览"));
+        assert!(rendered.contains(">Dash<"));
         assert!(rendered.contains("资产"));
-        assert!(rendered.contains("审计日志"));
-        assert!(rendered.contains("设置"));
-        assert!(!rendered.contains(">Dash<"));
-        assert!(!rendered.contains(">Assets<"));
+        assert!(rendered.contains(">SSH<"));
+        assert!(rendered.contains("审计"));
+        assert!(rendered.contains("mobile-segments"));
         assert!(!rendered.contains(">Audit<"));
         assert!(!rendered.contains(">Admin<"));
     }
 
     #[test]
     fn overview_renders_metric_tiles_with_labels() {
-        let rendered = overview(&EN, 2, 3, 4, 5).into_string();
+        let assets = vec![asset("prod-api-01", "10.42.1.12", &["prod"])];
+        let credentials = vec![credential("cred-1")];
+        let keys = vec![authorized_key(AssetAccessMode::All)];
+        let known_hosts = vec![known_host("prod-api-01", 22)];
+        let sessions = vec![
+            session(
+                "session-1",
+                "started",
+                "alice",
+                "prod-api-01",
+                Some("10.42.0.18"),
+            ),
+            session(
+                "session-2",
+                "failed",
+                "blocked",
+                "staging-bastion",
+                Some("203.0.113.9"),
+            ),
+        ];
+        let active_session_ids = vec!["session-1".to_string()];
+        let rendered = overview(
+            &EN,
+            DashboardData {
+                assets: &assets,
+                credentials: &credentials,
+                keys: &keys,
+                known_hosts: &known_hosts,
+                sessions: &sessions,
+                active_session_ids: &active_session_ids,
+                csrf_token: "csrf-123",
+            },
+        )
+        .into_string();
 
         assert!(rendered.contains(r#"class="dashboard-page""#));
         assert!(rendered.contains(r#"class="metric-grid""#));
         assert!(rendered.contains(r#"class="metric-value""#));
         assert!(rendered.contains("Bastion posture"));
         assert!(rendered.contains("Total servers"));
-        assert!(rendered.contains("Recent sessions"));
-        assert!(rendered.contains("5 recorded"));
-        assert!(!rendered.contains("5 active"));
-        assert!(!rendered.contains("Live Sessions"));
-        assert!(!rendered.contains("Activity Heatmap"));
+        assert!(rendered.contains("Active SSH Sessions"));
+        assert!(rendered.contains("Failed sessions"));
+        assert!(rendered.contains("Stored credentials"));
+        assert!(rendered.contains("Live Sessions"));
+        assert!(rendered.contains(r#"action="/sessions/session-1/terminate""#));
+        assert!(rendered.contains(r#"action="/sessions/terminate-all""#));
+        assert!(rendered.contains(r#"name="csrf_token" value="csrf-123""#));
+        assert!(rendered.contains("Recent Connection Frequency"));
+        assert!(rendered.contains("Activity Heatmap"));
+        assert!(rendered.contains("Security Posture"));
+        assert!(rendered.contains("Assets without managed credentials"));
+        assert!(rendered.contains("Known host records"));
+        assert!(rendered.contains("Runtime Load"));
+        assert!(rendered.contains("No runtime metrics source configured"));
+        assert!(rendered.contains("mobile-overview-grid"));
+        assert!(rendered.contains("Security Feed"));
+        assert!(!rendered.contains("Total Users"));
+        assert!(!rendered.contains("MFA enforced"));
         assert!(!rendered.contains("JIT approvals pending"));
-        assert!(!rendered.contains("Failed login watch"));
     }
 
     #[test]
     fn assets_page_renders_tag_filters_and_bulk_editor() {
         let tags = vec!["prod".to_string(), "web".to_string()];
-        let rendered = assets(&EN, &[], &[], "csrf-123", Some("prod"), &tags, 2222).into_string();
+        let mut item = asset("prod-api-01", "10.42.1.12", &["prod", "web"]);
+        item.credential_id = Some("cred-1".to_string());
+        let sessions = vec![session(
+            "session-1",
+            "ok",
+            "alice",
+            "prod-api-01",
+            Some("10.42.0.18"),
+        )];
+        let rendered = assets(
+            &EN,
+            AssetsData {
+                items: &[item],
+                credentials: &[],
+                sessions: &sessions,
+                csrf_token: "csrf-123",
+                filters: AssetFilters {
+                    q: Some("prod"),
+                    status: Some("online"),
+                    tag: Some("prod"),
+                    port: Some(22),
+                },
+                all_tags: &tags,
+                ssh_port: 2222,
+            },
+        )
+        .into_string();
 
         assert!(rendered.contains(r#"class="assets-page""#));
         assert!(rendered.contains("Inventory, connectivity, and assigned access tags."));
         assert!(rendered.contains("Server inventory"));
         assert!(rendered.contains("Add Asset"));
+        assert!(rendered.contains(r#"name="q""#));
+        assert!(rendered.contains(r#"name="status""#));
+        assert!(rendered.contains(r#"name="port""#));
+        assert!(rendered.contains("IP address"));
+        assert!(rendered.contains("Connect"));
+        assert!(rendered.contains("ssh -p 2222 prod-api-01@hop-host"));
+        assert!(rendered.contains("Online"));
+        assert!(rendered.contains("Add Asset"));
+        assert!(rendered.contains("asset-drawer"));
         assert!(rendered.contains(r#"href="/assets?tag=prod""#));
         assert!(rendered.contains(r#"action="/assets/bulk-tags""#));
         assert!(rendered.contains(r#"list="asset-tags-list""#));
@@ -2535,18 +3389,36 @@ mod tests {
             started_at: Some("2026-06-17T14:39:12Z".to_string()),
             ended_at: None,
         }];
-        let rendered = sessions(&EN, &session_items).into_string();
+        let rendered = sessions(
+            &EN,
+            &session_items,
+            SessionFilters {
+                q: Some("alice"),
+                range: Some("24h"),
+                user: Some("all"),
+                event: Some("all"),
+                target: Some("prod"),
+            },
+        )
+        .into_string();
 
         assert!(rendered.contains(r#"class="audit-page""#));
-        assert!(rendered.contains("Audit Logs"));
+        assert!(rendered.contains("Audit Logs / Replay"));
         assert!(rendered.contains("Forensic timeline"));
-        assert!(rendered.contains("hop admin sessions --limit 100"));
+        assert!(rendered.contains("audit://hop-rs/session-retention --tail"));
+        assert!(rendered.contains(r#"name="q""#));
+        assert!(rendered.contains(r#"name="target""#));
+        assert!(rendered.contains("Export CSV"));
+        assert!(rendered.contains("Create Report"));
         assert!(rendered.contains("direct"));
         assert!(rendered.contains("password rejected"));
-        assert!(!rendered.contains("AUTH_FAIL"));
+        assert!(rendered.contains("AUTH_FAIL"));
+        assert!(rendered.contains("Security Incidents"));
+        assert!(rendered.contains("Replay unavailable"));
+        assert!(rendered.contains("Policy Feed"));
+        assert!(rendered.contains("No command capture or policy engine is configured"));
         assert!(!rendered.contains("Replay: latest SSH trace"));
         assert!(!rendered.contains("sudo systemctl reload postgres"));
-        assert!(!rendered.contains("Policy Feed"));
     }
 
     #[test]
@@ -2556,7 +3428,19 @@ mod tests {
         rdp.preset = Some(ASSET_PRESET_RDP.to_string());
         rdp.port = 3389;
 
-        let rendered = assets(&EN, &[rdp], &[], "csrf-123", None, &[], 2222).into_string();
+        let rendered = assets(
+            &EN,
+            AssetsData {
+                items: &[rdp],
+                credentials: &[],
+                sessions: &[],
+                csrf_token: "csrf-123",
+                filters: AssetFilters::default(),
+                all_tags: &[],
+                ssh_port: 2222,
+            },
+        )
+        .into_string();
 
         assert!(rendered.contains(r#"name="protocol""#));
         assert!(rendered.contains(r#"value="rdp""#));
@@ -2580,7 +3464,19 @@ mod tests {
             item.protocol = ASSET_PROTOCOL_TCP.to_string();
             item.preset = Some(preset.to_string());
             item.port = remote_port;
-            let rendered = assets(&EN, &[item], &[], "csrf-123", None, &[], 2222).into_string();
+            let rendered = assets(
+                &EN,
+                AssetsData {
+                    items: &[item],
+                    credentials: &[],
+                    sessions: &[],
+                    csrf_token: "csrf-123",
+                    filters: AssetFilters::default(),
+                    all_tags: &[],
+                    ssh_port: 2222,
+                },
+            )
+            .into_string();
 
             assert!(rendered.contains(&format!(r#"value="{preset}""#)));
             assert!(rendered.contains(&format!(
@@ -2653,6 +3549,52 @@ mod tests {
             credential_id: None,
             created_at: None,
             updated_at: None,
+        }
+    }
+
+    fn credential(id: &str) -> Credential {
+        Credential {
+            id: id.to_string(),
+            name: id.to_string(),
+            username: "deploy".to_string(),
+            auth_type: "key".to_string(),
+            password_enc: None,
+            private_key_enc: Some("enc".to_string()),
+            passphrase_enc: None,
+            created_at: None,
+        }
+    }
+
+    fn known_host(hostname: &str, port: i64) -> KnownHost {
+        KnownHost {
+            hostname: hostname.to_string(),
+            port,
+            key_type: "ssh-ed25519".to_string(),
+            fingerprint: "SHA256:host".to_string(),
+            first_seen: Some("2026-06-23T10:00:00Z".to_string()),
+        }
+    }
+
+    fn session(
+        id: &str,
+        status: &str,
+        key_name: &str,
+        asset_name: &str,
+        client_ip: Option<&str>,
+    ) -> Session {
+        Session {
+            id: id.to_string(),
+            key_finger: "SHA256:test".to_string(),
+            key_name: Some(key_name.to_string()),
+            mode: "direct".to_string(),
+            asset_name: Some(asset_name.to_string()),
+            target_host: Some("10.42.1.12".to_string()),
+            target_port: Some(22),
+            client_ip: client_ip.map(ToString::to_string),
+            status: status.to_string(),
+            error: (status == "failed").then(|| "password rejected".to_string()),
+            started_at: Some("2026-06-23T10:00:00Z".to_string()),
+            ended_at: (status != "started").then(|| "2026-06-23T10:04:00Z".to_string()),
         }
     }
 

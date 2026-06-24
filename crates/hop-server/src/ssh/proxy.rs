@@ -12,9 +12,13 @@ use russh::{server, Channel};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
+    sync::mpsc,
 };
 
-use super::server::{audit_denied_attempt, AuthInfo, AUTHORIZATION_DENIED};
+use super::{
+    server::{audit_denied_attempt, AuthInfo, AUTHORIZATION_DENIED},
+    session_registry::{ActiveSessionRegistry, TERMINATED_BY_ADMIN},
+};
 
 #[derive(Debug, Clone, Copy)]
 enum RelayPeer {
@@ -124,6 +128,7 @@ where
 pub async fn bridge_direct_tcpip(
     channel: Channel<server::Msg>,
     db: HopDb,
+    active_sessions: ActiveSessionRegistry,
     auth: AuthInfo,
     asset: Asset,
     client_ip: Option<String>,
@@ -153,11 +158,23 @@ pub async fn bridge_direct_tcpip(
         })
         .await?;
 
+    let (terminate_tx, mut terminate_rx) = mpsc::unbounded_channel();
+    active_sessions
+        .register(session.id.clone(), terminate_tx)
+        .await;
+    let mut terminated = false;
     let result = async {
         let port = validate_tcp_port(asset.port)?;
-        let stream = TcpStream::connect((asset.hostname.as_str(), port))
-            .await
-            .with_context(|| format!("connect {}:{}", asset.hostname, asset.port))?;
+        let stream = tokio::select! {
+            Some(()) = terminate_rx.recv() => {
+                terminated = true;
+                let _ = channel.close().await;
+                return Ok(());
+            }
+            stream = TcpStream::connect((asset.hostname.as_str(), port)) => {
+                stream.with_context(|| format!("connect {}:{}", asset.hostname, asset.port))?
+            }
+        };
         let (mut tcp_read, mut tcp_write) = stream.into_split();
         let (mut channel_read, channel_write) = channel.split();
         let mut channel_reader = channel_read.make_reader();
@@ -166,6 +183,12 @@ pub async fn bridge_direct_tcpip(
         let target_to_client_bytes = Arc::new(AtomicU64::new(0));
 
         tokio::select! {
+            Some(()) = terminate_rx.recv() => {
+                terminated = true;
+                let _ = tcp_write.shutdown().await;
+                let _ = channel_write.eof().await;
+                let _ = channel_write.close().await;
+            }
             res = relay_copy(
                 &mut channel_reader,
                 &mut tcp_write,
@@ -208,7 +231,12 @@ pub async fn bridge_direct_tcpip(
     }
     .await;
 
+    active_sessions.unregister(&session.id).await;
     match &result {
+        _ if terminated => {
+            db.finish_session(&session.id, "terminated", Some(TERMINATED_BY_ADMIN))
+                .await?
+        }
         Ok(_) => db.finish_session(&session.id, "ok", None).await?,
         Err(err) => {
             db.finish_session(&session.id, "failed", Some(&err.to_string()))
