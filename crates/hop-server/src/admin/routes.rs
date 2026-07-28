@@ -334,6 +334,7 @@ struct CsrfForm {
 #[derive(Deserialize)]
 struct AssetForm {
     csrf_token: String,
+    return_to: Option<String>,
     name: String,
     protocol: Option<String>,
     preset: Option<String>,
@@ -363,19 +364,26 @@ async fn create_asset(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
+    let return_to = assets_return_to(form.return_to.as_deref());
     let Some(asset) = new_asset_from_form(form) else {
-        return Redirect::to("/assets").into_response();
+        return Redirect::to(&return_to).into_response();
     };
     match state.db.add_asset(asset).await {
-        Ok(_) => Redirect::to("/assets").into_response(),
+        Ok(_) => Redirect::to(&return_to).into_response(),
         Err(err) => admin_db_error("create asset", err),
     }
+}
+
+#[derive(Default, Deserialize)]
+struct EditAssetQuery {
+    return_to: Option<String>,
 }
 
 async fn edit_asset(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(query): Query<EditAssetQuery>,
 ) -> Response {
     let t = request_l10n(&headers);
     let Ok(session) = guard(&headers, &state).await else {
@@ -393,6 +401,7 @@ async fn edit_asset(
         Err(err) => return admin_db_error("list assets for asset edit", err),
     };
     let all_tags = collect_tags(&all_assets);
+    let return_to = assets_return_to(query.return_to.as_deref());
     Html(
         html::edit_asset(
             t,
@@ -401,6 +410,7 @@ async fn edit_asset(
             &session.csrf_token,
             &all_tags,
             state.ssh_port,
+            &return_to,
         )
         .into_string(),
     )
@@ -419,11 +429,12 @@ async fn update_asset(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
+    let return_to = assets_return_to(form.return_to.as_deref());
     let Some(asset) = new_asset_from_form(form) else {
-        return Redirect::to("/assets").into_response();
+        return Redirect::to(&return_to).into_response();
     };
     match state.db.update_asset(&id, asset).await {
-        Ok(()) => Redirect::to("/assets").into_response(),
+        Ok(()) => Redirect::to(&return_to).into_response(),
         Err(err) => admin_db_error("update asset", err),
     }
 }
@@ -1244,6 +1255,16 @@ fn filter_assets(
         .collect()
 }
 
+fn assets_return_to(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| {
+            (*value == "/assets" || value.starts_with("/assets?")) && !value.contains(['\r', '\n'])
+        })
+        .unwrap_or("/assets")
+        .to_string()
+}
+
 fn asset_matches_query(asset: &hop_core::Asset, query: &str) -> bool {
     let query = query.to_ascii_lowercase();
     [
@@ -1409,6 +1430,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn asset_return_location_accepts_only_asset_list_urls() {
+        assert_eq!(
+            assets_return_to(Some("/assets?tag=prod&q=api")),
+            "/assets?tag=prod&q=api"
+        );
+        assert_eq!(assets_return_to(Some("/credentials")), "/assets");
+        assert_eq!(assets_return_to(Some("//example.com")), "/assets");
+        assert_eq!(assets_return_to(Some("/assets\r\nLocation: /")), "/assets");
+    }
+
     #[tokio::test]
     async fn admin_router_serves_built_frontend_assets() {
         let dist = tempfile::tempdir().unwrap();
@@ -1483,6 +1515,7 @@ mod tests {
     fn asset_form_clears_credentials_for_rdp_protocol() {
         let asset = new_asset_from_form(AssetForm {
             csrf_token: "csrf-123".to_string(),
+            return_to: None,
             name: "win-rdp".to_string(),
             protocol: Some("rdp".to_string()),
             preset: None,

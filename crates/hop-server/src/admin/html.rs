@@ -1370,6 +1370,7 @@ pub fn assets(
         .map(str::trim)
         .filter(|query| !query.is_empty());
     let has_filters = selected_tag.is_some() || search_query.is_some();
+    let return_to = assets_filter_href(selected_tag, search_query);
 
     layout(
         t.assets_title,
@@ -1516,11 +1517,26 @@ pub fn assets(
                                             }
                                             td { span.os-badge { (asset_protocol_label(t, asset_kind(asset))) } }
                                             td.target-cell {
-                                                code
-                                                    class="target-address"
-                                                    tabindex="0"
-                                                    title=(format!("{}:{}", asset.hostname, asset.port)) {
-                                                    (asset.hostname) ":" (asset.port)
+                                                @let target = format!("{}:{}", asset.hostname, asset.port);
+                                                div.target-copy-group {
+                                                    code
+                                                        class="target-address"
+                                                        tabindex="0"
+                                                        title=(target) {
+                                                        (target)
+                                                    }
+                                                    button
+                                                        class="target-copy-button ghost-button"
+                                                        type="button"
+                                                        data-copy-value=(target)
+                                                        data-copy-default=(t.asset_copy_target)
+                                                        data-copy-success=(t.asset_copy_success)
+                                                        data-copy-failed=(t.asset_copy_failed)
+                                                        aria-label=(format!("{}: {}", t.asset_copy_target, target))
+                                                        aria-live="polite"
+                                                        onclick="window.copyAssetTarget(this)" {
+                                                        (t.asset_copy_target)
+                                                    }
                                                 }
                                             }
                                             td {
@@ -1542,7 +1558,28 @@ pub fn assets(
                                             }
                                             td {
                                                 div.action-row {
-                                                    a class="ghost-button" href=(format!("/assets/{}/edit", asset.id)) { (t.edit) }
+                                                    a
+                                                        id=(format!("edit-asset-{}", asset.id))
+                                                        class="ghost-button"
+                                                        href=(format!(
+                                                            "/assets/{}/edit?return_to={}",
+                                                            asset.id,
+                                                            url_query_value(&return_to)
+                                                        ))
+                                                        aria-haspopup="dialog"
+                                                        aria-controls="edit-asset-dialog"
+                                                        data-asset-id=(asset.id)
+                                                        data-asset-name=(asset.name)
+                                                        data-asset-protocol=(asset_kind(asset))
+                                                        data-asset-hostname=(asset.hostname)
+                                                        data-asset-port=(asset.port)
+                                                        data-asset-tags=(asset.tags.join(", "))
+                                                        data-asset-credential=(asset.credential_id.as_deref().unwrap_or(""))
+                                                        data-asset-description=(asset.description.as_deref().unwrap_or(""))
+                                                        data-return-to=(return_to)
+                                                        onclick="window.openAssetEditor(this);return false" {
+                                                        (t.edit)
+                                                    }
                                                     button class="danger" type="submit" formaction=(format!("/assets/{}/delete", asset.id)) { (t.delete) }
                                                 }
                                             }
@@ -1604,50 +1641,54 @@ pub fn assets(
                         }
                         form method="post" action="/assets" {
                             (csrf_field(csrf_token))
-                            div.grid {
-                                label.field {
-                                    (t.field_name)
-                                    input name="name" required autofocus;
-                                }
-                                label.field {
-                                    (t.field_protocol)
-                                    select name="protocol" onchange=(asset_protocol_onchange()) {
-                                        (asset_protocol_options(t, ASSET_PROTOCOL_SSH))
-                                    }
-                                }
-                                label.field {
-                                    (t.field_hostname)
-                                    input name="hostname" required;
-                                }
-                                label.field {
-                                    (t.field_port)
-                                    input name="port" type="number" value="22" required;
-                                }
-                                p class="fine-print field-wide" data-rdp-port-hint hidden { (t.rdp_port_hint) }
-                                label.field {
-                                    (t.field_tags)
-                                    input name="tags" placeholder="prod, web" list="asset-tags-list";
-                                }
-                                label.field {
-                                    (t.field_credential)
-                                    select name="credential_id" {
-                                        option value="" { (t.proxy_only) }
-                                        @for credential in credentials {
-                                            option value=(credential.id) { (credential.name) " (" (credential.username) ")" }
-                                        }
-                                    }
-                                }
-                                label.field.field-wide {
-                                    (t.field_description)
-                                    textarea name="description" {}
-                                }
-                            }
+                            input type="hidden" name="return_to" value=(return_to);
+                            (asset_form_fields(t, None, credentials, true))
                             div.terminal-strip {
                                 span { "$" }
                                 span { "ssh -p 22 hop@target.internal" }
                             }
                             div.button-row.asset-drawer-actions {
                                 button type="submit" { (t.save_asset) }
+                                button
+                                    class="ghost-button"
+                                    type="button"
+                                    onclick="this.closest('dialog').close()" {
+                                    (t.assets_close_drawer)
+                                }
+                            }
+                        }
+                    }
+                }
+                dialog
+                    class="asset-dialog"
+                    id="edit-asset-dialog"
+                    aria-labelledby="edit-asset-title"
+                    onclick="if(event.target===this)this.close()"
+                    onkeydown="if(event.key==='Escape'){event.preventDefault();this.close()}"
+                    onclose="const target=document.getElementById(this.dataset.returnFocusId);if(target)target.focus()" {
+                    div.asset-drawer {
+                        div.asset-drawer-header {
+                            div {
+                                h2 id="edit-asset-title" { (t.edit_asset_title) }
+                                p { (t.edit_asset_intro) }
+                            }
+                            div.asset-drawer-header-actions {
+                                span.status-chip { (t.assets_edit_status) }
+                                button
+                                    class="drawer-close ghost-button"
+                                    type="button"
+                                    aria-label=(t.assets_close_drawer)
+                                    onclick="this.closest('dialog').close()" {
+                                    "×"
+                                }
+                            }
+                        }
+                        form method="post" action="/assets" data-edit-asset-form {
+                            (csrf_field(csrf_token))
+                            input type="hidden" name="return_to" value=(return_to);
+                            (asset_form_fields(t, None, credentials, true))
+                            div.button-row.asset-drawer-actions {
+                                button type="submit" { (t.save_changes) }
                                 button
                                     class="ghost-button"
                                     type="button"
@@ -1675,6 +1716,54 @@ pub fn assets(
                             };
                             window.addEventListener('pageshow', window.syncAssetBulkControls);
                             window.syncAssetBulkControls();
+
+                            window.openAssetEditor = (trigger) => {
+                                const dialog = document.getElementById('edit-asset-dialog');
+                                const editForm = dialog.querySelector('[data-edit-asset-form]');
+                                const fields = editForm.elements;
+                                editForm.action = `/assets/${encodeURIComponent(trigger.dataset.assetId)}`;
+                                fields.name.value = trigger.dataset.assetName;
+                                fields.protocol.value = trigger.dataset.assetProtocol;
+                                fields.hostname.value = trigger.dataset.assetHostname;
+                                fields.port.value = trigger.dataset.assetPort;
+                                fields.tags.value = trigger.dataset.assetTags;
+                                fields.credential_id.value = trigger.dataset.assetCredential;
+                                fields.description.value = trigger.dataset.assetDescription;
+                                fields.return_to.value = trigger.dataset.returnTo;
+                                const rdpHint = editForm.querySelector('[data-rdp-port-hint]');
+                                if (rdpHint) rdpHint.hidden = fields.protocol.value !== 'rdp';
+                                dialog.dataset.returnFocusId = trigger.id;
+                                dialog.showModal();
+                            };
+
+                            window.copyAssetTarget = async (button) => {
+                                const value = button.dataset.copyValue;
+                                let copied = false;
+                                try {
+                                    await navigator.clipboard.writeText(value);
+                                    copied = true;
+                                } catch (_) {
+                                    const fallback = document.createElement('textarea');
+                                    fallback.value = value;
+                                    fallback.setAttribute('readonly', '');
+                                    fallback.style.position = 'fixed';
+                                    fallback.style.opacity = '0';
+                                    document.body.appendChild(fallback);
+                                    fallback.select();
+                                    copied = document.execCommand('copy');
+                                    fallback.remove();
+                                }
+
+                                window.clearTimeout(button.copyResetTimer);
+                                button.textContent = copied
+                                    ? button.dataset.copySuccess
+                                    : button.dataset.copyFailed;
+                                button.classList.toggle('copy-success', copied);
+                                button.copyResetTimer = window.setTimeout(() => {
+                                    button.textContent = button.dataset.copyDefault;
+                                    button.classList.remove('copy-success');
+                                }, 1800);
+                            };
                         })();
                     "#))
                 }
@@ -1690,6 +1779,7 @@ pub fn edit_asset(
     csrf_token: &str,
     all_tags: &[String],
     ssh_port: u16,
+    return_to: &str,
 ) -> Markup {
     layout(
         t.edit_asset_title,
@@ -1709,46 +1799,8 @@ pub fn edit_asset(
                 }
                 form method="post" action=(format!("/assets/{}", asset.id)) {
                     (csrf_field(csrf_token))
-                    div.grid {
-                        label.field {
-                            (t.field_name)
-                            input name="name" value=(asset.name) required;
-                        }
-                        label.field {
-                            (t.field_protocol)
-                            select name="protocol" onchange=(asset_protocol_onchange()) {
-                                (asset_protocol_options(t, asset_kind(asset)))
-                            }
-                        }
-                        label.field {
-                            (t.field_hostname)
-                            input name="hostname" value=(asset.hostname) required;
-                        }
-                        label.field {
-                            (t.field_port)
-                            input name="port" type="number" value=(asset.port) required;
-                        }
-                        p class="fine-print field-wide" data-rdp-port-hint hidden[asset.preset.as_deref() != Some(ASSET_PRESET_RDP)] { (t.rdp_port_hint) }
-                        label.field {
-                            (t.field_tags)
-                            input name="tags" value=(asset.tags.join(",")) placeholder="prod, web" list="asset-tags-list";
-                        }
-                        label.field {
-                            (t.field_credential)
-                            select name="credential_id" {
-                                option value="" selected[asset.credential_id.is_none()] { (t.proxy_only) }
-                                @for credential in credentials {
-                                    option value=(credential.id) selected[asset.credential_id.as_deref() == Some(credential.id.as_str())] {
-                                        (credential.name) " (" (credential.username) ")"
-                                    }
-                                }
-                            }
-                        }
-                        label.field.field-wide {
-                            (t.field_description)
-                            textarea name="description" { (asset.description.as_deref().unwrap_or("")) }
-                        }
-                    }
+                    input type="hidden" name="return_to" value=(return_to);
+                    (asset_form_fields(t, Some(asset), credentials, true))
                     datalist id="asset-tags-list" {
                         @for tag in all_tags {
                             option value=(tag) {}
@@ -1756,7 +1808,7 @@ pub fn edit_asset(
                     }
                     div.button-row {
                         button type="submit" { (t.save_changes) }
-                        a.ghost-button href="/assets" { (t.back_to_assets) }
+                        a.ghost-button href=(return_to) { (t.back_to_assets) }
                     }
                 }
             }
@@ -1775,6 +1827,66 @@ pub fn edit_asset(
             }
         },
     )
+}
+
+fn asset_form_fields(
+    t: &L10n,
+    asset: Option<&Asset>,
+    credentials: &[Credential],
+    autofocus: bool,
+) -> Markup {
+    let name = asset.map(|item| item.name.as_str()).unwrap_or("");
+    let protocol = asset.map(asset_kind).unwrap_or(ASSET_PROTOCOL_SSH);
+    let hostname = asset.map(|item| item.hostname.as_str()).unwrap_or("");
+    let port = asset.map(|item| item.port).unwrap_or(22);
+    let tags = asset.map(|item| item.tags.join(", ")).unwrap_or_default();
+    let credential_id = asset.and_then(|item| item.credential_id.as_deref());
+    let description = asset
+        .and_then(|item| item.description.as_deref())
+        .unwrap_or("");
+
+    html! {
+        div.grid {
+            label.field {
+                (t.field_name)
+                input name="name" value=(name) required autofocus[autofocus];
+            }
+            label.field {
+                (t.field_protocol)
+                select name="protocol" onchange=(asset_protocol_onchange()) {
+                    (asset_protocol_options(t, protocol))
+                }
+            }
+            label.field {
+                (t.field_hostname)
+                input name="hostname" value=(hostname) required;
+            }
+            label.field {
+                (t.field_port)
+                input name="port" type="number" value=(port) required;
+            }
+            p class="fine-print field-wide" data-rdp-port-hint hidden[protocol != ASSET_PRESET_RDP] { (t.rdp_port_hint) }
+            label.field {
+                (t.field_tags)
+                input name="tags" value=(tags) placeholder="prod, web" list="asset-tags-list";
+            }
+            label.field {
+                (t.field_credential)
+                select name="credential_id" {
+                    option value="" selected[credential_id.is_none()] { (t.proxy_only) }
+                    @for credential in credentials {
+                        option value=(credential.id) selected[credential_id == Some(credential.id.as_str())] {
+                            (credential.name) " (" (credential.username) ")"
+                        }
+                    }
+                }
+            }
+            label.field.field-wide {
+                (t.field_description)
+                textarea name="description" { (description) }
+            }
+        }
+    }
 }
 
 fn asset_protocol_options(t: &L10n, selected: &str) -> Markup {
@@ -2800,11 +2912,65 @@ mod tests {
 
         assert!(rendered.contains(r#"class="target-address""#));
         assert!(rendered.contains("api.internal.example:22"));
+        assert!(rendered.contains(r#"class="target-copy-button ghost-button""#));
+        assert!(rendered.contains(r#"data-copy-value="api.internal.example:22""#));
+        assert!(rendered.contains(r#"aria-label="Copy target: api.internal.example:22""#));
+        assert!(rendered.contains("window.copyAssetTarget"));
         assert!(rendered.contains(r#"data-assets-bulk-controls hidden"#));
         assert!(rendered
             .contains(r#"name="tags" placeholder="prod, web" list="asset-tags-list" disabled"#));
         assert!(rendered.contains(r#"type="submit" disabled"#));
         assert!(rendered.contains("syncAssetBulkControls"));
+    }
+
+    #[test]
+    fn assets_page_opens_edit_drawer_with_current_asset_and_filter_state() {
+        let mut item = asset("api", "api.internal.example", &["prod", "web"]);
+        item.description = Some("Primary API".to_string());
+        let rendered = assets(
+            &EN,
+            &[item],
+            &[],
+            "csrf-123",
+            Some("prod"),
+            Some("api"),
+            &[],
+            2222,
+        )
+        .into_string();
+
+        assert!(rendered.contains(r#"aria-controls="edit-asset-dialog""#));
+        assert!(rendered.contains(r#"data-asset-name="api""#));
+        assert!(rendered.contains(r#"data-asset-hostname="api.internal.example""#));
+        assert!(rendered.contains(r#"data-asset-tags="prod, web""#));
+        assert!(rendered.contains(r#"data-asset-description="Primary API""#));
+        assert!(rendered
+            .contains(r#"href="/assets/api/edit?return_to=%2Fassets%3Ftag%3Dprod%26q%3Dapi""#));
+        assert!(rendered.contains(r#"<dialog class="asset-dialog" id="edit-asset-dialog""#));
+        assert!(rendered.contains(r#"data-edit-asset-form"#));
+        assert!(rendered.contains(r#"name="return_to" value="/assets?tag=prod&amp;q=api""#));
+        assert!(rendered.contains("window.openAssetEditor"));
+        assert!(rendered.contains("returnFocusId"));
+    }
+
+    #[test]
+    fn standalone_asset_edit_keeps_return_location_and_reuses_form_fields() {
+        let item = asset("api", "api.internal.example", &["prod"]);
+        let rendered = edit_asset(
+            &EN,
+            &item,
+            &[],
+            "csrf-123",
+            &["prod".to_string()],
+            2222,
+            "/assets?tag=prod",
+        )
+        .into_string();
+
+        assert!(rendered.contains(r#"name="return_to" value="/assets?tag=prod""#));
+        assert!(rendered.contains(r#"href="/assets?tag=prod""#));
+        assert!(rendered.contains(r#"name="name" value="api""#));
+        assert!(rendered.contains(r#"name="hostname" value="api.internal.example""#));
     }
 
     #[test]

@@ -81,11 +81,18 @@
 }
 
 .assets-inventory .data-table th:nth-child(4) {
-    width: 190px;
+    width: 270px;
 }
 
 .target-cell {
-    min-width: 190px;
+    min-width: 270px;
+}
+
+.target-copy-group {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
 }
 
 .target-address {
@@ -104,6 +111,19 @@
     user-select: all;
     white-space: nowrap;
     word-break: normal;
+}
+
+.target-copy-button {
+    width: auto;
+    min-width: max-content;
+    padding: 5px 8px;
+    font-size: 0.76rem;
+}
+
+.target-copy-button.copy-success {
+    border-color: #16864b;
+    background: #0d3b27;
+    color: #86efac;
 }
 
 .target-address:focus-visible {
