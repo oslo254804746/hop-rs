@@ -507,7 +507,12 @@ async fn credentials(State(state): State<AdminState>, headers: HeaderMap) -> Res
         Ok(credentials) => credentials,
         Err(err) => return admin_db_error("list credentials", err),
     };
-    Html(html::credentials(t, &credentials, &session.csrf_token).into_string()).into_response()
+    let assets = match state.db.list_assets().await {
+        Ok(assets) => assets,
+        Err(err) => return admin_db_error("list assets for credential usage", err),
+    };
+    Html(html::credentials(t, &credentials, &assets, &session.csrf_token, None).into_string())
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -585,7 +590,12 @@ async fn edit_credential(
     let Ok(Some(credential)) = state.db.get_credential(&id).await else {
         return Redirect::to("/credentials").into_response();
     };
-    Html(html::edit_credential(t, &credential, &session.csrf_token).into_string()).into_response()
+    let assets = match state.db.list_assets().await {
+        Ok(assets) => assets,
+        Err(err) => return admin_db_error("list assets for credential edit", err),
+    };
+    Html(html::edit_credential(t, &credential, &assets, &session.csrf_token).into_string())
+        .into_response()
 }
 
 async fn update_credential(
@@ -707,11 +717,36 @@ async fn delete_credential(
     Path(id): Path<String>,
     Form(form): Form<CsrfForm>,
 ) -> Response {
+    let t = request_l10n(&headers);
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
+    }
+    let assets = match state.db.list_assets().await {
+        Ok(assets) => assets,
+        Err(err) => return admin_db_error("list assets before deleting credential", err),
+    };
+    if credential_is_in_use(&assets, &id) {
+        let credentials = match state.db.list_credentials().await {
+            Ok(credentials) => credentials,
+            Err(err) => return admin_db_error("list credentials after delete conflict", err),
+        };
+        return (
+            StatusCode::CONFLICT,
+            Html(
+                html::credentials(
+                    t,
+                    &credentials,
+                    &assets,
+                    &session.csrf_token,
+                    Some(t.credential_delete_in_use),
+                )
+                .into_string(),
+            ),
+        )
+            .into_response();
     }
     match state.db.delete_credential(&id).await {
         Ok(()) => Redirect::to("/credentials").into_response(),
@@ -966,13 +1001,18 @@ async fn known_hosts(State(state): State<AdminState>, headers: HeaderMap) -> Res
         Ok(hosts) => hosts,
         Err(err) => return admin_db_error("list known hosts", err),
     };
-    Html(html::known_hosts(t, &hosts, &session.csrf_token).into_string()).into_response()
+    let assets = match state.db.list_assets().await {
+        Ok(assets) => assets,
+        Err(err) => return admin_db_error("list assets for known hosts", err),
+    };
+    Html(html::known_hosts(t, &hosts, &assets, &session.csrf_token).into_string()).into_response()
 }
 
 #[derive(Deserialize)]
 struct KnownHostDelete {
     csrf_token: String,
     key_type: String,
+    confirm_reset: Option<String>,
 }
 
 async fn delete_known_host(
@@ -986,6 +1026,9 @@ async fn delete_known_host(
     };
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
+    }
+    if !trust_reset_confirmed(form.confirm_reset.as_deref()) {
+        return (StatusCode::BAD_REQUEST, "trust reset confirmation required").into_response();
     }
     match state
         .db
@@ -1255,6 +1298,16 @@ fn filter_assets(
         .collect()
 }
 
+fn credential_is_in_use(assets: &[hop_core::Asset], credential_id: &str) -> bool {
+    assets
+        .iter()
+        .any(|asset| asset.credential_id.as_deref() == Some(credential_id))
+}
+
+fn trust_reset_confirmed(value: Option<&str>) -> bool {
+    value == Some("yes")
+}
+
 fn assets_return_to(value: Option<&str>) -> String {
     value
         .map(str::trim)
@@ -1439,6 +1492,22 @@ mod tests {
         assert_eq!(assets_return_to(Some("/credentials")), "/assets");
         assert_eq!(assets_return_to(Some("//example.com")), "/assets");
         assert_eq!(assets_return_to(Some("/assets\r\nLocation: /")), "/assets");
+    }
+
+    #[test]
+    fn credential_usage_guard_detects_assigned_assets() {
+        let mut assets = test_assets();
+        assets[1].credential_id = Some("cred-1".to_string());
+
+        assert!(credential_is_in_use(&assets, "cred-1"));
+        assert!(!credential_is_in_use(&assets, "cred-2"));
+    }
+
+    #[test]
+    fn known_host_reset_requires_explicit_confirmation() {
+        assert!(trust_reset_confirmed(Some("yes")));
+        assert!(!trust_reset_confirmed(None));
+        assert!(!trust_reset_confirmed(Some("true")));
     }
 
     #[tokio::test]

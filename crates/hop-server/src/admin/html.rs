@@ -1056,6 +1056,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                 }
                 style {
                     (PreEscaped(include_str!("release_a_assets.css")))
+                    (PreEscaped(include_str!("release_b_credentials_trust.css")))
                 }
             }
             body class="admin-shell" data-theme="operator" {
@@ -1969,122 +1970,163 @@ fn asset_tunnel_target(asset: &Asset) -> String {
     }
 }
 
-pub fn credentials(t: &L10n, items: &[Credential], csrf_token: &str) -> Markup {
+pub fn credentials(
+    t: &L10n,
+    items: &[Credential],
+    assets: &[Asset],
+    csrf_token: &str,
+    error: Option<&str>,
+) -> Markup {
     layout(
         t.credentials_title,
         "credentials",
         t,
         html! {
-            div.page-intro {
-                h2 { (t.credentials_heading) }
-                p { (t.credentials_intro) }
-            }
-            section.panel {
-                div.panel-header {
+            div.credentials-page {
+                div.console-hero {
                     div {
-                        h2 { (t.credentials_export_heading) }
-                        p { (t.credentials_export_intro) }
+                        p { (t.credentials_intro) }
+                    }
+                    div.console-actions {
+                        span.status-chip.good {
+                            span.status-dot.good {}
+                            (items.len()) " " (t.credentials_title)
+                        }
+                        button
+                            id="open-add-credential"
+                            type="button"
+                            aria-haspopup="dialog"
+                            aria-controls="add-credential-dialog"
+                            onclick="document.getElementById('add-credential-dialog').showModal()" {
+                            (t.credentials_add_heading)
+                        }
                     }
                 }
-                div.button-row {
-                    a.button href="/credentials/export?format=csv" { (t.export_csv) }
-                    a.button href="/credentials/export?format=json" { (t.export_json) }
-                    a.ghost-button href="/import" { (t.import_open) }
+                @if let Some(error) = error {
+                    p.error-message role="alert" { (error) }
                 }
-            }
-            section.panel {
-                div.panel-header {
+                section.panel.credentials-toolbar {
                     div {
-                        h2 { (t.credentials_add_heading) }
-                        p { (t.credentials_add_intro) }
-                    }
-                }
-                form method="post" action="/credentials" {
-                    (csrf_field(csrf_token))
-                    div.grid {
-                        label.field {
-                            (t.field_name)
-                            input name="name" required;
-                        }
-                        label.field {
-                            (t.field_username)
-                            input name="username" required;
-                        }
-                        label.field {
-                            (t.field_auth_type)
-                            select name="auth_type" {
-                                option value="password" { "password" }
-                                option value="key" { "key" }
-                                option value="key+passphrase" { "key+passphrase" }
-                            }
-                        }
-                        label.field {
-                            (t.field_password)
-                            input type="password" name="password";
-                        }
-                        label.field {
-                            (t.field_passphrase)
-                            input type="password" name="passphrase";
-                        }
-                        label.field.field-wide {
-                            (t.field_private_key)
-                            textarea name="private_key" rows="8" {}
-                        }
+                        strong { (t.credentials_export_heading) }
+                        p.fine-print { (t.credentials_export_intro) }
                     }
                     div.button-row {
-                        button type="submit" { (t.save_credential) }
-                    }
-                    p.fine-print { (t.secret_storage_note) }
-                }
-            }
-            section.panel {
-                div.panel-header {
-                    div {
-                        h2 { (t.credentials_existing_heading) }
-                        p { (t.credentials_existing_intro) }
+                        a.ghost-button href="/credentials/export?format=csv" { (t.export_csv) }
+                        a.ghost-button href="/credentials/export?format=json" { (t.export_json) }
+                        a.ghost-button href="/import" { (t.import_open) }
                     }
                 }
-                div.table-wrap {
-                    table.data-table {
-                        thead {
-                            tr { th { (t.field_name) } th { (t.field_username) } th { (t.field_auth_type) } th { (t.secrets_label) } th { (t.field_action) } }
+                section.panel.credentials-inventory {
+                    div.panel-header {
+                        div {
+                            h2 { (t.credentials_existing_heading) }
+                            p { (t.credentials_existing_intro) }
                         }
-                        tbody {
-                            @if items.is_empty() {
-                                tr.empty-row { td colspan="5" { (t.no_credentials) } }
-                            }
-                            @for credential in items {
+                        span.status-chip { (items.len()) " " (t.credentials_title) }
+                    }
+                    div.table-wrap {
+                        table.data-table {
+                            thead {
                                 tr {
-                                    td {
-                                        div.primary-cell {
-                                            (credential.name)
-                                            span.subtle.mono { (credential.id) }
-                                        }
-                                    }
-                                    td { (credential.username) }
-                                    td { span.status-pill { (credential.auth_type) } }
-                                    td {
-                                        div.secret-list {
-                                            @if credential.password_enc.is_none() && credential.private_key_enc.is_none() && credential.passphrase_enc.is_none() {
-                                                span.status-pill.neutral { (t.none) }
-                                            }
-                                            @if credential.password_enc.is_some() {
-                                                span.tag { "password" }
-                                            }
-                                            @if credential.private_key_enc.is_some() {
-                                                span.tag { "private key" }
-                                            }
-                                            @if credential.passphrase_enc.is_some() {
-                                                span.tag { "passphrase" }
+                                    th { (t.field_name) }
+                                    th { (t.field_username) }
+                                    th { (t.field_auth_type) }
+                                    th { (t.secrets_label) }
+                                    th { (t.credential_usage_heading) }
+                                    th { (t.field_action) }
+                                }
+                            }
+                            tbody {
+                                @if items.is_empty() {
+                                    tr.empty-row {
+                                        td colspan="6" {
+                                            div.assets-empty-state {
+                                                strong { (t.no_credentials) }
+                                                button
+                                                    type="button"
+                                                    onclick="document.getElementById('open-add-credential').click()" {
+                                                    (t.credentials_add_heading)
+                                                }
                                             }
                                         }
                                     }
-                                    td {
-                                        div.action-row {
-                                            a class="button" href=(format!("/credentials/{}/edit", credential.id)) { (t.edit) }
-                                            form method="post" action=(format!("/credentials/{}/delete", credential.id)) {
-                                                (csrf_field(csrf_token))
-                                                button class="danger" type="submit" { (t.delete) }
+                                }
+                                @for credential in items {
+                                    @let used_assets = credential_assets(assets, &credential.id);
+                                    @let usage_count = used_assets.len();
+                                    tr {
+                                        td {
+                                            div.primary-cell {
+                                                (credential.name)
+                                                span.subtle.mono { (credential.id) }
+                                            }
+                                        }
+                                        td { (credential.username) }
+                                        td { span.status-pill { (credential.auth_type) } }
+                                        td {
+                                            div.secret-list {
+                                                @if credential.password_enc.is_none() && credential.private_key_enc.is_none() && credential.passphrase_enc.is_none() {
+                                                    span.status-pill.neutral { (t.none) }
+                                                }
+                                                @if credential.password_enc.is_some() {
+                                                    span.tag { "password" }
+                                                }
+                                                @if credential.private_key_enc.is_some() {
+                                                    span.tag { "private key" }
+                                                }
+                                                @if credential.passphrase_enc.is_some() {
+                                                    span.tag { "passphrase" }
+                                                }
+                                            }
+                                        }
+                                        td {
+                                            @if usage_count == 0 {
+                                                span.status-pill.neutral { (t.credential_unused) }
+                                            } @else {
+                                                div.primary-cell {
+                                                    span.status-pill {
+                                                        (usage_count) " " (t.credential_used_by_suffix)
+                                                    }
+                                                    span.subtle { (used_assets.join(", ")) }
+                                                }
+                                            }
+                                        }
+                                        td {
+                                            div.action-row {
+                                                a
+                                                    id=(format!("edit-credential-{}", credential.id))
+                                                    class="ghost-button"
+                                                    href=(format!("/credentials/{}/edit", credential.id))
+                                                    aria-haspopup="dialog"
+                                                    aria-controls="edit-credential-dialog"
+                                                    data-credential-id=(credential.id)
+                                                    data-credential-name=(credential.name)
+                                                    data-credential-username=(credential.username)
+                                                    data-credential-auth-type=(credential.auth_type)
+                                                    data-has-password=(credential.password_enc.is_some())
+                                                    data-has-private-key=(credential.private_key_enc.is_some())
+                                                    data-has-passphrase=(credential.passphrase_enc.is_some())
+                                                    onclick="window.openCredentialEditor(this);return false" {
+                                                    (t.edit)
+                                                }
+                                                form
+                                                    method="post"
+                                                    action=(format!("/credentials/{}/delete", credential.id))
+                                                    data-confirm=(t.credential_delete_confirm)
+                                                    onsubmit="return window.confirm(this.dataset.confirm)" {
+                                                    (csrf_field(csrf_token))
+                                                    button
+                                                        class="danger"
+                                                        type="submit"
+                                                        disabled[usage_count > 0]
+                                                        title=(if usage_count > 0 {
+                                                            t.credential_delete_in_use
+                                                        } else {
+                                                            t.credential_delete_confirm
+                                                        }) {
+                                                        (t.delete)
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -2093,12 +2135,103 @@ pub fn credentials(t: &L10n, items: &[Credential], csrf_token: &str) -> Markup {
                         }
                     }
                 }
+                dialog
+                    class="admin-drawer-dialog"
+                    id="add-credential-dialog"
+                    aria-labelledby="add-credential-title"
+                    onclick="if(event.target===this)this.close()"
+                    onkeydown="if(event.key==='Escape'){event.preventDefault();this.close()}"
+                    onclose="document.getElementById('open-add-credential').focus()" {
+                    div.admin-drawer {
+                        div.admin-drawer-header {
+                            div {
+                                h2 id="add-credential-title" { (t.credentials_add_heading) }
+                                p { (t.credentials_add_intro) }
+                            }
+                            div.admin-drawer-header-actions {
+                                span.status-chip { (t.credential_add_status) }
+                                button
+                                    class="drawer-close ghost-button"
+                                    type="button"
+                                    aria-label=(t.close)
+                                    onclick="this.closest('dialog').close()" {
+                                    "×"
+                                }
+                            }
+                        }
+                        form method="post" action="/credentials" data-credential-form data-mode="create" {
+                            (csrf_field(csrf_token))
+                            (credential_form_fields(t, None, false))
+                            div.button-row.admin-drawer-actions {
+                                button type="submit" { (t.save_credential) }
+                                button
+                                    class="ghost-button"
+                                    type="button"
+                                    onclick="this.closest('dialog').close()" {
+                                    (t.close)
+                                }
+                            }
+                        }
+                    }
+                }
+                dialog
+                    class="admin-drawer-dialog"
+                    id="edit-credential-dialog"
+                    aria-labelledby="edit-credential-title"
+                    onclick="if(event.target===this)this.close()"
+                    onkeydown="if(event.key==='Escape'){event.preventDefault();this.close()}"
+                    onclose="const target=document.getElementById(this.dataset.returnFocusId);if(target)target.focus()" {
+                    div.admin-drawer {
+                        div.admin-drawer-header {
+                            div {
+                                h2 id="edit-credential-title" { (t.edit_credential_title) }
+                                p { (t.edit_credential_intro) }
+                            }
+                            div.admin-drawer-header-actions {
+                                span.status-chip { (t.credential_edit_status) }
+                                button
+                                    class="drawer-close ghost-button"
+                                    type="button"
+                                    aria-label=(t.close)
+                                    onclick="this.closest('dialog').close()" {
+                                    "×"
+                                }
+                            }
+                        }
+                        form
+                            method="post"
+                            action="/credentials"
+                            data-credential-form
+                            data-mode="edit"
+                            data-secret-stored=(t.credential_secret_stored)
+                            data-secret-missing=(t.credential_secret_missing) {
+                            (csrf_field(csrf_token))
+                            (credential_form_fields(t, None, true))
+                            div.button-row.admin-drawer-actions {
+                                button type="submit" { (t.save_changes) }
+                                button
+                                    class="ghost-button"
+                                    type="button"
+                                    onclick="this.closest('dialog').close()" {
+                                    (t.close)
+                                }
+                            }
+                        }
+                    }
+                }
+                script { (PreEscaped(credential_drawer_script())) }
             }
         },
     )
 }
 
-pub fn edit_credential(t: &L10n, credential: &Credential, csrf_token: &str) -> Markup {
+pub fn edit_credential(
+    t: &L10n,
+    credential: &Credential,
+    assets: &[Asset],
+    csrf_token: &str,
+) -> Markup {
+    let used_assets = credential_assets(assets, &credential.id);
     layout(
         t.edit_credential_title,
         "credentials",
@@ -2117,45 +2250,191 @@ pub fn edit_credential(t: &L10n, credential: &Credential, csrf_token: &str) -> M
                 }
                 form method="post" action=(format!("/credentials/{}", credential.id)) {
                     (csrf_field(csrf_token))
-                    div.grid {
-                        label.field {
-                            (t.field_name)
-                            input name="name" value=(credential.name) required;
-                        }
-                        label.field {
-                            (t.field_username)
-                            input name="username" value=(credential.username) required;
-                        }
-                        label.field {
-                            (t.field_auth_type)
-                            select name="auth_type" {
-                                option value="password" selected[credential.auth_type == "password"] { "password" }
-                                option value="key" selected[credential.auth_type == "key"] { "key" }
-                                option value="key+passphrase" selected[credential.auth_type == "key+passphrase"] { "key+passphrase" }
-                            }
-                        }
-                        label.field {
-                            (t.replace_password)
-                            input type="password" name="password";
-                        }
-                        label.field {
-                            (t.replace_passphrase)
-                            input type="password" name="passphrase";
-                        }
-                        label.field.field-wide {
-                            (t.replace_private_key)
-                            textarea name="private_key" rows="8" {}
-                        }
+                    div
+                        data-credential-form
+                        data-mode="edit"
+                        data-secret-stored=(t.credential_secret_stored)
+                        data-secret-missing=(t.credential_secret_missing) {
+                        (credential_form_fields(t, Some(credential), true))
                     }
-                    p.fine-print { (t.secret_keep_note) }
                     div.button-row {
                         button type="submit" { (t.save_changes) }
                         a.ghost-button href="/credentials" { (t.back_to_credentials) }
                     }
                 }
             }
+            section.panel {
+                div.panel-header {
+                    div {
+                        h2 { (t.credential_usage_heading) }
+                        p {
+                            @if used_assets.is_empty() {
+                                (t.credential_unused)
+                            } @else {
+                                (used_assets.len()) " " (t.credential_used_by_suffix) ": "
+                                (used_assets.join(", "))
+                            }
+                        }
+                    }
+                }
+            }
+            script { (PreEscaped(credential_drawer_script())) }
         },
     )
+}
+
+fn credential_assets(assets: &[Asset], credential_id: &str) -> Vec<String> {
+    assets
+        .iter()
+        .filter(|asset| asset.credential_id.as_deref() == Some(credential_id))
+        .map(|asset| asset.name.clone())
+        .collect()
+}
+
+fn credential_form_fields(t: &L10n, credential: Option<&Credential>, editing: bool) -> Markup {
+    let name = credential.map(|item| item.name.as_str()).unwrap_or("");
+    let username = credential.map(|item| item.username.as_str()).unwrap_or("");
+    let auth_type = credential
+        .map(|item| item.auth_type.as_str())
+        .unwrap_or("password");
+    let has_password = credential.is_some_and(|item| item.password_enc.is_some());
+    let has_private_key = credential.is_some_and(|item| item.private_key_enc.is_some());
+    let has_passphrase = credential.is_some_and(|item| item.passphrase_enc.is_some());
+
+    html! {
+        div.grid {
+            label.field {
+                (t.field_name)
+                input name="name" value=(name) required autofocus;
+            }
+            label.field {
+                (t.field_username)
+                input name="username" value=(username) autocomplete="off" required;
+            }
+            label.field.field-wide {
+                (t.field_auth_type)
+                select
+                    name="auth_type"
+                    data-credential-auth-type
+                    onchange="window.hopToggleCredentialSecrets(this.closest('[data-credential-form]'))" {
+                    option value="password" selected[auth_type == "password"] { "password" }
+                    option value="key" selected[auth_type == "key"] { "key" }
+                    option value="key+passphrase" selected[auth_type == "key+passphrase"] { "key+passphrase" }
+                }
+            }
+            label
+                class="field field-wide credential-secret-field"
+                data-secret-for="password"
+                hidden[auth_type != "password"] {
+                (if editing { t.replace_password } else { t.field_password })
+                input
+                    type="password"
+                    name="password"
+                    autocomplete="new-password"
+                    disabled[auth_type != "password"]
+                    required[!editing && auth_type == "password"];
+                @if editing {
+                    span
+                        class=(if has_password { "secret-state stored" } else { "secret-state" })
+                        data-secret-state="password" {
+                        (if has_password { t.credential_secret_stored } else { t.credential_secret_missing })
+                    }
+                }
+            }
+            label
+                class="field field-wide credential-secret-field"
+                data-secret-for="key key+passphrase"
+                hidden[auth_type == "password"] {
+                (if editing { t.replace_private_key } else { t.field_private_key })
+                textarea
+                    name="private_key"
+                    rows="8"
+                    autocomplete="off"
+                    spellcheck="false"
+                    disabled[auth_type == "password"]
+                    required[!editing && auth_type != "password"] {}
+                @if editing {
+                    span
+                        class=(if has_private_key { "secret-state stored" } else { "secret-state" })
+                        data-secret-state="private-key" {
+                        (if has_private_key { t.credential_secret_stored } else { t.credential_secret_missing })
+                    }
+                }
+            }
+            label
+                class="field field-wide credential-secret-field"
+                data-secret-for="key+passphrase"
+                hidden[auth_type != "key+passphrase"] {
+                (if editing { t.replace_passphrase } else { t.field_passphrase })
+                input
+                    type="password"
+                    name="passphrase"
+                    autocomplete="new-password"
+                    disabled[auth_type != "key+passphrase"]
+                    required[!editing && auth_type == "key+passphrase"];
+                @if editing {
+                    span
+                        class=(if has_passphrase { "secret-state stored" } else { "secret-state" })
+                        data-secret-state="passphrase" {
+                        (if has_passphrase { t.credential_secret_stored } else { t.credential_secret_missing })
+                    }
+                }
+            }
+        }
+        p.fine-print {
+            (if editing { t.secret_keep_note } else { t.secret_storage_note })
+        }
+    }
+}
+
+fn credential_drawer_script() -> &'static str {
+    r#"
+        window.hopToggleCredentialSecrets = (form) => {
+            if (!form) return;
+            const type = form.querySelector('[data-credential-auth-type]').value;
+            const creating = form.dataset.mode === 'create';
+            form.querySelectorAll('[data-secret-for]').forEach((group) => {
+                const visible = group.dataset.secretFor.split(' ').includes(type);
+                group.hidden = !visible;
+                group.querySelectorAll('input, textarea').forEach((field) => {
+                    field.disabled = !visible;
+                    field.required = creating && visible;
+                });
+            });
+        };
+
+        window.openCredentialEditor = (trigger) => {
+            const dialog = document.getElementById('edit-credential-dialog');
+            const form = dialog.querySelector('form');
+            form.action = `/credentials/${encodeURIComponent(trigger.dataset.credentialId)}`;
+            form.querySelector('[name="name"]').value = trigger.dataset.credentialName;
+            form.querySelector('[name="username"]').value = trigger.dataset.credentialUsername;
+            form.querySelector('[name="auth_type"]').value = trigger.dataset.credentialAuthType;
+            form.querySelectorAll('[name="password"], [name="private_key"], [name="passphrase"]')
+                .forEach((field) => field.value = '');
+
+            const states = {
+                password: trigger.dataset.hasPassword === 'true',
+                'private-key': trigger.dataset.hasPrivateKey === 'true',
+                passphrase: trigger.dataset.hasPassphrase === 'true'
+            };
+            form.querySelectorAll('[data-secret-state]').forEach((state) => {
+                const stored = states[state.dataset.secretState];
+                state.textContent = stored
+                    ? form.dataset.secretStored
+                    : form.dataset.secretMissing;
+                state.classList.toggle('stored', stored);
+            });
+
+            window.hopToggleCredentialSecrets(form);
+            dialog.dataset.returnFocusId = trigger.id;
+            dialog.showModal();
+        };
+
+        document.querySelectorAll('[data-credential-form]').forEach(
+            window.hopToggleCredentialSecrets
+        );
+    "#
 }
 
 pub fn keys(t: &L10n, items: &[AuthorizedKey], csrf_token: &str) -> Markup {
@@ -2389,49 +2668,121 @@ fn key_access_script() -> &'static str {
     r#"window.hopToggleKeyAccess=function(form){const mode=form.querySelector('[data-asset-access-mode]').value;const restricted=mode==='restricted';const list=form.querySelector('[data-asset-access-list]');const note=form.querySelector('[data-access-all-note]');list.hidden=!restricted;note.hidden=restricted;list.querySelectorAll('input[type=checkbox]').forEach((input)=>input.disabled=!restricted);};"#
 }
 
-pub fn known_hosts(t: &L10n, items: &[KnownHost], csrf_token: &str) -> Markup {
+pub fn known_hosts(t: &L10n, items: &[KnownHost], assets: &[Asset], csrf_token: &str) -> Markup {
     layout(
         t.known_hosts_title,
         "known-hosts",
         t,
         html! {
-            div.page-intro {
-                h2 { (t.known_hosts_heading) }
-                p { (t.known_hosts_intro) }
-            }
-            section.panel {
-                div.panel-header {
+            div.known-hosts-page {
+                div.console-hero {
                     div {
-                        h2 { (t.known_hosts_panel_heading) }
-                        p { (t.known_hosts_panel_intro) }
+                        p { (t.known_hosts_intro) }
+                    }
+                    div.console-actions {
+                        span.status-chip.good {
+                            span.status-dot.good {}
+                            (items.len()) " " (t.known_hosts_trusted)
+                        }
                     }
                 }
-                div.table-wrap {
-                    table.data-table {
-                        thead {
-                            tr { th { (t.host_column) } th { (t.key_type_column) } th { (t.field_fingerprint) } th { (t.first_seen_column) } th { (t.field_action) } }
+                section.panel.trust-reset-note {
+                    div {
+                        strong { (t.known_hosts_trusted) }
+                        p { (t.known_hosts_panel_intro) }
+                    }
+                    p.fine-print { (t.known_hosts_reset_note) }
+                }
+                section.panel.known-hosts-inventory {
+                    div.panel-header {
+                        div {
+                            h2 { (t.known_hosts_panel_heading) }
+                            p { (t.known_hosts_panel_intro) }
                         }
-                        tbody {
-                            @if items.is_empty() {
-                                tr.empty-row { td colspan="5" { (t.no_known_hosts) } }
-                            }
-                            @for host in items {
+                    }
+                    div.table-wrap {
+                        table.data-table {
+                            thead {
                                 tr {
-                                    td {
-                                        div.primary-cell {
-                                            (host.hostname)
-                                            span.subtle.mono { ":" (host.port) }
+                                    th { (t.host_column) }
+                                    th { (t.key_type_column) }
+                                    th { (t.field_fingerprint) }
+                                    th { (t.first_seen_column) }
+                                    th { (t.known_hosts_asset_usage) }
+                                    th { (t.field_action) }
+                                }
+                            }
+                            tbody {
+                                @if items.is_empty() {
+                                    tr.empty-row { td colspan="6" { (t.no_known_hosts) } }
+                                }
+                                @for host in items {
+                                    @let used_assets = known_host_assets(assets, host);
+                                    tr {
+                                        td {
+                                            div.primary-cell {
+                                                (host.hostname)
+                                                span.subtle.mono { ":" (host.port) }
+                                            }
                                         }
-                                    }
-                                    td { span.status-pill.neutral { (host.key_type) } }
-                                    td.mono { (host.fingerprint) }
-                                    td { (host.first_seen.as_deref().unwrap_or("-")) }
-                                    td {
-                                        div.action-row {
-                                            form method="post" action=(format!("/known-hosts/{}/{}/delete", host.hostname, host.port)) {
-                                                (csrf_field(csrf_token))
-                                                input type="hidden" name="key_type" value=(host.key_type);
-                                                button class="danger" type="submit" { (t.delete) }
+                                        td { span.status-pill.neutral { (host.key_type) } }
+                                        td {
+                                            div.fingerprint-copy-group {
+                                                code.fingerprint-value { (host.fingerprint) }
+                                                button
+                                                    class="target-copy-button ghost-button"
+                                                    type="button"
+                                                    data-copy-value=(host.fingerprint)
+                                                    data-copy-default=(t.known_host_copy_fingerprint)
+                                                    data-copy-success=(t.asset_copy_success)
+                                                    data-copy-failed=(t.asset_copy_failed)
+                                                    aria-label=(format!(
+                                                        "{}: {}",
+                                                        t.known_host_copy_fingerprint,
+                                                        host.fingerprint
+                                                    ))
+                                                    aria-live="polite"
+                                                    onclick="window.copyKnownHostFingerprint(this)" {
+                                                    (t.known_host_copy_fingerprint)
+                                                }
+                                            }
+                                        }
+                                        td {
+                                            div.primary-cell {
+                                                span.status-pill { (t.known_hosts_trusted) }
+                                                span.subtle { (host.first_seen.as_deref().unwrap_or("-")) }
+                                            }
+                                        }
+                                        td {
+                                            @if used_assets.is_empty() {
+                                                span.status-pill.neutral { (t.known_hosts_unused) }
+                                            } @else {
+                                                div.primary-cell {
+                                                    span.status-pill {
+                                                        (used_assets.len()) " " (t.known_hosts_assets_suffix)
+                                                    }
+                                                    span.subtle { (used_assets.join(", ")) }
+                                                }
+                                            }
+                                        }
+                                        td {
+                                            button
+                                                id=(format!(
+                                                    "reset-known-host-{}-{}-{}",
+                                                    host.hostname,
+                                                    host.port,
+                                                    host.key_type
+                                                ))
+                                                class="danger"
+                                                type="button"
+                                                aria-haspopup="dialog"
+                                                aria-controls="reset-known-host-dialog"
+                                                data-hostname=(host.hostname)
+                                                data-port=(host.port)
+                                                data-key-type=(host.key_type)
+                                                data-fingerprint=(host.fingerprint)
+                                                onclick="window.openKnownHostReset(this)" {
+                                                (t.known_host_reset_action)
                                             }
                                         }
                                     }
@@ -2440,9 +2791,122 @@ pub fn known_hosts(t: &L10n, items: &[KnownHost], csrf_token: &str) -> Markup {
                         }
                     }
                 }
+                dialog
+                    class="confirm-dialog"
+                    id="reset-known-host-dialog"
+                    aria-labelledby="reset-known-host-title"
+                    onclick="if(event.target===this)this.close()"
+                    onkeydown="if(event.key==='Escape'){event.preventDefault();this.close()}"
+                    onclose="const target=document.getElementById(this.dataset.returnFocusId);if(target)target.focus()" {
+                    div.confirm-dialog-card {
+                        div.confirm-dialog-header {
+                            div {
+                                p.eyebrow { (t.known_host_reset_action) }
+                                h2 id="reset-known-host-title" { (t.known_host_reset_heading) }
+                            }
+                            button
+                                class="drawer-close ghost-button"
+                                type="button"
+                                aria-label=(t.close)
+                                onclick="this.closest('dialog').close()" {
+                                "×"
+                            }
+                        }
+                        p { (t.known_host_reset_intro) }
+                        div.trust-reset-target {
+                            strong data-reset-host {}
+                            code data-reset-fingerprint {}
+                        }
+                        p.warning-message { (t.known_host_reset_warning) }
+                        form method="post" action="/known-hosts" data-known-host-reset-form {
+                            (csrf_field(csrf_token))
+                            input type="hidden" name="key_type";
+                            label.confirm-check {
+                                input
+                                    type="checkbox"
+                                    name="confirm_reset"
+                                    value="yes"
+                                    onchange="this.form.querySelector('[data-reset-submit]').disabled=!this.checked";
+                                span { (t.known_host_reset_confirm) }
+                            }
+                            div.button-row {
+                                button
+                                    class="danger"
+                                    type="submit"
+                                    data-reset-submit
+                                    disabled {
+                                    (t.known_host_reset_submit)
+                                }
+                                button
+                                    class="ghost-button"
+                                    type="button"
+                                    onclick="this.closest('dialog').close()" {
+                                    (t.close)
+                                }
+                            }
+                        }
+                    }
+                }
+                script { (PreEscaped(known_host_script())) }
             }
         },
     )
+}
+
+fn known_host_assets(assets: &[Asset], host: &KnownHost) -> Vec<String> {
+    assets
+        .iter()
+        .filter(|asset| asset.hostname == host.hostname && asset.port == host.port)
+        .map(|asset| asset.name.clone())
+        .collect()
+}
+
+fn known_host_script() -> &'static str {
+    r#"
+        window.copyKnownHostFingerprint = async (button) => {
+            const value = button.dataset.copyValue;
+            let copied = false;
+            try {
+                await navigator.clipboard.writeText(value);
+                copied = true;
+            } catch (_) {
+                const fallback = document.createElement('textarea');
+                fallback.value = value;
+                fallback.setAttribute('readonly', '');
+                fallback.style.position = 'fixed';
+                fallback.style.opacity = '0';
+                document.body.appendChild(fallback);
+                fallback.select();
+                copied = document.execCommand('copy');
+                fallback.remove();
+            }
+
+            window.clearTimeout(button.copyResetTimer);
+            button.textContent = copied
+                ? button.dataset.copySuccess
+                : button.dataset.copyFailed;
+            button.classList.toggle('copy-success', copied);
+            button.copyResetTimer = window.setTimeout(() => {
+                button.textContent = button.dataset.copyDefault;
+                button.classList.remove('copy-success');
+            }, 1800);
+        };
+
+        window.openKnownHostReset = (trigger) => {
+            const dialog = document.getElementById('reset-known-host-dialog');
+            const form = dialog.querySelector('[data-known-host-reset-form]');
+            form.action = `/known-hosts/${encodeURIComponent(trigger.dataset.hostname)}/${trigger.dataset.port}/delete`;
+            form.querySelector('[name="key_type"]').value = trigger.dataset.keyType;
+            form.querySelector('[name="confirm_reset"]').checked = false;
+            form.querySelector('[data-reset-submit]').disabled = true;
+            dialog.querySelector('[data-reset-host]').textContent =
+                `${trigger.dataset.hostname}:${trigger.dataset.port} · ${trigger.dataset.keyType}`;
+            dialog.querySelector('[data-reset-fingerprint]').textContent =
+                trigger.dataset.fingerprint;
+            dialog.dataset.returnFocusId = trigger.id;
+            dialog.showModal();
+        };
+    "#
 }
 
 pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
@@ -2995,6 +3459,66 @@ mod tests {
     }
 
     #[test]
+    fn credentials_page_uses_drawers_secret_states_and_usage_guards() {
+        let credential = credential("cred-1", "prod-root", "root", "password");
+        let mut assigned_asset = asset("api", "api.internal", &["prod"]);
+        assigned_asset.credential_id = Some("cred-1".to_string());
+        let rendered =
+            credentials(&EN, &[credential], &[assigned_asset], "csrf-123", None).into_string();
+
+        assert!(rendered.contains(r#"aria-controls="add-credential-dialog""#));
+        assert!(rendered.contains(r#"aria-controls="edit-credential-dialog""#));
+        assert!(
+            rendered.contains(r#"<dialog class="admin-drawer-dialog" id="add-credential-dialog""#)
+        );
+        assert!(
+            rendered.contains(r#"<dialog class="admin-drawer-dialog" id="edit-credential-dialog""#)
+        );
+        assert!(rendered.contains(r#"autocomplete="new-password""#));
+        assert!(rendered.contains(r#"data-secret-for="key key+passphrase" hidden"#));
+        assert!(rendered.contains(r#"data-has-password="true""#));
+        assert!(rendered.contains("1 assets"));
+        assert!(rendered.contains("api"));
+        assert!(rendered.contains(r#"class="danger" type="submit" disabled"#));
+        assert!(rendered.contains("window.openCredentialEditor"));
+        assert!(rendered.contains("window.hopToggleCredentialSecrets"));
+    }
+
+    #[test]
+    fn credential_fallback_edit_never_renders_existing_secrets() {
+        let credential = credential("cred-1", "prod-root", "root", "password");
+        let rendered = edit_credential(&EN, &credential, &[], "csrf-123").into_string();
+
+        assert!(rendered.contains("Encrypted value stored"));
+        assert!(rendered.contains(r#"name="password" autocomplete="new-password""#));
+        assert!(!rendered.contains("encrypted-password"));
+        assert!(rendered.contains(EN.secret_keep_note));
+    }
+
+    #[test]
+    fn known_hosts_page_explains_and_confirms_trust_reset() {
+        let host = KnownHost {
+            hostname: "api.internal".to_string(),
+            port: 22,
+            key_type: "ssh-ed25519".to_string(),
+            fingerprint: "SHA256:trusted".to_string(),
+            first_seen: Some("2026-07-28 10:00:00".to_string()),
+        };
+        let assigned_asset = asset("api", "api.internal", &["prod"]);
+        let rendered = known_hosts(&EN, &[host], &[assigned_asset], "csrf-123").into_string();
+
+        assert!(rendered.contains(EN.known_hosts_reset_note));
+        assert!(rendered.contains("1 assets"));
+        assert!(rendered.contains(r#"data-copy-value="SHA256:trusted""#));
+        assert!(rendered.contains(r#"aria-controls="reset-known-host-dialog""#));
+        assert!(rendered.contains(r#"<dialog class="confirm-dialog" id="reset-known-host-dialog""#));
+        assert!(rendered.contains(r#"name="confirm_reset" value="yes""#));
+        assert!(rendered.contains(r#"data-reset-submit disabled"#));
+        assert!(rendered.contains("window.openKnownHostReset"));
+        assert!(rendered.contains("window.copyKnownHostFingerprint"));
+    }
+
+    #[test]
     fn sessions_page_renders_as_audit_replay_console() {
         let session_items = vec![Session {
             id: "session-1".to_string(),
@@ -3129,6 +3653,19 @@ mod tests {
             credential_id: None,
             created_at: None,
             updated_at: None,
+        }
+    }
+
+    fn credential(id: &str, name: &str, username: &str, auth_type: &str) -> Credential {
+        Credential {
+            id: id.to_string(),
+            name: name.to_string(),
+            username: username.to_string(),
+            auth_type: auth_type.to_string(),
+            password_enc: Some("encrypted-password".to_string()),
+            private_key_enc: None,
+            passphrase_enc: None,
+            created_at: None,
         }
     }
 

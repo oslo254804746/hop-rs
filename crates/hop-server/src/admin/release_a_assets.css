@@ -181,7 +181,8 @@
     margin: 0;
 }
 
-.asset-dialog {
+.asset-dialog,
+.admin-drawer-dialog {
     width: min(520px, 100vw);
     max-width: none;
     height: 100dvh;
@@ -196,18 +197,21 @@
     box-shadow: -22px 0 64px rgba(0, 0, 0, 0.48);
 }
 
-.asset-dialog::backdrop {
+.asset-dialog::backdrop,
+.admin-drawer-dialog::backdrop {
     background: rgba(2, 6, 12, 0.72);
     backdrop-filter: blur(3px);
 }
 
-.asset-drawer {
+.asset-drawer,
+.admin-drawer {
     height: 100%;
     padding: 24px;
     overflow-y: auto;
 }
 
-.asset-drawer-header {
+.asset-drawer-header,
+.admin-drawer-header {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
@@ -217,18 +221,21 @@
     border-bottom: 1px solid var(--border);
 }
 
-.asset-drawer-header h2 {
+.asset-drawer-header h2,
+.admin-drawer-header h2 {
     margin: 0;
     font-size: 1.2rem;
 }
 
-.asset-drawer-header p {
+.asset-drawer-header p,
+.admin-drawer-header p {
     margin: 6px 0 0;
     color: var(--muted);
     line-height: 1.5;
 }
 
-.asset-drawer-header-actions {
+.asset-drawer-header-actions,
+.admin-drawer-header-actions {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -242,11 +249,13 @@
     line-height: 1;
 }
 
-.asset-drawer .grid {
+.asset-drawer .grid,
+.admin-drawer .grid {
     grid-template-columns: 1fr 1fr;
 }
 
-.asset-drawer-actions {
+.asset-drawer-actions,
+.admin-drawer-actions {
     position: sticky;
     bottom: -24px;
     margin: 20px -24px -24px;
@@ -282,7 +291,8 @@
         margin-inline: 0;
     }
 
-    .asset-drawer .grid {
+    .asset-drawer .grid,
+    .admin-drawer .grid {
         grid-template-columns: 1fr;
     }
 }
@@ -297,12 +307,14 @@
         flex-direction: column;
     }
 
-    .asset-dialog {
+    .asset-dialog,
+    .admin-drawer-dialog {
         width: 100vw;
         border-left: 0;
     }
 
-    .asset-drawer {
+    .asset-drawer,
+    .admin-drawer {
         padding: 18px;
     }
 
@@ -310,7 +322,8 @@
         width: 40px;
     }
 
-    .asset-drawer-actions {
+    .asset-drawer-actions,
+    .admin-drawer-actions {
         bottom: -18px;
         margin: 18px -18px -18px;
         padding: 14px 18px;
