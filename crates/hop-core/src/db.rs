@@ -9,9 +9,10 @@ use crate::{
     errors::HopCoreError,
     models::{
         new_id, normalize_asset_protocol, protocol_supports_managed_credentials,
-        validate_credential_material, validate_tcp_port, Asset, AssetAccessMode, AssetRow,
-        AuthorizedKey, AuthorizedKeyRow, Credential, KnownHost, NewAsset, NewAuthorizedKey,
-        NewCredential, NewKnownHost, NewSession, Session, Setting,
+        validate_credential_material, validate_tcp_port, AdminUser, Asset, AssetAccessMode,
+        AssetHealth, AssetRow, AuditEvent, AuthorizedKey, AuthorizedKeyRow, Credential, KnownHost,
+        NewAsset, NewAuditEvent, NewAuthorizedKey, NewCredential, NewKnownHost, NewSession,
+        Session, Setting, ASSET_HEALTH_FAILED, ASSET_HEALTH_HEALTHY,
     },
     Result,
 };
@@ -378,6 +379,208 @@ impl HopDb {
         .bind(id)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    pub async fn get_admin_user_by_username(&self, username: &str) -> Result<Option<AdminUser>> {
+        sqlx::query_as::<_, AdminUser>(
+            r#"
+            SELECT id, username, display_name, auth_source, is_active, created_at, last_login_at
+            FROM admin_users
+            WHERE username = ?1
+            "#,
+        )
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn get_admin_user_by_id(&self, id: &str) -> Result<Option<AdminUser>> {
+        sqlx::query_as::<_, AdminUser>(
+            r#"
+            SELECT id, username, display_name, auth_source, is_active, created_at, last_login_at
+            FROM admin_users
+            WHERE id = ?1
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn list_admin_users(&self) -> Result<Vec<AdminUser>> {
+        sqlx::query_as::<_, AdminUser>(
+            r#"
+            SELECT id, username, display_name, auth_source, is_active, created_at, last_login_at
+            FROM admin_users
+            ORDER BY created_at ASC, username ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn mark_admin_login(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE admin_users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn add_audit_event(&self, event: NewAuditEvent) -> Result<AuditEvent> {
+        let id = new_id();
+        sqlx::query(
+            r#"
+            INSERT INTO audit_events (
+                id, actor_id, actor_label, action, target_type, target_id,
+                target_label, result, source_ip, details_json
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+        )
+        .bind(&id)
+        .bind(event.actor_id)
+        .bind(event.actor_label)
+        .bind(event.action)
+        .bind(event.target_type)
+        .bind(event.target_id)
+        .bind(event.target_label)
+        .bind(event.result)
+        .bind(event.source_ip)
+        .bind(event.details_json)
+        .execute(&self.pool)
+        .await?;
+        self.get_audit_event(&id)
+            .await?
+            .ok_or_else(|| HopCoreError::Database(sqlx::Error::RowNotFound))
+    }
+
+    pub async fn get_audit_event(&self, id: &str) -> Result<Option<AuditEvent>> {
+        sqlx::query_as::<_, AuditEvent>(
+            r#"
+            SELECT id, occurred_at, actor_id, actor_label, action, target_type, target_id,
+                   target_label, result, source_ip, details_json
+            FROM audit_events
+            WHERE id = ?1
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn list_audit_events(&self, limit: i64) -> Result<Vec<AuditEvent>> {
+        sqlx::query_as::<_, AuditEvent>(
+            r#"
+            SELECT id, occurred_at, actor_id, actor_label, action, target_type, target_id,
+                   target_label, result, source_ip, details_json
+            FROM audit_events
+            ORDER BY occurred_at DESC, id DESC
+            LIMIT ?1
+            "#,
+        )
+        .bind(limit.clamp(1, 1000))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn list_asset_health(&self) -> Result<Vec<AssetHealth>> {
+        sqlx::query_as::<_, AssetHealth>(
+            r#"
+            SELECT asset_id, status, checked_at, last_success_at, latency_ms,
+                   error_code, error_message
+            FROM asset_health
+            ORDER BY asset_id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn get_asset_health(&self, asset_id: &str) -> Result<Option<AssetHealth>> {
+        sqlx::query_as::<_, AssetHealth>(
+            r#"
+            SELECT asset_id, status, checked_at, last_success_at, latency_ms,
+                   error_code, error_message
+            FROM asset_health
+            WHERE asset_id = ?1
+            "#,
+        )
+        .bind(asset_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    pub async fn record_asset_health_success(
+        &self,
+        asset_id: &str,
+        latency_ms: Option<i64>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO asset_health (
+                asset_id, status, checked_at, last_success_at, latency_ms,
+                error_code, error_message
+            )
+            VALUES (?1, ?2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?3, NULL, NULL)
+            ON CONFLICT(asset_id) DO UPDATE SET
+                status = excluded.status,
+                checked_at = CURRENT_TIMESTAMP,
+                last_success_at = CURRENT_TIMESTAMP,
+                latency_ms = excluded.latency_ms,
+                error_code = NULL,
+                error_message = NULL
+            "#,
+        )
+        .bind(asset_id)
+        .bind(ASSET_HEALTH_HEALTHY)
+        .bind(latency_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn record_asset_health_failure(
+        &self,
+        asset_id: &str,
+        error_code: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO asset_health (
+                asset_id, status, checked_at, error_code, error_message
+            )
+            VALUES (?1, ?2, CURRENT_TIMESTAMP, ?3, ?4)
+            ON CONFLICT(asset_id) DO UPDATE SET
+                status = excluded.status,
+                checked_at = CURRENT_TIMESTAMP,
+                latency_ms = NULL,
+                error_code = excluded.error_code,
+                error_message = excluded.error_message
+            "#,
+        )
+        .bind(asset_id)
+        .bind(ASSET_HEALTH_FAILED)
+        .bind(error_code)
+        .bind(error_message)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn health_check(&self) -> Result<()> {
+        sqlx::query_scalar::<_, i64>("SELECT 1")
+            .fetch_one(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -814,7 +1017,10 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "admin_users",
+                "asset_health",
                 "assets",
+                "audit_events",
                 "authorized_key_assets",
                 "authorized_keys",
                 "credentials",
@@ -823,6 +1029,95 @@ mod tests {
                 "settings"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn operations_migration_creates_stable_local_admin() {
+        let db = HopDb::in_memory().await.unwrap();
+        let admin = db
+            .get_admin_user_by_username("admin")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(admin.id, "local-admin");
+        assert_eq!(admin.display_name, "Local admin");
+        assert_eq!(admin.auth_source, "local");
+        assert!(admin.is_active);
+        assert!(admin.last_login_at.is_none());
+
+        db.mark_admin_login(&admin.id).await.unwrap();
+        assert!(db
+            .get_admin_user_by_id(&admin.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_login_at
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn audit_events_roundtrip_without_secret_fields() {
+        let db = HopDb::in_memory().await.unwrap();
+        let inserted = db
+            .add_audit_event(NewAuditEvent {
+                actor_id: Some("local-admin".to_string()),
+                actor_label: "Local admin".to_string(),
+                action: "asset.update".to_string(),
+                target_type: "asset".to_string(),
+                target_id: Some("asset-1".to_string()),
+                target_label: Some("prod-api".to_string()),
+                result: "success".to_string(),
+                source_ip: Some("127.0.0.1".to_string()),
+                details_json: Some(r#"{"fields":["hostname","tags"]}"#.to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(inserted.action, "asset.update");
+        assert_eq!(inserted.actor_id.as_deref(), Some("local-admin"));
+        assert_eq!(
+            db.list_audit_events(10).await.unwrap()[0]
+                .target_label
+                .as_deref(),
+            Some("prod-api")
+        );
+    }
+
+    #[tokio::test]
+    async fn asset_health_starts_unknown_and_tracks_real_results() {
+        let db = HopDb::in_memory().await.unwrap();
+        let asset = db
+            .add_asset(NewAsset::new("prod-api", "10.0.0.8", 22))
+            .await
+            .unwrap();
+
+        let initial = db.get_asset_health(&asset.id).await.unwrap().unwrap();
+        assert_eq!(initial.status, crate::models::ASSET_HEALTH_UNKNOWN);
+        assert!(initial.checked_at.is_none());
+
+        db.record_asset_health_success(&asset.id, Some(42))
+            .await
+            .unwrap();
+        let healthy = db.get_asset_health(&asset.id).await.unwrap().unwrap();
+        assert_eq!(healthy.status, crate::models::ASSET_HEALTH_HEALTHY);
+        assert_eq!(healthy.latency_ms, Some(42));
+        assert!(healthy.last_success_at.is_some());
+
+        db.record_asset_health_failure(
+            &asset.id,
+            Some("connect_failed"),
+            Some("connection refused"),
+        )
+        .await
+        .unwrap();
+        let failed = db.get_asset_health(&asset.id).await.unwrap().unwrap();
+        assert_eq!(failed.status, crate::models::ASSET_HEALTH_FAILED);
+        assert_eq!(failed.error_code.as_deref(), Some("connect_failed"));
+        assert!(failed.last_success_at.is_some());
+
+        db.delete_asset(&asset.id).await.unwrap();
+        assert!(db.get_asset_health(&asset.id).await.unwrap().is_none());
     }
 
     #[tokio::test]

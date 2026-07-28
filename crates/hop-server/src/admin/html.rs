@@ -1,7 +1,7 @@
 use hop_core::{
-    Asset, AssetAccessMode, AuthorizedKey, Credential, KnownHost, Session, ASSET_PRESET_MYSQL,
-    ASSET_PRESET_POSTGRES, ASSET_PRESET_RDP, ASSET_PRESET_REDIS, ASSET_PRESET_VNC,
-    ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
+    Asset, AssetAccessMode, AuditEvent, AuthorizedKey, Credential, KnownHost, Session,
+    ASSET_PRESET_MYSQL, ASSET_PRESET_POSTGRES, ASSET_PRESET_RDP, ASSET_PRESET_REDIS,
+    ASSET_PRESET_VNC, ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
@@ -294,6 +294,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     }
 
                     .panel {
+                        min-width: 0;
                         margin: 0 0 18px;
                         padding: 20px;
                         border: 1px solid var(--border);
@@ -490,6 +491,8 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     }
 
                     .table-wrap {
+                        width: 100%;
+                        max-width: 100%;
                         overflow-x: auto;
                         border: 1px solid var(--border);
                         border-radius: 8px;
@@ -2909,7 +2912,7 @@ fn known_host_script() -> &'static str {
     "#
 }
 
-pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
+pub fn sessions(t: &L10n, items: &[Session], admin_events: &[AuditEvent]) -> Markup {
     layout(
         t.sessions_title,
         "sessions",
@@ -2923,6 +2926,7 @@ pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
                     }
                     div.console-actions {
                         span.status-chip.danger { (items.iter().filter(|session| session.status == "failed").count()) " " (t.sessions_failed_suffix) }
+                        span.status-chip.neutral { (admin_events.len()) " " (t.sessions_admin_recorded_suffix) }
                         span.status-chip.good { (items.len()) " " (t.sessions_recorded_suffix) }
                         a.ghost-button href="/sessions" { (t.sessions_live_tail) }
                     }
@@ -2935,6 +2939,65 @@ pub fn sessions(t: &L10n, items: &[Session]) -> Markup {
                         span.command-chip { (t.sessions_range_latest) }
                         span.command-chip { (t.sessions_user_all) }
                         span.command-chip { (t.sessions_event_all) }
+                    }
+                }
+                section.panel {
+                    div.panel-header {
+                        div {
+                            h2 { (t.sessions_admin_heading) }
+                            p { (t.sessions_admin_intro) }
+                        }
+                    }
+                    div.table-wrap {
+                        table.data-table {
+                            thead {
+                                tr {
+                                    th { (t.started_column) }
+                                    th { (t.sessions_actor_column) }
+                                    th { (t.field_action) }
+                                    th { (t.target_column) }
+                                    th { (t.error_column) }
+                                    th { (t.field_status) }
+                                }
+                            }
+                            tbody {
+                                @if admin_events.is_empty() {
+                                    tr.empty-row { td colspan="6" { (t.sessions_no_admin_events) } }
+                                }
+                                @for event in admin_events {
+                                    tr {
+                                        td.mono { (event.occurred_at.as_deref().unwrap_or("-")) }
+                                        td {
+                                            div.primary-cell {
+                                                (event.actor_label)
+                                                @if let Some(source_ip) = &event.source_ip {
+                                                    span.subtle { (t.sessions_source_prefix) " " (source_ip) }
+                                                }
+                                            }
+                                        }
+                                        td { span.audit-event { (event.action) } }
+                                        td {
+                                            div.primary-cell {
+                                                (event.target_label.as_deref().unwrap_or(event.target_type.as_str()))
+                                                @if let Some(target_id) = &event.target_id {
+                                                    span.subtle.mono { (target_id) }
+                                                }
+                                            }
+                                        }
+                                        td {
+                                            span.subtle.mono { (event.details_json.as_deref().unwrap_or("-")) }
+                                        }
+                                        td {
+                                            @if event.result == "failure" {
+                                                span.status-pill.danger { (event.result) }
+                                            } @else {
+                                                span.status-pill { (event.result) }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 div.audit-grid {
@@ -3237,6 +3300,8 @@ mod tests {
         assert!(rendered.contains("--console-green: #22c55e"));
         assert!(rendered.contains("font-family: Inter, system-ui"));
         assert!(rendered.contains(".mobile-tabbar"));
+        assert!(rendered.contains("min-width: 0"));
+        assert!(rendered.contains("max-width: 100%"));
         assert!(rendered.contains("@media (prefers-reduced-motion: reduce)"));
     }
 
@@ -3534,13 +3599,28 @@ mod tests {
             started_at: Some("2026-06-17T14:39:12Z".to_string()),
             ended_at: None,
         }];
-        let rendered = sessions(&EN, &session_items).into_string();
+        let admin_events = vec![AuditEvent {
+            id: "audit-1".to_string(),
+            occurred_at: Some("2026-06-17T14:40:00Z".to_string()),
+            actor_id: Some("local-admin".to_string()),
+            actor_label: "Local admin".to_string(),
+            action: "asset.update".to_string(),
+            target_type: "asset".to_string(),
+            target_id: Some("prod-api-01".to_string()),
+            target_label: Some("prod-api-01".to_string()),
+            result: "success".to_string(),
+            source_ip: Some("127.0.0.1".to_string()),
+            details_json: Some(r#"{"protocol":"ssh"}"#.to_string()),
+        }];
+        let rendered = sessions(&EN, &session_items, &admin_events).into_string();
 
         assert!(rendered.contains(r#"class="audit-page""#));
         assert!(rendered.contains("Audit Logs"));
-        assert!(rendered.contains("Forensic timeline"));
+        assert!(rendered.contains("Administrative changes and SSH access"));
         assert!(rendered.contains("hop admin sessions --limit 100"));
         assert!(rendered.contains("direct"));
+        assert!(rendered.contains("asset.update"));
+        assert!(rendered.contains("Local admin"));
         assert!(rendered.contains("password rejected"));
         assert!(!rendered.contains("AUTH_FAIL"));
         assert!(!rendered.contains("Replay: latest SSH trace"));

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use hop_core::{Asset, HopDb, MasterKey, NewSession};
 use russh::{server::Handle, ChannelId, ChannelMsg};
@@ -110,14 +110,15 @@ async fn run_managed_bridge(
                 .data(options.channel_id, b"\r\n\x1b[2J\x1b[HConnecting to target...\r\n".to_vec())
                 .await;
         }
-        let mut target = if is_sftp {
+        let connect_started = Instant::now();
+        let target_result = if is_sftp {
             client::connect_asset_sftp(
                 options.db.clone(),
                 options.master_key.clone(),
                 &options.asset,
                 options.connect_timeout,
             )
-            .await?
+            .await
         } else {
             client::connect_asset_shell(
                 options.db.clone(),
@@ -127,7 +128,32 @@ async fn run_managed_bridge(
                 options.pty.height as u32,
                 options.connect_timeout,
             )
-            .await?
+            .await
+        };
+        let mut target = match target_result {
+            Ok(target) => {
+                let latency_ms = connect_started
+                    .elapsed()
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64;
+                let _ = options
+                    .db
+                    .record_asset_health_success(&options.asset.id, Some(latency_ms))
+                    .await;
+                target
+            }
+            Err(err) => {
+                let message = health_error_message(&err);
+                let _ = options
+                    .db
+                    .record_asset_health_failure(
+                        &options.asset.id,
+                        Some("managed_connect_failed"),
+                        Some(&message),
+                    )
+                    .await;
+                return Err(err);
+            }
         };
 
         loop {
@@ -268,4 +294,8 @@ async fn run_managed_bridge(
         let _ = options.handle.eof(options.channel_id).await;
         let _ = options.handle.close(options.channel_id).await;
     }
+}
+
+fn health_error_message(err: &impl std::fmt::Display) -> String {
+    err.to_string().chars().take(512).collect()
 }

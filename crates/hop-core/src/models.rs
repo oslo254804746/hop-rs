@@ -251,6 +251,60 @@ pub struct NewCredential {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AdminUser {
+    pub id: String,
+    pub username: String,
+    pub display_name: String,
+    pub auth_source: String,
+    pub is_active: bool,
+    pub created_at: Option<String>,
+    pub last_login_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AuditEvent {
+    pub id: String,
+    pub occurred_at: Option<String>,
+    pub actor_id: Option<String>,
+    pub actor_label: String,
+    pub action: String,
+    pub target_type: String,
+    pub target_id: Option<String>,
+    pub target_label: Option<String>,
+    pub result: String,
+    pub source_ip: Option<String>,
+    pub details_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewAuditEvent {
+    pub actor_id: Option<String>,
+    pub actor_label: String,
+    pub action: String,
+    pub target_type: String,
+    pub target_id: Option<String>,
+    pub target_label: Option<String>,
+    pub result: String,
+    pub source_ip: Option<String>,
+    pub details_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AssetHealth {
+    pub asset_id: String,
+    pub status: String,
+    pub checked_at: Option<String>,
+    pub last_success_at: Option<String>,
+    pub latency_ms: Option<i64>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+}
+
+pub const ASSET_HEALTH_UNKNOWN: &str = "unknown";
+pub const ASSET_HEALTH_HEALTHY: &str = "healthy";
+pub const ASSET_HEALTH_FAILED: &str = "failed";
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Session {
     pub id: String,
     pub key_finger: String,

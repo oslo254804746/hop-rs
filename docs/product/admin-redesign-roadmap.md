@@ -158,6 +158,14 @@ Phase 2 发布门槛：
 - 现有 SQLite 数据可以无损升级。
 - Dashboard 需要的数据有稳定查询接口和空状态语义。
 
+实施状态（2026-07-28）：
+
+- 已完成 `ID-01`、`ID-02`：升级迁移会创建稳定的本地管理员身份，既有单密码登录习惯保持不变，Admin session 已绑定管理员 ID 与展示名称。
+- 已完成 `AUDIT-CORE-01`、`AUDIT-CORE-02`：独立 `audit_events` 覆盖登录、密码、资产、凭据、SSH 身份、Known Hosts 与批量导入，并在审计页与 SSH 会话分流展示。
+- 已完成 `HEALTH-02` 数据底座：每个资产具有 `unknown` 初始状态；真实 SSH/托管连接与 TCP 转发会写入成功、失败、延迟和最近成功时间。
+- 审计详情只保存白名单化元数据和错误分类，不保存密码、私钥、passphrase 或上传内容。
+- `HEALTH-01` Gateway 快照与 `COVERAGE-01` 将在紧接其后的真实数据 Dashboard 切片中接入；`RECOVERY-01` 保留在恢复能力阶段。
+
 ### Phase 3：运营型 Dashboard
 
 目标：让管理员打开 Hop 后立即知道系统状态、风险和下一步行动。

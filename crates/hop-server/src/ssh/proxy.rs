@@ -4,6 +4,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::Instant,
 };
 
 use anyhow::{Context, Result};
@@ -155,9 +156,28 @@ pub async fn bridge_direct_tcpip(
 
     let result = async {
         let port = validate_tcp_port(asset.port)?;
-        let stream = TcpStream::connect((asset.hostname.as_str(), port))
-            .await
-            .with_context(|| format!("connect {}:{}", asset.hostname, asset.port))?;
+        let connect_started = Instant::now();
+        let stream = match TcpStream::connect((asset.hostname.as_str(), port)).await {
+            Ok(stream) => {
+                let latency_ms = connect_started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+                let _ = db
+                    .record_asset_health_success(&asset.id, Some(latency_ms))
+                    .await;
+                stream
+            }
+            Err(err) => {
+                let message = health_error_message(&err);
+                let _ = db
+                    .record_asset_health_failure(
+                        &asset.id,
+                        Some("tcp_connect_failed"),
+                        Some(&message),
+                    )
+                    .await;
+                return Err(err)
+                    .with_context(|| format!("connect {}:{}", asset.hostname, asset.port));
+            }
+        };
         let (mut tcp_read, mut tcp_write) = stream.into_split();
         let (mut channel_read, channel_write) = channel.split();
         let mut channel_reader = channel_read.make_reader();
@@ -216,6 +236,10 @@ pub async fn bridge_direct_tcpip(
         }
     }
     result
+}
+
+fn health_error_message(err: &impl fmt::Display) -> String {
+    err.to_string().chars().take(512).collect()
 }
 
 #[cfg(test)]

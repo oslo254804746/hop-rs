@@ -7,18 +7,19 @@ use std::{
 use anyhow::{ensure, Result};
 use axum::{
     body::Bytes,
-    extract::{Form, Multipart, Path, Query, State},
+    extract::{ConnectInfo, Form, Multipart, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
-    Router,
+    Extension, Router,
 };
 use hop_core::{
     encrypt_envelope, new_id, protocol_supports_managed_credentials, validate_credential_material,
-    validate_tcp_port, AssetAccessMode, AuthType, HopDb, MasterKey, NewAsset, NewAuthorizedKey,
-    NewCredential, ASSET_PROTOCOL_SSH,
+    validate_tcp_port, AssetAccessMode, AuthType, HopDb, MasterKey, NewAsset, NewAuditEvent,
+    NewAuthorizedKey, NewCredential, ASSET_PROTOCOL_SSH,
 };
 use serde::Deserialize;
+use serde_json::Value;
 use tokio::net::TcpListener;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{info, warn};
@@ -61,7 +62,11 @@ pub async fn serve_admin(
 
     let listener = TcpListener::bind(bind).await?;
     info!(%bind, "admin web listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -138,6 +143,47 @@ async fn csrf_guard(
     }
 }
 
+type OptionalPeer = Option<Extension<ConnectInfo<SocketAddr>>>;
+
+fn source_ip(peer: Option<&Extension<ConnectInfo<SocketAddr>>>) -> Option<String> {
+    peer.map(|Extension(ConnectInfo(address))| address.ip().to_string())
+}
+
+async fn record_audit(
+    state: &AdminState,
+    session: Option<&AuthenticatedSession>,
+    source_ip: Option<String>,
+    action: &str,
+    target_type: &str,
+    target_id: Option<&str>,
+    target_label: Option<&str>,
+    result: &str,
+    details: Option<Value>,
+) {
+    let (actor_id, actor_label) = match session {
+        Some(session) => (Some(session.admin_id.clone()), session.admin_label.clone()),
+        None => (None, "Unauthenticated".to_string()),
+    };
+    let details_json = details.and_then(|details| serde_json::to_string(&details).ok());
+    if let Err(err) = state
+        .db
+        .add_audit_event(NewAuditEvent {
+            actor_id,
+            actor_label,
+            action: action.to_string(),
+            target_type: target_type.to_string(),
+            target_id: target_id.map(ToString::to_string),
+            target_label: target_label.map(ToString::to_string),
+            result: result.to_string(),
+            source_ip,
+            details_json,
+        })
+        .await
+    {
+        warn!(%err, %action, "failed to persist audit event");
+    }
+}
+
 async fn index(State(state): State<AdminState>, headers: HeaderMap) -> Response {
     let t = request_l10n(&headers);
     let Ok(_session) = guard(&headers, &state).await else {
@@ -185,12 +231,36 @@ struct LoginForm {
 async fn login(
     State(state): State<AdminState>,
     headers: HeaderMap,
+    peer: OptionalPeer,
     Form(form): Form<LoginForm>,
 ) -> Response {
     let t = request_l10n(&headers);
-    match bootstrap::verify_admin_password(&state.db, &form.password).await {
-        Ok(true) => {
-            let token = state.sessions.create().await;
+    let admin = state
+        .db
+        .get_admin_user_by_username("admin")
+        .await
+        .ok()
+        .flatten();
+    match (
+        bootstrap::verify_admin_password(&state.db, &form.password).await,
+        admin.filter(|admin| admin.is_active),
+    ) {
+        (Ok(true), Some(admin)) => {
+            let _ = state.db.mark_admin_login(&admin.id).await;
+            let token = state.sessions.create(&admin.id, &admin.display_name).await;
+            let authenticated = state.sessions.authenticate(&token).await;
+            record_audit(
+                &state,
+                authenticated.as_ref(),
+                source_ip(peer.as_ref()),
+                "admin.login",
+                "admin_user",
+                Some(&admin.id),
+                Some(&admin.display_name),
+                "success",
+                None,
+            )
+            .await;
             (
                 StatusCode::SEE_OTHER,
                 [
@@ -203,12 +273,43 @@ async fn login(
             )
                 .into_response()
         }
-        _ => Html(html::login(t, Some(t.login_invalid_password)).into_string()).into_response(),
+        _ => {
+            record_audit(
+                &state,
+                None,
+                source_ip(peer.as_ref()),
+                "admin.login",
+                "admin_user",
+                None,
+                Some("admin"),
+                "failure",
+                None,
+            )
+            .await;
+            Html(html::login(t, Some(t.login_invalid_password)).into_string()).into_response()
+        }
     }
 }
 
-async fn logout(State(state): State<AdminState>, headers: HeaderMap) -> Response {
+async fn logout(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    peer: OptionalPeer,
+) -> Response {
     if let Some(token) = cookie_token(&headers) {
+        let session = state.sessions.authenticate(&token).await;
+        record_audit(
+            &state,
+            session.as_ref(),
+            source_ip(peer.as_ref()),
+            "admin.logout",
+            "admin_session",
+            None,
+            None,
+            "success",
+            None,
+        )
+        .await;
         state.sessions.remove(&token).await;
     }
     (
@@ -240,6 +341,7 @@ struct SettingsForm {
 async fn update_settings(
     State(state): State<AdminState>,
     headers: HeaderMap,
+    peer: OptionalPeer,
     Form(form): Form<SettingsForm>,
 ) -> Response {
     let t = request_l10n(&headers);
@@ -258,6 +360,18 @@ async fn update_settings(
     .await
     {
         Ok(Ok(())) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "admin.password_change",
+                "admin_user",
+                Some(&session.admin_id),
+                Some(&session.admin_label),
+                "success",
+                None,
+            )
+            .await;
             state.sessions.remove(&session.token).await;
             (
                 StatusCode::SEE_OTHER,
@@ -268,15 +382,31 @@ async fn update_settings(
             )
                 .into_response()
         }
-        Ok(Err(err)) => Html(
-            html::settings(
-                t,
-                &session.csrf_token,
-                Some(settings_password_error_message(t, err)),
+        Ok(Err(err)) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "admin.password_change",
+                "admin_user",
+                Some(&session.admin_id),
+                Some(&session.admin_label),
+                "failure",
+                Some(serde_json::json!({
+                    "reason": settings_password_error_code(err)
+                })),
             )
-            .into_string(),
-        )
-        .into_response(),
+            .await;
+            Html(
+                html::settings(
+                    t,
+                    &session.csrf_token,
+                    Some(settings_password_error_message(t, err)),
+                )
+                .into_string(),
+            )
+            .into_response()
+        }
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to change admin password",
@@ -356,6 +486,7 @@ struct BulkTagsForm {
 async fn create_asset(
     State(state): State<AdminState>,
     headers: HeaderMap,
+    peer: OptionalPeer,
     Form(form): Form<AssetForm>,
 ) -> Response {
     let Ok(session) = guard(&headers, &state).await else {
@@ -365,12 +496,58 @@ async fn create_asset(
         return resp;
     }
     let return_to = assets_return_to(form.return_to.as_deref());
+    let requested_name = form.name.clone();
     let Some(asset) = new_asset_from_form(form) else {
+        record_audit(
+            &state,
+            Some(&session),
+            source_ip(peer.as_ref()),
+            "asset.create",
+            "asset",
+            None,
+            Some(&requested_name),
+            "failure",
+            Some(serde_json::json!({"reason": "validation"})),
+        )
+        .await;
         return Redirect::to(&return_to).into_response();
     };
     match state.db.add_asset(asset).await {
-        Ok(_) => Redirect::to(&return_to).into_response(),
-        Err(err) => admin_db_error("create asset", err),
+        Ok(created) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "asset.create",
+                "asset",
+                Some(&created.id),
+                Some(&created.name),
+                "success",
+                Some(serde_json::json!({
+                    "protocol": created.protocol,
+                    "preset": created.preset,
+                    "hostname": created.hostname,
+                    "port": created.port
+                })),
+            )
+            .await;
+            Redirect::to(&return_to).into_response()
+        }
+        Err(err) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "asset.create",
+                "asset",
+                None,
+                Some(&requested_name),
+                "failure",
+                Some(serde_json::json!({"reason": "database"})),
+            )
+            .await;
+            admin_db_error("create asset", err)
+        }
     }
 }
 
@@ -421,6 +598,7 @@ async fn update_asset(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    peer: OptionalPeer,
     Form(form): Form<AssetForm>,
 ) -> Response {
     let Ok(session) = guard(&headers, &state).await else {
@@ -430,12 +608,59 @@ async fn update_asset(
         return resp;
     }
     let return_to = assets_return_to(form.return_to.as_deref());
+    let requested_name = form.name.clone();
     let Some(asset) = new_asset_from_form(form) else {
+        record_audit(
+            &state,
+            Some(&session),
+            source_ip(peer.as_ref()),
+            "asset.update",
+            "asset",
+            Some(&id),
+            Some(&requested_name),
+            "failure",
+            Some(serde_json::json!({"reason": "validation"})),
+        )
+        .await;
         return Redirect::to(&return_to).into_response();
     };
+    let audit_asset = asset.clone();
     match state.db.update_asset(&id, asset).await {
-        Ok(()) => Redirect::to(&return_to).into_response(),
-        Err(err) => admin_db_error("update asset", err),
+        Ok(()) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "asset.update",
+                "asset",
+                Some(&id),
+                Some(&audit_asset.name),
+                "success",
+                Some(serde_json::json!({
+                    "protocol": audit_asset.protocol,
+                    "preset": audit_asset.preset,
+                    "hostname": audit_asset.hostname,
+                    "port": audit_asset.port
+                })),
+            )
+            .await;
+            Redirect::to(&return_to).into_response()
+        }
+        Err(err) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "asset.update",
+                "asset",
+                Some(&id),
+                Some(&requested_name),
+                "failure",
+                Some(serde_json::json!({"reason": "database"})),
+            )
+            .await;
+            admin_db_error("update asset", err)
+        }
     }
 }
 
@@ -443,6 +668,7 @@ async fn delete_asset(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    peer: OptionalPeer,
     Form(form): Form<CsrfForm>,
 ) -> Response {
     let Ok(session) = guard(&headers, &state).await else {
@@ -451,15 +677,51 @@ async fn delete_asset(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
+    let target_label = state
+        .db
+        .get_asset_by_id(&id)
+        .await
+        .ok()
+        .flatten()
+        .map(|asset| asset.name);
     match state.db.delete_asset(&id).await {
-        Ok(()) => Redirect::to("/assets").into_response(),
-        Err(err) => admin_db_error("delete asset", err),
+        Ok(()) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "asset.delete",
+                "asset",
+                Some(&id),
+                target_label.as_deref(),
+                "success",
+                None,
+            )
+            .await;
+            Redirect::to("/assets").into_response()
+        }
+        Err(err) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "asset.delete",
+                "asset",
+                Some(&id),
+                target_label.as_deref(),
+                "failure",
+                Some(serde_json::json!({"reason": "database"})),
+            )
+            .await;
+            admin_db_error("delete asset", err)
+        }
     }
 }
 
 async fn bulk_update_asset_tags(
     State(state): State<AdminState>,
     headers: HeaderMap,
+    peer: OptionalPeer,
     body: Bytes,
 ) -> Response {
     let Ok(form) = parse_bulk_tags_body(&body) else {
@@ -472,6 +734,7 @@ async fn bulk_update_asset_tags(
         return resp;
     }
     let tags = parse_tags(form.tags);
+    let asset_count = form.asset_ids.len();
     for asset_id in form.asset_ids {
         if let Ok(Some(asset)) = state.db.get_asset_by_id(&asset_id).await {
             if let Err(err) = state
@@ -495,6 +758,18 @@ async fn bulk_update_asset_tags(
             }
         }
     }
+    record_audit(
+        &state,
+        Some(&session),
+        source_ip(peer.as_ref()),
+        "asset.bulk_tags",
+        "asset_batch",
+        None,
+        None,
+        "success",
+        Some(serde_json::json!({"asset_count": asset_count})),
+    )
+    .await;
     Redirect::to("/assets").into_response()
 }
 
@@ -529,6 +804,7 @@ struct CredentialForm {
 async fn create_credential(
     State(state): State<AdminState>,
     headers: HeaderMap,
+    peer: OptionalPeer,
     Form(form): Form<CredentialForm>,
 ) -> Response {
     let Ok(session) = guard(&headers, &state).await else {
@@ -537,7 +813,21 @@ async fn create_credential(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
+    let requested_name = form.name.clone();
+    let requested_auth_type = form.auth_type.clone();
     let Ok(auth_type) = AuthType::try_from(form.auth_type.as_str()) else {
+        record_audit(
+            &state,
+            Some(&session),
+            source_ip(peer.as_ref()),
+            "credential.create",
+            "credential",
+            None,
+            Some(&requested_name),
+            "failure",
+            Some(serde_json::json!({"reason": "invalid_auth_type"})),
+        )
+        .await;
         return Redirect::to("/credentials").into_response();
     };
     let id = new_id();
@@ -558,6 +848,18 @@ async fn create_credential(
     )
     .is_err()
     {
+        record_audit(
+            &state,
+            Some(&session),
+            source_ip(peer.as_ref()),
+            "credential.create",
+            "credential",
+            None,
+            Some(&requested_name),
+            "failure",
+            Some(serde_json::json!({"reason": "invalid_secret_material"})),
+        )
+        .await;
         return Redirect::to("/credentials").into_response();
     }
     match state
@@ -573,8 +875,39 @@ async fn create_credential(
         })
         .await
     {
-        Ok(_) => Redirect::to("/credentials").into_response(),
-        Err(err) => admin_db_error("create credential", err),
+        Ok(created) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "credential.create",
+                "credential",
+                Some(&created.id),
+                Some(&created.name),
+                "success",
+                Some(serde_json::json!({"auth_type": created.auth_type})),
+            )
+            .await;
+            Redirect::to("/credentials").into_response()
+        }
+        Err(err) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "credential.create",
+                "credential",
+                None,
+                Some(&requested_name),
+                "failure",
+                Some(serde_json::json!({
+                    "reason": "database",
+                    "auth_type": requested_auth_type
+                })),
+            )
+            .await;
+            admin_db_error("create credential", err)
+        }
     }
 }
 
@@ -602,6 +935,7 @@ async fn update_credential(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    peer: OptionalPeer,
     Form(form): Form<CredentialForm>,
 ) -> Response {
     let Ok(session) = guard(&headers, &state).await else {
@@ -613,7 +947,21 @@ async fn update_credential(
     let Ok(Some(existing)) = state.db.get_credential(&id).await else {
         return Redirect::to("/credentials").into_response();
     };
+    let requested_name = form.name.clone();
+    let requested_auth_type = form.auth_type.clone();
     let Ok(auth_type) = AuthType::try_from(form.auth_type.as_str()) else {
+        record_audit(
+            &state,
+            Some(&session),
+            source_ip(peer.as_ref()),
+            "credential.update",
+            "credential",
+            Some(&id),
+            Some(&requested_name),
+            "failure",
+            Some(serde_json::json!({"reason": "invalid_auth_type"})),
+        )
+        .await;
         return Redirect::to("/credentials").into_response();
     };
     let password_enc = encrypt_optional(&state.master_key, &id, "password", form.password)
@@ -636,6 +984,18 @@ async fn update_credential(
     )
     .is_err()
     {
+        record_audit(
+            &state,
+            Some(&session),
+            source_ip(peer.as_ref()),
+            "credential.update",
+            "credential",
+            Some(&id),
+            Some(&requested_name),
+            "failure",
+            Some(serde_json::json!({"reason": "invalid_secret_material"})),
+        )
+        .await;
         return Redirect::to("/credentials").into_response();
     }
     match state
@@ -654,8 +1014,36 @@ async fn update_credential(
         )
         .await
     {
-        Ok(()) => Redirect::to("/credentials").into_response(),
-        Err(err) => admin_db_error("update credential", err),
+        Ok(()) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "credential.update",
+                "credential",
+                Some(&id),
+                Some(&requested_name),
+                "success",
+                Some(serde_json::json!({"auth_type": requested_auth_type})),
+            )
+            .await;
+            Redirect::to("/credentials").into_response()
+        }
+        Err(err) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "credential.update",
+                "credential",
+                Some(&id),
+                Some(&requested_name),
+                "failure",
+                Some(serde_json::json!({"reason": "database"})),
+            )
+            .await;
+            admin_db_error("update credential", err)
+        }
     }
 }
 
@@ -715,6 +1103,7 @@ async fn delete_credential(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    peer: OptionalPeer,
     Form(form): Form<CsrfForm>,
 ) -> Response {
     let t = request_l10n(&headers);
@@ -728,7 +1117,26 @@ async fn delete_credential(
         Ok(assets) => assets,
         Err(err) => return admin_db_error("list assets before deleting credential", err),
     };
+    let target_label = state
+        .db
+        .get_credential(&id)
+        .await
+        .ok()
+        .flatten()
+        .map(|credential| credential.name);
     if credential_is_in_use(&assets, &id) {
+        record_audit(
+            &state,
+            Some(&session),
+            source_ip(peer.as_ref()),
+            "credential.delete",
+            "credential",
+            Some(&id),
+            target_label.as_deref(),
+            "failure",
+            Some(serde_json::json!({"reason": "in_use"})),
+        )
+        .await;
         let credentials = match state.db.list_credentials().await {
             Ok(credentials) => credentials,
             Err(err) => return admin_db_error("list credentials after delete conflict", err),
@@ -749,8 +1157,36 @@ async fn delete_credential(
             .into_response();
     }
     match state.db.delete_credential(&id).await {
-        Ok(()) => Redirect::to("/credentials").into_response(),
-        Err(err) => admin_db_error("delete credential", err),
+        Ok(()) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "credential.delete",
+                "credential",
+                Some(&id),
+                target_label.as_deref(),
+                "success",
+                None,
+            )
+            .await;
+            Redirect::to("/credentials").into_response()
+        }
+        Err(err) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "credential.delete",
+                "credential",
+                Some(&id),
+                target_label.as_deref(),
+                "failure",
+                Some(serde_json::json!({"reason": "database"})),
+            )
+            .await;
+            admin_db_error("delete credential", err)
+        }
     }
 }
 
@@ -785,6 +1221,7 @@ struct KeyAccessForm {
 async fn create_key(
     State(state): State<AdminState>,
     headers: HeaderMap,
+    peer: OptionalPeer,
     Form(form): Form<CreateKeyForm>,
 ) -> Response {
     let Ok(session) = guard(&headers, &state).await else {
@@ -793,16 +1230,61 @@ async fn create_key(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
-    if let Ok((public_key, fingerprint)) = parse_public_key_line(&form.public_key) {
-        if let Err(err) = state
-            .db
-            .add_authorized_key(NewAuthorizedKey::new(form.name, public_key, fingerprint))
-            .await
-        {
-            return admin_db_error("create authorized key", err);
+    let requested_name = form.name.clone();
+    let (public_key, fingerprint) = match parse_public_key_line(&form.public_key) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "ssh_identity.create",
+                "authorized_key",
+                None,
+                Some(&requested_name),
+                "failure",
+                Some(serde_json::json!({"reason": "invalid_public_key"})),
+            )
+            .await;
+            return Redirect::to("/keys").into_response();
+        }
+    };
+    match state
+        .db
+        .add_authorized_key(NewAuthorizedKey::new(form.name, public_key, fingerprint))
+        .await
+    {
+        Ok(created) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "ssh_identity.create",
+                "authorized_key",
+                Some(&created.id),
+                Some(&created.name),
+                "success",
+                Some(serde_json::json!({"fingerprint": created.fingerprint})),
+            )
+            .await;
+            Redirect::to("/keys").into_response()
+        }
+        Err(err) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "ssh_identity.create",
+                "authorized_key",
+                None,
+                Some(&requested_name),
+                "failure",
+                Some(serde_json::json!({"reason": "database"})),
+            )
+            .await;
+            admin_db_error("create authorized key", err)
         }
     }
-    Redirect::to("/keys").into_response()
 }
 
 async fn edit_key(
@@ -833,6 +1315,7 @@ async fn update_key(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    peer: OptionalPeer,
     body: Bytes,
 ) -> Response {
     let t = request_l10n(&headers);
@@ -860,6 +1343,10 @@ async fn update_key(
             return render_key_edit_error(&state, t, &session, &id, &err.to_string()).await;
         }
     };
+    let audit_name = form.name.clone();
+    let audit_mode = form.asset_access_mode.clone();
+    let audit_asset_count = form.asset_ids.len();
+    let audit_fingerprint = fingerprint.clone();
     match state
         .db
         .update_authorized_key_with_access(
@@ -870,8 +1357,40 @@ async fn update_key(
         )
         .await
     {
-        Ok(()) => Redirect::to("/keys").into_response(),
-        Err(err) => render_key_edit_error(&state, t, &session, &id, &err.to_string()).await,
+        Ok(()) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "ssh_identity.update",
+                "authorized_key",
+                Some(&id),
+                Some(&audit_name),
+                "success",
+                Some(serde_json::json!({
+                    "access_mode": audit_mode,
+                    "asset_count": audit_asset_count,
+                    "fingerprint": audit_fingerprint
+                })),
+            )
+            .await;
+            Redirect::to("/keys").into_response()
+        }
+        Err(err) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "ssh_identity.update",
+                "authorized_key",
+                Some(&id),
+                Some(&audit_name),
+                "failure",
+                Some(serde_json::json!({"reason": "database"})),
+            )
+            .await;
+            render_key_edit_error(&state, t, &session, &id, &err.to_string()).await
+        }
     }
 }
 
@@ -942,6 +1461,7 @@ async fn deactivate_key(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    peer: OptionalPeer,
     Form(form): Form<CsrfForm>,
 ) -> Response {
     let Ok(session) = guard(&headers, &state).await else {
@@ -950,16 +1470,14 @@ async fn deactivate_key(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
-    match state.db.set_authorized_key_active(&id, false).await {
-        Ok(()) => Redirect::to("/keys").into_response(),
-        Err(err) => admin_db_error("deactivate authorized key", err),
-    }
+    set_key_active(&state, &session, peer.as_ref(), &id, false).await
 }
 
 async fn activate_key(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    peer: OptionalPeer,
     Form(form): Form<CsrfForm>,
 ) -> Response {
     let Ok(session) = guard(&headers, &state).await else {
@@ -968,9 +1486,59 @@ async fn activate_key(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
-    match state.db.set_authorized_key_active(&id, true).await {
-        Ok(()) => Redirect::to("/keys").into_response(),
-        Err(err) => admin_db_error("activate authorized key", err),
+    set_key_active(&state, &session, peer.as_ref(), &id, true).await
+}
+
+async fn set_key_active(
+    state: &AdminState,
+    session: &AuthenticatedSession,
+    peer: Option<&Extension<ConnectInfo<SocketAddr>>>,
+    id: &str,
+    active: bool,
+) -> Response {
+    let target_label = state
+        .db
+        .get_authorized_key_by_id(id)
+        .await
+        .ok()
+        .flatten()
+        .map(|key| key.name);
+    let action = if active {
+        "ssh_identity.activate"
+    } else {
+        "ssh_identity.deactivate"
+    };
+    match state.db.set_authorized_key_active(id, active).await {
+        Ok(()) => {
+            record_audit(
+                state,
+                Some(session),
+                source_ip(peer),
+                action,
+                "authorized_key",
+                Some(id),
+                target_label.as_deref(),
+                "success",
+                None,
+            )
+            .await;
+            Redirect::to("/keys").into_response()
+        }
+        Err(err) => {
+            record_audit(
+                state,
+                Some(session),
+                source_ip(peer),
+                action,
+                "authorized_key",
+                Some(id),
+                target_label.as_deref(),
+                "failure",
+                Some(serde_json::json!({"reason": "database"})),
+            )
+            .await;
+            admin_db_error("change authorized key state", err)
+        }
     }
 }
 
@@ -978,6 +1546,7 @@ async fn delete_key(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    peer: OptionalPeer,
     Form(form): Form<CsrfForm>,
 ) -> Response {
     let Ok(session) = guard(&headers, &state).await else {
@@ -986,9 +1555,44 @@ async fn delete_key(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
+    let target_label = state
+        .db
+        .get_authorized_key_by_id(&id)
+        .await
+        .ok()
+        .flatten()
+        .map(|key| key.name);
     match state.db.delete_authorized_key(&id).await {
-        Ok(()) => Redirect::to("/keys").into_response(),
-        Err(err) => admin_db_error("delete authorized key", err),
+        Ok(()) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "ssh_identity.delete",
+                "authorized_key",
+                Some(&id),
+                target_label.as_deref(),
+                "success",
+                None,
+            )
+            .await;
+            Redirect::to("/keys").into_response()
+        }
+        Err(err) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "ssh_identity.delete",
+                "authorized_key",
+                Some(&id),
+                target_label.as_deref(),
+                "failure",
+                Some(serde_json::json!({"reason": "database"})),
+            )
+            .await;
+            admin_db_error("delete authorized key", err)
+        }
     }
 }
 
@@ -1019,6 +1623,7 @@ async fn delete_known_host(
     State(state): State<AdminState>,
     headers: HeaderMap,
     Path((hostname, port)): Path<(String, i64)>,
+    peer: OptionalPeer,
     Form(form): Form<KnownHostDelete>,
 ) -> Response {
     let Ok(session) = guard(&headers, &state).await else {
@@ -1028,6 +1633,21 @@ async fn delete_known_host(
         return resp;
     }
     if !trust_reset_confirmed(form.confirm_reset.as_deref()) {
+        record_audit(
+            &state,
+            Some(&session),
+            source_ip(peer.as_ref()),
+            "known_host.reset",
+            "known_host",
+            None,
+            Some(&format!("{hostname}:{port}")),
+            "failure",
+            Some(serde_json::json!({
+                "reason": "confirmation_required",
+                "key_type": form.key_type
+            })),
+        )
+        .await;
         return (StatusCode::BAD_REQUEST, "trust reset confirmation required").into_response();
     }
     match state
@@ -1035,8 +1655,39 @@ async fn delete_known_host(
         .delete_known_host(&hostname, port, &form.key_type)
         .await
     {
-        Ok(()) => Redirect::to("/known-hosts").into_response(),
-        Err(err) => admin_db_error("delete known host", err),
+        Ok(()) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "known_host.reset",
+                "known_host",
+                None,
+                Some(&format!("{hostname}:{port}")),
+                "success",
+                Some(serde_json::json!({"key_type": form.key_type})),
+            )
+            .await;
+            Redirect::to("/known-hosts").into_response()
+        }
+        Err(err) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "known_host.reset",
+                "known_host",
+                None,
+                Some(&format!("{hostname}:{port}")),
+                "failure",
+                Some(serde_json::json!({
+                    "reason": "database",
+                    "key_type": form.key_type
+                })),
+            )
+            .await;
+            admin_db_error("delete known host", err)
+        }
     }
 }
 
@@ -1049,7 +1700,11 @@ async fn sessions(State(state): State<AdminState>, headers: HeaderMap) -> Respon
         Ok(sessions) => sessions,
         Err(err) => return admin_db_error("list sessions", err),
     };
-    Html(html::sessions(t, &sessions).into_string()).into_response()
+    let admin_events = match state.db.list_audit_events(100).await {
+        Ok(events) => events,
+        Err(err) => return admin_db_error("list admin audit events", err),
+    };
+    Html(html::sessions(t, &sessions, &admin_events).into_string()).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1141,6 +1796,7 @@ async fn import_page(State(state): State<AdminState>, headers: HeaderMap) -> Res
 async fn import_data(
     State(state): State<AdminState>,
     headers: HeaderMap,
+    peer: OptionalPeer,
     mut multipart: Multipart,
 ) -> Response {
     let t = request_l10n(&headers);
@@ -1193,6 +1849,16 @@ async fn import_data(
         Ok(input) => input,
         Err(err) => {
             summary.record_error(err.to_string());
+            record_import_audit(
+                &state,
+                &session,
+                peer.as_ref(),
+                kind,
+                format,
+                policy,
+                &summary,
+            )
+            .await;
             return Html(html::import_export(t, &session.csrf_token, Some(&summary)).into_string())
                 .into_response();
         }
@@ -1206,15 +1872,73 @@ async fn import_data(
     };
     match result {
         Ok(summary) => {
+            record_import_audit(
+                &state,
+                &session,
+                peer.as_ref(),
+                kind,
+                format,
+                policy,
+                &summary,
+            )
+            .await;
             Html(html::import_export(t, &session.csrf_token, Some(&summary)).into_string())
                 .into_response()
         }
         Err(err) => {
             summary.record_error(err.to_string());
+            record_import_audit(
+                &state,
+                &session,
+                peer.as_ref(),
+                kind,
+                format,
+                policy,
+                &summary,
+            )
+            .await;
             Html(html::import_export(t, &session.csrf_token, Some(&summary)).into_string())
                 .into_response()
         }
     }
+}
+
+async fn record_import_audit(
+    state: &AdminState,
+    session: &AuthenticatedSession,
+    peer: Option<&Extension<ConnectInfo<SocketAddr>>>,
+    kind: TransferKind,
+    format: TransferFormat,
+    policy: ConflictPolicy,
+    summary: &ImportSummary,
+) {
+    record_audit(
+        state,
+        Some(session),
+        source_ip(peer),
+        "data.import",
+        match kind {
+            TransferKind::Assets => "asset_batch",
+            TransferKind::Credentials => "credential_batch",
+        },
+        None,
+        None,
+        if summary.errors.is_empty() {
+            "success"
+        } else {
+            "failure"
+        },
+        Some(serde_json::json!({
+            "kind": format!("{kind:?}").to_ascii_lowercase(),
+            "format": format!("{format:?}").to_ascii_lowercase(),
+            "conflict_policy": format!("{policy:?}").to_ascii_lowercase(),
+            "imported": summary.imported,
+            "skipped": summary.skipped,
+            "overwritten": summary.overwritten,
+            "error_count": summary.errors.len()
+        })),
+    )
+    .await;
 }
 
 fn request_l10n(headers: &HeaderMap) -> &'static super::i18n::L10n {
@@ -1251,6 +1975,14 @@ fn settings_password_error_message(
         bootstrap::AdminPasswordChangeError::ConfirmationMismatch => {
             t.settings_password_confirmation_mismatch
         }
+    }
+}
+
+fn settings_password_error_code(err: bootstrap::AdminPasswordChangeError) -> &'static str {
+    match err {
+        bootstrap::AdminPasswordChangeError::CurrentPasswordInvalid => "current_password_invalid",
+        bootstrap::AdminPasswordChangeError::NewPasswordEmpty => "new_password_empty",
+        bootstrap::AdminPasswordChangeError::ConfirmationMismatch => "confirmation_mismatch",
     }
 }
 
@@ -1508,6 +2240,45 @@ mod tests {
         assert!(trust_reset_confirmed(Some("yes")));
         assert!(!trust_reset_confirmed(None));
         assert!(!trust_reset_confirmed(Some("true")));
+    }
+
+    #[tokio::test]
+    async fn admin_audit_records_identity_source_and_safe_details() {
+        let state = test_admin_state().await;
+        let session = AuthenticatedSession {
+            token: "session-token".to_string(),
+            csrf_token: "csrf-token".to_string(),
+            admin_id: "local-admin".to_string(),
+            admin_label: "Local admin".to_string(),
+        };
+
+        record_audit(
+            &state,
+            Some(&session),
+            Some("127.0.0.1".to_string()),
+            "credential.update",
+            "credential",
+            Some("credential-1"),
+            Some("production"),
+            "success",
+            Some(serde_json::json!({"auth_type": "key"})),
+        )
+        .await;
+
+        let events = state.db.list_audit_events(10).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].actor_id.as_deref(), Some("local-admin"));
+        assert_eq!(events[0].actor_label, "Local admin");
+        assert_eq!(events[0].source_ip.as_deref(), Some("127.0.0.1"));
+        assert_eq!(
+            events[0].details_json.as_deref(),
+            Some(r#"{"auth_type":"key"}"#)
+        );
+        assert!(!events[0]
+            .details_json
+            .as_deref()
+            .unwrap()
+            .contains("secret"));
     }
 
     #[tokio::test]

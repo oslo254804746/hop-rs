@@ -14,6 +14,8 @@ const SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 #[derive(Debug)]
 struct AdminSession {
     csrf_token: String,
+    admin_id: String,
+    admin_label: String,
     last_seen: Instant,
 }
 
@@ -33,6 +35,8 @@ impl Default for AdminSessions {
 pub struct AuthenticatedSession {
     pub token: String,
     pub csrf_token: String,
+    pub admin_id: String,
+    pub admin_label: String,
 }
 
 impl AdminSessions {
@@ -43,13 +47,15 @@ impl AdminSessions {
         }
     }
 
-    pub async fn create(&self) -> String {
+    pub async fn create(&self, admin_id: &str, admin_label: &str) -> String {
         let token = random_token();
         let csrf_token = random_token();
         self.inner.lock().await.insert(
             token.clone(),
             AdminSession {
                 csrf_token,
+                admin_id: admin_id.to_string(),
+                admin_label: admin_label.to_string(),
                 last_seen: Instant::now(),
             },
         );
@@ -69,6 +75,8 @@ impl AdminSessions {
         Some(AuthenticatedSession {
             token: token.to_string(),
             csrf_token: session.csrf_token.clone(),
+            admin_id: session.admin_id.clone(),
+            admin_label: session.admin_label.clone(),
         })
     }
 
@@ -142,7 +150,7 @@ mod tests {
     #[tokio::test]
     async fn sessions_expire_after_ttl() {
         let sessions = AdminSessions::with_ttl(Duration::from_millis(5));
-        let token = sessions.create().await;
+        let token = sessions.create("local-admin", "Local admin").await;
 
         assert!(sessions.authenticate(&token).await.is_some());
         tokio::time::sleep(Duration::from_millis(15)).await;
@@ -152,9 +160,11 @@ mod tests {
     #[tokio::test]
     async fn csrf_token_must_match_authenticated_session() {
         let sessions = AdminSessions::default();
-        let token = sessions.create().await;
+        let token = sessions.create("local-admin", "Local admin").await;
         let session = sessions.authenticate(&token).await.unwrap();
 
+        assert_eq!(session.admin_id, "local-admin");
+        assert_eq!(session.admin_label, "Local admin");
         assert!(sessions.validate_csrf(&token, &session.csrf_token).await);
         assert!(!sessions.validate_csrf(&token, "wrong").await);
     }
