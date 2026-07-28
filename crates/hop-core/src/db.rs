@@ -912,6 +912,17 @@ impl HopDb {
         .map_err(Into::into)
     }
 
+    pub async fn count_sessions_since_hours(&self, hours: i64) -> Result<i64> {
+        let modifier = format!("-{} hours", hours.max(1));
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sessions WHERE started_at >= datetime('now', ?1)",
+        )
+        .bind(modifier)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     pub async fn get_known_host(
         &self,
         hostname: &str,
@@ -1503,5 +1514,6 @@ mod tests {
         assert_eq!(finished.status, "failed");
         assert_eq!(finished.error.as_deref(), Some("rejected"));
         assert!(finished.ended_at.is_some());
+        assert_eq!(db.count_sessions_since_hours(24).await.unwrap(), 1);
     }
 }

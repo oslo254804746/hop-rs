@@ -1,7 +1,8 @@
 use hop_core::{
-    Asset, AssetAccessMode, AuditEvent, AuthorizedKey, Credential, KnownHost, Session,
-    ASSET_PRESET_MYSQL, ASSET_PRESET_POSTGRES, ASSET_PRESET_RDP, ASSET_PRESET_REDIS,
-    ASSET_PRESET_VNC, ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
+    Asset, AssetAccessMode, AssetHealth, AuditEvent, AuthorizedKey, Credential, KnownHost, Session,
+    ASSET_HEALTH_FAILED, ASSET_HEALTH_HEALTHY, ASSET_HEALTH_UNKNOWN, ASSET_PRESET_MYSQL,
+    ASSET_PRESET_POSTGRES, ASSET_PRESET_RDP, ASSET_PRESET_REDIS, ASSET_PRESET_VNC,
+    ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
 };
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
@@ -849,6 +850,109 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         font-size: 0.82rem;
                     }
 
+                    .dashboard-activity-list,
+                    .dashboard-event-list,
+                    .coverage-list {
+                        display: grid;
+                        gap: 0;
+                    }
+
+                    .dashboard-activity-item,
+                    .dashboard-event-item {
+                        min-width: 0;
+                        display: grid;
+                        grid-template-columns: 10px minmax(0, 1.45fr) minmax(100px, 0.8fr) minmax(110px, auto);
+                        gap: 12px;
+                        align-items: center;
+                        padding: 12px 0;
+                        border-bottom: 1px solid var(--border);
+                    }
+
+                    .dashboard-event-item {
+                        grid-template-columns: 10px minmax(0, 1fr) minmax(150px, 1fr) auto;
+                    }
+
+                    .dashboard-activity-item:last-child,
+                    .dashboard-event-item:last-child {
+                        border-bottom: 0;
+                    }
+
+                    .dashboard-activity-item b,
+                    .dashboard-event-item b {
+                        display: block;
+                        overflow: hidden;
+                        color: var(--ink);
+                        font-size: 0.9rem;
+                        text-overflow: ellipsis;
+                        white-space: nowrap;
+                    }
+
+                    .dashboard-activity-item small,
+                    .dashboard-event-item small,
+                    .coverage-item small {
+                        display: block;
+                        margin-top: 3px;
+                        color: var(--muted);
+                        font-size: 0.78rem;
+                    }
+
+                    .dashboard-result {
+                        display: grid;
+                        justify-items: end;
+                        gap: 4px;
+                    }
+
+                    .coverage-item {
+                        padding: 12px 0;
+                        border-bottom: 1px solid var(--border);
+                    }
+
+                    .coverage-item:last-child {
+                        border-bottom: 0;
+                    }
+
+                    .coverage-label {
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        gap: 12px;
+                        color: var(--ink-soft);
+                        font-size: 0.86rem;
+                    }
+
+                    .coverage-label strong {
+                        color: var(--ink);
+                        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                    }
+
+                    .coverage-track {
+                        height: 7px;
+                        margin-top: 8px;
+                        overflow: hidden;
+                        border-radius: 999px;
+                        background: #0a0f16;
+                        border: 1px solid var(--border);
+                    }
+
+                    .coverage-track span {
+                        display: block;
+                        height: 100%;
+                        border-radius: inherit;
+                        background: var(--control);
+                    }
+
+                    .dashboard-panel-link {
+                        color: #93c5fd;
+                        font-size: 0.82rem;
+                        font-weight: 750;
+                        text-decoration: none;
+                    }
+
+                    .dashboard-panel-link:hover {
+                        color: #ffffff;
+                        text-decoration: underline;
+                    }
+
                     .terminal-strip {
                         display: flex;
                         align-items: center;
@@ -1050,6 +1154,18 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         }
                         .metric-value {
                             font-size: 1.8rem;
+                        }
+                        .dashboard-activity-item,
+                        .dashboard-event-item {
+                            grid-template-columns: 10px minmax(0, 1fr) auto;
+                        }
+                        .dashboard-activity-item > :nth-child(3),
+                        .dashboard-event-item > :nth-child(3) {
+                            grid-column: 2;
+                        }
+                        .dashboard-result {
+                            grid-column: 3;
+                            grid-row: 1 / span 2;
                         }
                         .heatmap {
                             grid-template-columns: repeat(8, 1fr);
@@ -1257,13 +1373,82 @@ pub fn settings(t: &L10n, csrf_token: &str, error: Option<&str>) -> Markup {
     )
 }
 
-pub fn overview(
-    t: &L10n,
-    asset_count: usize,
-    credential_count: usize,
-    key_count: usize,
-    session_count: usize,
-) -> Markup {
+#[derive(Debug, Clone)]
+pub struct DashboardGateway {
+    pub admin_bind: String,
+    pub ssh_bind: String,
+    pub version: String,
+    pub started_at: String,
+    pub uptime_seconds: u64,
+    pub admin_reachable: bool,
+    pub ssh_reachable: bool,
+    pub database_healthy: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DashboardData {
+    pub gateway: DashboardGateway,
+    pub assets: Vec<Asset>,
+    pub credentials: Vec<Credential>,
+    pub keys: Vec<AuthorizedKey>,
+    pub known_hosts: Vec<KnownHost>,
+    pub asset_health: Vec<AssetHealth>,
+    pub recent_sessions: Vec<Session>,
+    pub sessions_24h: i64,
+    pub recent_admin_events: Vec<AuditEvent>,
+    pub source_errors: Vec<String>,
+}
+
+pub fn overview(t: &L10n, data: &DashboardData) -> Markup {
+    let ssh_assets: Vec<&Asset> = data
+        .assets
+        .iter()
+        .filter(|asset| asset.protocol == ASSET_PROTOCOL_SSH)
+        .collect();
+    let managed_ssh_assets = ssh_assets
+        .iter()
+        .filter(|asset| asset.credential_id.is_some())
+        .count();
+    let active_keys = data.keys.iter().filter(|key| key.is_active).count();
+    let restricted_keys = data
+        .keys
+        .iter()
+        .filter(|key| key.is_active && key.asset_access_mode == AssetAccessMode::Restricted)
+        .count();
+    let trusted_ssh_assets = ssh_assets
+        .iter()
+        .filter(|asset| {
+            data.known_hosts
+                .iter()
+                .any(|host| host.hostname == asset.hostname && host.port == asset.port)
+        })
+        .count();
+    let healthy_assets = data
+        .assets
+        .iter()
+        .filter(|asset| asset_health_status(data, &asset.id) == ASSET_HEALTH_HEALTHY)
+        .count();
+    let failed_assets = data
+        .assets
+        .iter()
+        .filter(|asset| asset_health_status(data, &asset.id) == ASSET_HEALTH_FAILED)
+        .count();
+    let unknown_assets = data.assets.len() - healthy_assets - failed_assets;
+    let unmanaged_ssh_assets = ssh_assets.len().saturating_sub(managed_ssh_assets);
+    let risk_count = usize::from(!data.source_errors.is_empty())
+        + usize::from(failed_assets > 0)
+        + usize::from(unknown_assets > 0)
+        + usize::from(unmanaged_ssh_assets > 0)
+        + usize::from(!data.assets.is_empty() && active_keys == 0);
+    let gateway_operational = data.gateway.admin_reachable
+        && data.gateway.ssh_reachable
+        && data.gateway.database_healthy
+        && data.source_errors.is_empty()
+        && failed_assets == 0;
+    let managed_coverage = coverage_percent(managed_ssh_assets, ssh_assets.len());
+    let restricted_coverage = coverage_percent(restricted_keys, active_keys);
+    let trust_coverage = coverage_percent(trusted_ssh_assets, ssh_assets.len());
+
     layout(
         t.overview_title,
         "overview",
@@ -1276,30 +1461,41 @@ pub fn overview(
                         p { (t.overview_intro) }
                     }
                     div.console-actions {
-                        span.status-chip.good { span.status-dot.good {} (t.overview_gateway_status) }
+                        @if gateway_operational {
+                            span.status-chip.good { span.status-dot.good {} (t.overview_status_operational) }
+                        } @else {
+                            span.status-chip.warn { span.status-dot.warn {} (t.overview_status_attention) }
+                        }
                         a.button href="/assets" { (t.assets_add_heading) }
                     }
                 }
                 div.metric-grid {
                     div.metric {
                         span.metric-label { (t.overview_assets_label) }
-                        strong.metric-value { (asset_count) }
-                        span.metric-note { (t.overview_assets_note) }
+                        strong.metric-value { (data.assets.len()) }
+                        span.metric-note {
+                            (healthy_assets) " " (t.overview_health_healthy) " · "
+                            (failed_assets) " " (t.overview_health_failed) " · "
+                            (unknown_assets) " " (t.overview_health_unknown)
+                        }
                     }
                     div.metric {
-                        span.metric-label { (t.overview_sessions_label) }
-                        strong.metric-value { (session_count) }
-                        span.metric-note { (t.overview_sessions_note) }
+                        span.metric-label { (t.overview_sessions_24h_label) }
+                        strong.metric-value { (data.sessions_24h) }
+                        span.metric-note { (t.overview_sessions_24h_note) }
                     }
                     div.metric {
-                        span.metric-label { (t.overview_credentials_label) }
-                        strong.metric-value { (credential_count) }
-                        span.metric-note { (t.overview_credentials_note) }
+                        span.metric-label { (t.overview_active_keys_label) }
+                        strong.metric-value { (active_keys) }
+                        span.metric-note { (t.overview_active_keys_note) }
                     }
                     div.metric {
-                        span.metric-label { (t.overview_keys_label) }
-                        strong.metric-value { (key_count) }
-                        span.metric-note { (t.overview_keys_note) }
+                        span.metric-label { (t.overview_managed_coverage_label) }
+                        strong.metric-value { (managed_coverage) "%" }
+                        span.metric-note {
+                            (managed_ssh_assets) " / " (ssh_assets.len()) " "
+                            (t.overview_managed_coverage_suffix)
+                        }
                     }
                 }
                 div.dashboard-grid {
@@ -1307,14 +1503,55 @@ pub fn overview(
                         section.panel {
                             div.panel-header {
                                 div {
-                                    h2 { (t.overview_session_activity_heading) }
-                                    p { (t.overview_session_activity_intro) }
+                                    h2 { (t.overview_recent_access_heading) }
+                                    p { (t.overview_recent_access_intro) }
                                 }
-                                span.status-chip.good { (session_count) " " (t.overview_recorded_suffix) }
+                                a.dashboard-panel-link href="/sessions" { (t.overview_view_all) }
                             }
-                            div.terminal-strip {
-                                span { "$" }
-                                span { "hop admin sessions --limit 100" }
+                            div.dashboard-activity-list {
+                                @if data.recent_sessions.is_empty() {
+                                    p.fine-print { (t.overview_no_recent_access) }
+                                }
+                                @for session in &data.recent_sessions {
+                                    div.dashboard-activity-item {
+                                        @if session.status == "failed" {
+                                            span.status-dot.danger {}
+                                        } @else if session.status == "ok" {
+                                            span.status-dot.good {}
+                                        } @else {
+                                            span.status-dot.warn {}
+                                        }
+                                        div {
+                                            b { (session.key_name.as_deref().unwrap_or("-")) }
+                                            small {
+                                                (session.asset_name.as_deref().unwrap_or("-"))
+                                                @if let Some(started_at) = &session.started_at {
+                                                    " · " (started_at)
+                                                }
+                                            }
+                                        }
+                                        div {
+                                            b.mono { (session.mode) }
+                                            small.mono {
+                                                @if let Some(host) = &session.target_host {
+                                                    (host) ":" (session.target_port.unwrap_or_default())
+                                                } @else {
+                                                    "-"
+                                                }
+                                            }
+                                        }
+                                        div.dashboard-result {
+                                            @if session.status == "failed" {
+                                                span.status-pill.danger { (session.status) }
+                                            } @else if session.status == "ok" {
+                                                span.status-pill { (session.status) }
+                                            } @else {
+                                                span.status-pill.neutral { (session.status) }
+                                            }
+                                            small.mono { (session_duration_label(session)) }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1322,42 +1559,258 @@ pub fn overview(
                         section.panel {
                             div.panel-header {
                                 div {
-                                    h2 { (t.overview_inventory_health_heading) }
-                                    p { (t.overview_inventory_health_intro) }
+                                    h2 { (t.overview_risk_heading) }
+                                    p { (t.overview_risk_intro) }
+                                }
+                                @if risk_count > 0 {
+                                    span.status-chip.warn { (risk_count) }
                                 }
                             }
-                            div.posture-list {
-                                div.posture-item {
-                                    span.status-dot.good {}
-                                    b { (t.overview_assets_summary) }
-                                    span { (asset_count) }
+                            div.incident-list {
+                                @if !data.source_errors.is_empty() {
+                                    div.incident-item {
+                                        span.status-dot.danger {}
+                                        b { (t.overview_source_unavailable) }
+                                        span { (data.source_errors.join(", ")) }
+                                    }
                                 }
-                                div.posture-item {
-                                    span.status-dot.good {}
-                                    b { (t.overview_credentials_summary) }
-                                    span { (credential_count) }
+                                @if failed_assets > 0 {
+                                    div.incident-item {
+                                        span.status-dot.danger {}
+                                        b { (t.overview_failed_assets_risk) }
+                                        a.dashboard-panel-link href="/assets" { (failed_assets) }
+                                    }
                                 }
-                                div.posture-item {
+                                @if unknown_assets > 0 {
+                                    div.incident-item {
+                                        span.status-dot.warn {}
+                                        b { (t.overview_unknown_assets_risk) }
+                                        a.dashboard-panel-link href="/assets" { (unknown_assets) }
+                                    }
+                                }
+                                @if unmanaged_ssh_assets > 0 {
+                                    div.incident-item {
+                                        span.status-dot.warn {}
+                                        b { (t.overview_unmanaged_assets_risk) }
+                                        a.dashboard-panel-link href="/credentials" { (unmanaged_ssh_assets) }
+                                    }
+                                }
+                                @if !data.assets.is_empty() && active_keys == 0 {
+                                    div.incident-item {
+                                        span.status-dot.warn {}
+                                        b { (t.overview_no_active_keys_risk) }
+                                        a.dashboard-panel-link href="/keys" { (t.nav_keys) }
+                                    }
+                                }
+                                @if risk_count == 0 {
+                                    div.incident-item {
                                     span.status-dot.good {}
-                                    b { (t.overview_keys_summary) }
-                                    span { (key_count) }
+                                        b { (t.overview_no_risks) }
+                                        span { "✓" }
+                                    }
                                 }
                             }
                         }
-                        section.panel {
-                            div.panel-header {
+                    }
+                }
+                div.dashboard-grid {
+                    section.panel {
+                        div.panel-header {
+                            div {
+                                h2 { (t.overview_gateway_heading) }
+                                p { (t.overview_gateway_intro) }
+                            }
+                        }
+                        div.posture-list {
+                            (gateway_posture_row(t.overview_admin_endpoint, &data.gateway.admin_bind, data.gateway.admin_reachable, t))
+                            (gateway_posture_row(t.overview_ssh_endpoint, &data.gateway.ssh_bind, data.gateway.ssh_reachable, t))
+                            (gateway_posture_row(t.overview_database, "SQLite", data.gateway.database_healthy, t))
+                            div.posture-item {
+                                span.status-dot.good {}
+                                b { (t.overview_version) }
+                                span.mono { "v" (data.gateway.version) }
+                            }
+                            div.posture-item {
+                                span.status-dot.good {}
+                                b { (t.overview_started) }
+                                span.mono { (data.gateway.started_at) }
+                            }
+                            div.posture-item {
+                                span.status-dot.good {}
+                                b { (t.overview_uptime) }
+                                span.mono { (uptime_label(data.gateway.uptime_seconds)) }
+                            }
+                        }
+                    }
+                    section.panel {
+                        div.panel-header {
+                            div {
+                                h2 { (t.overview_coverage_heading) }
+                                p { (t.overview_coverage_intro) }
+                            }
+                            span.status-chip { (data.credentials.len()) " " (t.credentials_title) }
+                        }
+                        div.coverage-list {
+                            (coverage_item(
+                                t.overview_credential_coverage,
+                                managed_ssh_assets,
+                                ssh_assets.len(),
+                                managed_coverage,
+                            ))
+                            (coverage_item(
+                                t.overview_restricted_coverage,
+                                restricted_keys,
+                                active_keys,
+                                restricted_coverage,
+                            ))
+                            (coverage_item(
+                                t.overview_trust_coverage,
+                                trusted_ssh_assets,
+                                ssh_assets.len(),
+                                trust_coverage,
+                            ))
+                        }
+                    }
+                }
+                section.panel {
+                    div.panel-header {
+                        div {
+                            h2 { (t.overview_recent_changes_heading) }
+                            p { (t.overview_recent_changes_intro) }
+                        }
+                        a.dashboard-panel-link href="/sessions" { (t.overview_view_all) }
+                    }
+                    div.dashboard-event-list {
+                        @if data.recent_admin_events.is_empty() {
+                            p.fine-print { (t.overview_no_recent_changes) }
+                        }
+                        @for event in &data.recent_admin_events {
+                            div.dashboard-event-item {
+                                @if event.result == "failure" {
+                                    span.status-dot.danger {}
+                                } @else {
+                                    span.status-dot.good {}
+                                }
                                 div {
-                                    h2 { (t.overview_scope_heading) }
-                                    p { (t.overview_scope_intro) }
+                                    b { (event.actor_label) }
+                                    small { (event.occurred_at.as_deref().unwrap_or("-")) }
+                                }
+                                div {
+                                    b.mono { (event.action) }
+                                    small {
+                                        (event.target_label.as_deref().unwrap_or(event.target_type.as_str()))
+                                    }
+                                }
+                                div.dashboard-result {
+                                    @if event.result == "failure" {
+                                        span.status-pill.danger { (event.result) }
+                                    } @else {
+                                        span.status-pill { (event.result) }
+                                    }
                                 }
                             }
-                            p.fine-print { (t.overview_scope_note) }
                         }
                     }
                 }
             }
         },
     )
+}
+
+fn asset_health_status<'a>(data: &'a DashboardData, asset_id: &str) -> &'a str {
+    data.asset_health
+        .iter()
+        .find(|health| health.asset_id == asset_id)
+        .map(|health| health.status.as_str())
+        .unwrap_or(ASSET_HEALTH_UNKNOWN)
+}
+
+fn coverage_percent(numerator: usize, denominator: usize) -> usize {
+    if denominator == 0 {
+        0
+    } else {
+        numerator.saturating_mul(100) / denominator
+    }
+}
+
+fn coverage_item(label: &str, numerator: usize, denominator: usize, percent: usize) -> Markup {
+    html! {
+        div.coverage-item {
+            div.coverage-label {
+                span { (label) }
+                strong { (percent) "%" }
+            }
+            div.coverage-track aria-hidden="true" {
+                span style=(format!("width: {percent}%")) {}
+            }
+            small { (numerator) " / " (denominator) }
+        }
+    }
+}
+
+fn gateway_posture_row(label: &str, detail: &str, healthy: bool, t: &L10n) -> Markup {
+    html! {
+        div.posture-item {
+            @if healthy {
+                span.status-dot.good {}
+            } @else {
+                span.status-dot.danger {}
+            }
+            b { (label) }
+            span {
+                span.mono { (detail) }
+                " · "
+                @if healthy {
+                    (t.overview_reachable)
+                } @else {
+                    (t.overview_unreachable)
+                }
+            }
+        }
+    }
+}
+
+fn uptime_label(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = seconds % 86_400 / 3_600;
+    let minutes = seconds % 3_600 / 60;
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{minutes}m")
+    }
+}
+
+fn session_duration_label(session: &Session) -> String {
+    let (Some(started_at), Some(ended_at)) = (&session.started_at, &session.ended_at) else {
+        return "—".to_string();
+    };
+    let (Some(started_at), Some(ended_at)) =
+        (parse_timestamp(started_at), parse_timestamp(ended_at))
+    else {
+        return "—".to_string();
+    };
+    let seconds = (ended_at - started_at).num_seconds().max(0);
+    if seconds >= 3_600 {
+        format!("{}h {}m", seconds / 3_600, seconds % 3_600 / 60)
+    } else if seconds >= 60 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn parse_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+        .ok()
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|timestamp| timestamp.and_utc())
+        })
 }
 
 pub fn assets(
@@ -3368,20 +3821,48 @@ mod tests {
 
     #[test]
     fn overview_renders_metric_tiles_with_labels() {
-        let rendered = overview(&EN, 2, 3, 4, 5).into_string();
+        let rendered = overview(&EN, &dashboard_data()).into_string();
 
         assert!(rendered.contains(r#"class="dashboard-page""#));
         assert!(rendered.contains(r#"class="metric-grid""#));
         assert!(rendered.contains(r#"class="metric-value""#));
         assert!(rendered.contains("Bastion posture"));
         assert!(rendered.contains("Total servers"));
-        assert!(rendered.contains("Recent sessions"));
-        assert!(rendered.contains("5 recorded"));
-        assert!(!rendered.contains("5 active"));
+        assert!(rendered.contains("Sessions · 24h"));
+        assert!(rendered.contains("Managed SSH coverage"));
+        assert!(rendered.contains("Gateway posture"));
+        assert!(rendered.contains("Recent SSH access"));
+        assert!(rendered.contains("Recent admin changes"));
+        assert!(rendered.contains("asset.update"));
+        assert!(rendered.contains("50%"));
+        assert!(rendered.contains("1 / 2"));
+        assert!(!rendered.contains("Admin Web available"));
         assert!(!rendered.contains("Live Sessions"));
         assert!(!rendered.contains("Activity Heatmap"));
         assert!(!rendered.contains("JIT approvals pending"));
         assert!(!rendered.contains("Failed login watch"));
+    }
+
+    #[test]
+    fn dashboard_helpers_keep_zero_denominators_and_durations_explainable() {
+        assert_eq!(coverage_percent(0, 0), 0);
+        assert_eq!(coverage_percent(1, 3), 33);
+        assert_eq!(uptime_label(3_661), "1h 1m");
+        let session = Session {
+            id: "session-duration".to_string(),
+            key_finger: "SHA256:test".to_string(),
+            key_name: Some("alice".to_string()),
+            mode: "direct".to_string(),
+            asset_name: Some("prod-api".to_string()),
+            target_host: Some("10.0.0.8".to_string()),
+            target_port: Some(22),
+            client_ip: None,
+            status: "ok".to_string(),
+            error: None,
+            started_at: Some("2026-07-28 10:00:00".to_string()),
+            ended_at: Some("2026-07-28 10:02:05".to_string()),
+        };
+        assert_eq!(session_duration_label(&session), "2m 5s");
     }
 
     #[test]
@@ -3758,6 +4239,91 @@ mod tests {
             is_active: true,
             asset_access_mode: mode,
             created_at: None,
+        }
+    }
+
+    fn dashboard_data() -> DashboardData {
+        let mut managed = asset("managed-prod", "managed.prod.internal", &["prod"]);
+        managed.credential_id = Some("credential-1".to_string());
+        let unmanaged = asset("unmanaged-stage", "stage.internal", &["stage"]);
+        DashboardData {
+            gateway: DashboardGateway {
+                admin_bind: "127.0.0.1:8080".to_string(),
+                ssh_bind: "127.0.0.1:2222".to_string(),
+                version: "0.1.4".to_string(),
+                started_at: "2026-07-28T10:00:00Z".to_string(),
+                uptime_seconds: 3_661,
+                admin_reachable: true,
+                ssh_reachable: true,
+                database_healthy: true,
+            },
+            assets: vec![managed.clone(), unmanaged.clone()],
+            credentials: vec![credential("credential-1", "production", "root", "password")],
+            keys: vec![AuthorizedKey {
+                id: "key-1".to_string(),
+                name: "Alice laptop".to_string(),
+                public_key: "ssh-ed25519 AAAA".to_string(),
+                fingerprint: "SHA256:alice".to_string(),
+                is_active: true,
+                asset_access_mode: AssetAccessMode::Restricted,
+                created_at: Some("2026-07-28 10:00:00".to_string()),
+            }],
+            known_hosts: vec![KnownHost {
+                hostname: managed.hostname.clone(),
+                port: managed.port,
+                key_type: "ssh-ed25519".to_string(),
+                fingerprint: "SHA256:managed".to_string(),
+                first_seen: Some("2026-07-28 10:00:00".to_string()),
+            }],
+            asset_health: vec![
+                AssetHealth {
+                    asset_id: managed.id.clone(),
+                    status: ASSET_HEALTH_HEALTHY.to_string(),
+                    checked_at: Some("2026-07-28 10:00:00".to_string()),
+                    last_success_at: Some("2026-07-28 10:00:00".to_string()),
+                    latency_ms: Some(42),
+                    error_code: None,
+                    error_message: None,
+                },
+                AssetHealth {
+                    asset_id: unmanaged.id.clone(),
+                    status: ASSET_HEALTH_UNKNOWN.to_string(),
+                    checked_at: None,
+                    last_success_at: None,
+                    latency_ms: None,
+                    error_code: None,
+                    error_message: None,
+                },
+            ],
+            recent_sessions: vec![Session {
+                id: "session-1".to_string(),
+                key_finger: "SHA256:alice".to_string(),
+                key_name: Some("Alice laptop".to_string()),
+                mode: "direct".to_string(),
+                asset_name: Some(managed.name.clone()),
+                target_host: Some(managed.hostname.clone()),
+                target_port: Some(managed.port),
+                client_ip: Some("127.0.0.1".to_string()),
+                status: "ok".to_string(),
+                error: None,
+                started_at: Some("2026-07-28 10:00:00".to_string()),
+                ended_at: Some("2026-07-28 10:00:08".to_string()),
+            }],
+            sessions_24h: 5,
+            recent_admin_events: vec![AuditEvent {
+                id: "event-1".to_string(),
+                occurred_at: Some("2026-07-28 10:01:00".to_string()),
+                actor_id: Some("local-admin".to_string()),
+                actor_label: "Local admin".to_string(),
+                action: "asset.update".to_string(),
+                target_type: "asset".to_string(),
+                target_id: Some(managed.id.clone()),
+                target_label: Some(managed.name.clone()),
+                result: "success".to_string(),
+                source_ip: Some("127.0.0.1".to_string()),
+                details_json: None,
+            }],
+            source_errors: Vec::new(),
         }
     }
 }

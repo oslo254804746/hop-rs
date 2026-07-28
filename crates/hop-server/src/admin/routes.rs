@@ -1,7 +1,8 @@
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path as StdPath, PathBuf},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use anyhow::{ensure, Result};
@@ -20,7 +21,10 @@ use hop_core::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::net::TcpListener;
+use tokio::{
+    net::{TcpListener, TcpStream},
+    time::timeout,
+};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{info, warn};
 
@@ -41,6 +45,10 @@ pub struct AdminState {
     pub master_key: Arc<MasterKey>,
     pub sessions: AdminSessions,
     pub ssh_port: u16,
+    pub ssh_bind: SocketAddr,
+    pub admin_bind: SocketAddr,
+    pub started_at: String,
+    pub started_instant: Instant,
     pub cookie_secure: bool,
 }
 
@@ -56,6 +64,10 @@ pub async fn serve_admin(
         master_key,
         sessions: AdminSessions::default(),
         ssh_port: ssh_bind.port(),
+        ssh_bind,
+        admin_bind: bind,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        started_instant: Instant::now(),
         cookie_secure,
     };
     let app = admin_router(state);
@@ -189,33 +201,108 @@ async fn index(State(state): State<AdminState>, headers: HeaderMap) -> Response 
     let Ok(_session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
-    let assets = match state.db.list_assets().await {
-        Ok(assets) => assets,
-        Err(err) => return admin_db_error("list assets for overview", err),
-    };
-    let credentials = match state.db.list_credentials().await {
-        Ok(credentials) => credentials,
-        Err(err) => return admin_db_error("list credentials for overview", err),
-    };
-    let keys = match state.db.list_authorized_keys().await {
-        Ok(keys) => keys,
-        Err(err) => return admin_db_error("list authorized keys for overview", err),
-    };
-    let sessions = match state.db.list_sessions(10).await {
-        Ok(sessions) => sessions,
-        Err(err) => return admin_db_error("list sessions for overview", err),
-    };
+    let database_healthy = state.db.health_check().await.is_ok();
+    let ssh_reachable = probe_tcp_bind(state.ssh_bind).await;
+    let mut source_errors = Vec::new();
+    let assets = dashboard_value(state.db.list_assets().await, "assets", &mut source_errors);
+    let credentials = dashboard_value(
+        state.db.list_credentials().await,
+        "credentials",
+        &mut source_errors,
+    );
+    let keys = dashboard_value(
+        state.db.list_authorized_keys().await,
+        "ssh identities",
+        &mut source_errors,
+    );
+    let known_hosts = dashboard_value(
+        state.db.list_known_hosts().await,
+        "known hosts",
+        &mut source_errors,
+    );
+    let asset_health = dashboard_value(
+        state.db.list_asset_health().await,
+        "asset health",
+        &mut source_errors,
+    );
+    let recent_sessions = dashboard_value(
+        state.db.list_sessions(8).await,
+        "recent sessions",
+        &mut source_errors,
+    );
+    let sessions_24h = dashboard_value(
+        state.db.count_sessions_since_hours(24).await,
+        "24 hour session count",
+        &mut source_errors,
+    );
+    let recent_admin_events = dashboard_value(
+        state.db.list_audit_events(6).await,
+        "admin activity",
+        &mut source_errors,
+    );
     Html(
         html::overview(
             t,
-            assets.len(),
-            credentials.len(),
-            keys.len(),
-            sessions.len(),
+            &html::DashboardData {
+                gateway: html::DashboardGateway {
+                    admin_bind: state.admin_bind.to_string(),
+                    ssh_bind: state.ssh_bind.to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    started_at: state.started_at.clone(),
+                    uptime_seconds: state.started_instant.elapsed().as_secs(),
+                    admin_reachable: true,
+                    ssh_reachable,
+                    database_healthy,
+                },
+                assets,
+                credentials,
+                keys,
+                known_hosts,
+                asset_health,
+                recent_sessions,
+                sessions_24h,
+                recent_admin_events,
+                source_errors,
+            },
         )
         .into_string(),
     )
     .into_response()
+}
+
+fn dashboard_value<T: Default, E: std::fmt::Display>(
+    result: std::result::Result<T, E>,
+    source: &str,
+    errors: &mut Vec<String>,
+) -> T {
+    match result {
+        Ok(value) => value,
+        Err(err) => {
+            warn!(%source, error = %err, "dashboard data source failed");
+            errors.push(source.to_string());
+            T::default()
+        }
+    }
+}
+
+fn probe_address(bind: SocketAddr) -> SocketAddr {
+    let ip = match bind.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    SocketAddr::new(ip, bind.port())
+}
+
+async fn probe_tcp_bind(bind: SocketAddr) -> bool {
+    matches!(
+        timeout(
+            Duration::from_millis(350),
+            TcpStream::connect(probe_address(bind))
+        )
+        .await,
+        Ok(Ok(_))
+    )
 }
 
 async fn login_page(headers: HeaderMap) -> Html<String> {
@@ -2100,6 +2187,10 @@ mod tests {
             master_key: Arc::new(MasterKey::from_bytes([0; 32])),
             sessions: AdminSessions::default(),
             ssh_port: 2222,
+            ssh_bind: "127.0.0.1:2222".parse().unwrap(),
+            admin_bind: "127.0.0.1:8080".parse().unwrap(),
+            started_at: "2026-07-28T00:00:00Z".to_string(),
+            started_instant: Instant::now(),
             cookie_secure: false,
         }
     }
@@ -2240,6 +2331,35 @@ mod tests {
         assert!(trust_reset_confirmed(Some("yes")));
         assert!(!trust_reset_confirmed(None));
         assert!(!trust_reset_confirmed(Some("true")));
+    }
+
+    #[test]
+    fn dashboard_probe_uses_loopback_for_wildcard_listeners() {
+        assert_eq!(
+            probe_address("0.0.0.0:2222".parse().unwrap()),
+            "127.0.0.1:2222".parse().unwrap()
+        );
+        assert_eq!(
+            probe_address("[::]:2222".parse().unwrap()),
+            "[::1]:2222".parse().unwrap()
+        );
+        assert_eq!(
+            probe_address("10.0.0.8:2222".parse().unwrap()),
+            "10.0.0.8:2222".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn dashboard_source_failure_isolated_to_named_source() {
+        let mut errors = Vec::new();
+        let value: Vec<String> = dashboard_value::<Vec<String>, _>(
+            Err(std::io::Error::other("database busy")),
+            "recent sessions",
+            &mut errors,
+        );
+
+        assert!(value.is_empty());
+        assert_eq!(errors, vec!["recent sessions"]);
     }
 
     #[tokio::test]
