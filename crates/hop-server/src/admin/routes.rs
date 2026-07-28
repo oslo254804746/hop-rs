@@ -288,6 +288,7 @@ async fn update_settings(
 #[derive(Deserialize)]
 struct AssetsQuery {
     tag: Option<String>,
+    q: Option<String>,
 }
 
 async fn assets(
@@ -304,7 +305,7 @@ async fn assets(
         Err(err) => return admin_db_error("list assets", err),
     };
     let all_tags = collect_tags(&all_assets);
-    let assets = filter_assets_by_tag(&all_assets, query.tag.as_deref());
+    let assets = filter_assets(&all_assets, query.tag.as_deref(), query.q.as_deref());
     let credentials = match state.db.list_credentials().await {
         Ok(credentials) => credentials,
         Err(err) => return admin_db_error("list credentials for assets", err),
@@ -316,6 +317,7 @@ async fn assets(
             &credentials,
             &session.csrf_token,
             query.tag.as_deref(),
+            query.q.as_deref(),
             &all_tags,
             state.ssh_port,
         )
@@ -1223,15 +1225,38 @@ fn collect_tags(assets: &[hop_core::Asset]) -> Vec<String> {
     tags
 }
 
-fn filter_assets_by_tag(assets: &[hop_core::Asset], tag: Option<&str>) -> Vec<hop_core::Asset> {
-    let Some(tag) = tag.map(str::trim).filter(|tag| !tag.is_empty()) else {
-        return assets.to_vec();
-    };
+fn filter_assets(
+    assets: &[hop_core::Asset],
+    selected_tag: Option<&str>,
+    query: Option<&str>,
+) -> Vec<hop_core::Asset> {
+    let selected_tag = selected_tag.map(str::trim).filter(|tag| !tag.is_empty());
+    let query = query.map(str::trim).filter(|query| !query.is_empty());
+
     assets
         .iter()
-        .filter(|asset| asset.tags.iter().any(|asset_tag| asset_tag == tag))
+        .filter(|asset| {
+            selected_tag.map_or(true, |tag| {
+                asset.tags.iter().any(|asset_tag| asset_tag == tag)
+            }) && query.map_or(true, |query| asset_matches_query(asset, query))
+        })
         .cloned()
         .collect()
+}
+
+fn asset_matches_query(asset: &hop_core::Asset, query: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    [
+        asset.name.as_str(),
+        asset.hostname.as_str(),
+        asset.description.as_deref().unwrap_or_default(),
+        asset.protocol.as_str(),
+        asset.preset.as_deref().unwrap_or_default(),
+    ]
+    .into_iter()
+    .chain(asset.tags.iter().map(String::as_str))
+    .any(|value| value.to_ascii_lowercase().contains(&query))
+        || asset.port.to_string().contains(&query)
 }
 
 fn parse_bulk_tags_body(body: &[u8]) -> Result<BulkTagsForm> {
@@ -1271,6 +1296,117 @@ mod tests {
             ssh_port: 2222,
             cookie_secure: false,
         }
+    }
+
+    fn test_assets() -> Vec<hop_core::Asset> {
+        vec![
+            hop_core::Asset {
+                id: "web-prod".to_string(),
+                name: "Web-PROD-01".to_string(),
+                protocol: "ssh".to_string(),
+                preset: None,
+                hostname: "app01.internal".to_string(),
+                port: 22,
+                description: Some("Primary frontend".to_string()),
+                tags: vec!["prod".to_string(), "frontend".to_string()],
+                credential_id: None,
+                created_at: None,
+                updated_at: None,
+            },
+            hop_core::Asset {
+                id: "windows-ops".to_string(),
+                name: "Windows operations".to_string(),
+                protocol: "tcp".to_string(),
+                preset: Some("rdp".to_string()),
+                hostname: "10.0.0.8".to_string(),
+                port: 3389,
+                description: Some("Remote desktop".to_string()),
+                tags: vec!["prod".to_string(), "windows".to_string()],
+                credential_id: None,
+                created_at: None,
+                updated_at: None,
+            },
+            hop_core::Asset {
+                id: "database-stage".to_string(),
+                name: "Reporting database".to_string(),
+                protocol: "tcp".to_string(),
+                preset: Some("postgresql".to_string()),
+                hostname: "db.stage.internal".to_string(),
+                port: 5432,
+                description: None,
+                tags: vec!["staging".to_string(), "database".to_string()],
+                credential_id: None,
+                created_at: None,
+                updated_at: None,
+            },
+        ]
+    }
+
+    fn filtered_asset_ids(tag: Option<&str>, query: Option<&str>) -> Vec<String> {
+        filter_assets(&test_assets(), tag, query)
+            .into_iter()
+            .map(|asset| asset.id)
+            .collect()
+    }
+
+    #[test]
+    fn asset_filter_supports_query_only() {
+        assert_eq!(
+            filtered_asset_ids(None, Some("remote desktop")),
+            vec!["windows-ops"]
+        );
+    }
+
+    #[test]
+    fn asset_filter_searches_every_supported_field() {
+        for (query, expected_id) in [
+            ("Web-PROD-01", "web-prod"),
+            ("app01.internal", "web-prod"),
+            ("22", "web-prod"),
+            ("Primary frontend", "web-prod"),
+            ("frontend", "web-prod"),
+            ("ssh", "web-prod"),
+            ("postgresql", "database-stage"),
+        ] {
+            assert_eq!(
+                filtered_asset_ids(None, Some(query)),
+                vec![expected_id],
+                "query {query:?} did not match the expected field"
+            );
+        }
+    }
+
+    #[test]
+    fn asset_filter_supports_tag_only() {
+        assert_eq!(
+            filtered_asset_ids(Some("prod"), None),
+            vec!["web-prod", "windows-ops"]
+        );
+    }
+
+    #[test]
+    fn asset_filter_combines_query_and_tag() {
+        assert_eq!(
+            filtered_asset_ids(Some("prod"), Some("rdp")),
+            vec!["windows-ops"]
+        );
+        assert!(filtered_asset_ids(Some("staging"), Some("rdp")).is_empty());
+    }
+
+    #[test]
+    fn asset_filter_treats_blank_query_as_no_query() {
+        assert_eq!(
+            filtered_asset_ids(None, Some(" \t ")),
+            vec!["web-prod", "windows-ops", "database-stage"]
+        );
+    }
+
+    #[test]
+    fn asset_filter_trims_query_and_ignores_ascii_case() {
+        assert_eq!(
+            filtered_asset_ids(None, Some("  wEb-PrOd  ")),
+            vec!["web-prod"]
+        );
     }
 
     #[tokio::test]

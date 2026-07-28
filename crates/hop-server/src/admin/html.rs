@@ -27,6 +27,10 @@ const ICON_IMPORT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 
 const ICON_SETTINGS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 .6 1.65 1.65 0 0 0-.33 1.82V22a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 8.6 20a1.65 1.65 0 0 0-1.82-.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-.6-1 1.65 1.65 0 0 0-1.82-.33H2a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4 8.6a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 8.6 4a1.65 1.65 0 0 0 1-.6 1.65 1.65 0 0 0 .33-1.82V2a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 8.6a1.65 1.65 0 0 0 .6 1 1.65 1.65 0 0 0 1.82.33H22a2 2 0 1 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15z"/></svg>"#;
 
 pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Markup {
+    if active == "login" {
+        return login_layout(title, t, body_content);
+    }
+
     let alternate = t.locale.alternate();
     let language_href = language_switch_href(alternate, active);
     html! {
@@ -960,7 +964,7 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         }
                     }
 
-                    @media (max-width: 900px) {
+                    @media (max-width: 1080px) {
                         .app-frame { grid-template-columns: 1fr; }
                         .sidebar {
                             display: none;
@@ -1050,6 +1054,9 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                     }
                     "#
                 }
+                style {
+                    (PreEscaped(include_str!("release_a_assets.css")))
+                }
             }
             body class="admin-shell" data-theme="operator" {
                 div.app-frame {
@@ -1105,6 +1112,52 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
     }
 }
 
+fn login_layout(title: &str, t: &L10n, body_content: Markup) -> Markup {
+    let alternate = t.locale.alternate();
+    let language_href = language_switch_href(alternate, "login");
+
+    html! {
+        (DOCTYPE)
+        html lang=(t.locale.code()) {
+            head {
+                meta charset="utf-8";
+                meta name="viewport" content="width=device-width, initial-scale=1";
+                title { (title) " - " (t.app_title) }
+                style {
+                    (PreEscaped(include_str!("release_a_login.css")))
+                }
+            }
+            body class="admin-shell login-shell" data-theme="operator" {
+                div.login-page {
+                    header.login-header {
+                        div.login-brand aria-label=(t.app_title) {
+                            div.login-brand-mark aria-hidden="true" { "H" }
+                            div {
+                                strong { "Hop" }
+                                span { (t.admin_console) }
+                            }
+                        }
+                        a.login-language href=(language_href) {
+                            span { (t.language_label) ": " (t.locale.label()) }
+                            strong { (t.switch_language_to) " " (alternate.label()) }
+                        }
+                    }
+                    main.login-main {
+                        div.login-context {
+                            span.status-dot aria-hidden="true" {}
+                            div {
+                                strong { (t.loopback_admin) }
+                                p { (t.loopback_note) }
+                            }
+                        }
+                        (body_content)
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn login(t: &L10n, error: Option<&str>) -> Markup {
     layout(
         t.login_title,
@@ -1120,12 +1173,30 @@ pub fn login(t: &L10n, error: Option<&str>) -> Markup {
                         }
                     }
                     @if let Some(error) = error {
-                        p.error-message { (error) }
+                        p.error-message id="login-error" role="alert" { (error) }
                     }
                     form method="post" action="/login" {
                         label.field {
                             (t.login_password)
-                            input type="password" name="password" required;
+                            @if error.is_some() {
+                                input
+                                    id="login-password"
+                                    type="password"
+                                    name="password"
+                                    autocomplete="current-password"
+                                    aria-describedby="login-error"
+                                    aria-invalid="true"
+                                    autofocus
+                                    required;
+                            } @else {
+                                input
+                                    id="login-password"
+                                    type="password"
+                                    name="password"
+                                    autocomplete="current-password"
+                                    autofocus
+                                    required;
+                            }
                         }
                         div.button-row {
                             button type="submit" { (t.login_button) }
@@ -1291,9 +1362,15 @@ pub fn assets(
     credentials: &[Credential],
     csrf_token: &str,
     selected_tag: Option<&str>,
+    search_query: Option<&str>,
     all_tags: &[String],
     ssh_port: u16,
 ) -> Markup {
+    let search_query = search_query
+        .map(str::trim)
+        .filter(|query| !query.is_empty());
+    let has_filters = selected_tag.is_some() || search_query.is_some();
+
     layout(
         t.assets_title,
         "assets",
@@ -1302,149 +1379,235 @@ pub fn assets(
             div.assets-page {
                 div.console-hero {
                     div {
-                        h2 { (t.assets_heading) }
                         p { (t.assets_intro) }
                     }
                     div.console-actions {
                         span.status-chip.good { span.status-dot.good {} (items.len()) " " (t.assets_count_suffix) }
-                        a.button href="#add-asset" { (t.assets_add_heading) }
+                        button
+                            id="open-add-asset"
+                            type="button"
+                            aria-haspopup="dialog"
+                            aria-controls="add-asset-dialog"
+                            onclick="document.getElementById('add-asset-dialog').showModal()" {
+                            (t.assets_add_heading)
+                        }
                     }
                 }
-                div.assets-layout {
-                    div.panel-stack {
-                        section.panel {
-                            div.filter-console {
-                                div {
-                                    h2 { (t.assets_filter_heading) }
-                                    p.fine-print { (t.assets_filter_intro) }
-                                }
-                                div.filter-row {
-                                    a class=(if selected_tag.is_none() { "button" } else { "ghost-button" }) href="/assets" {
-                                        (t.assets_filter_all)
-                                    }
-                                    @for tag in all_tags {
-                                        a class=(if selected_tag == Some(tag.as_str()) { "button" } else { "ghost-button" })
-                                          href=(format!("/assets?tag={}", url_query_value(tag))) {
-                                            (tag)
-                                        }
+                section.panel.assets-toolbar aria-label=(t.assets_filter_heading) {
+                    div.assets-toolbar-main {
+                        form.assets-search method="get" action="/assets" {
+                            @if let Some(tag) = selected_tag {
+                                input type="hidden" name="tag" value=(tag);
+                            }
+                            div.assets-search-field {
+                                label.field for="asset-search-query" { (t.assets_search_label) }
+                                div.assets-search-row {
+                                    input
+                                        id="asset-search-query"
+                                        type="search"
+                                        name="q"
+                                        value=(search_query.unwrap_or(""))
+                                        placeholder=(t.assets_search_label);
+                                    button type="submit" { (t.assets_search_action) }
+                                    @if has_filters {
+                                        a.ghost-button href="/assets" { (t.assets_clear_filters) }
                                     }
                                 }
                             }
                         }
-                        section.panel {
-                            div.panel-header {
-                                div {
-                                    h2 { (t.assets_existing_heading) }
-                                    p { (t.assets_existing_intro) }
-                                    p.fine-print { (t.assets_export_intro) }
+                        div.assets-filter-group {
+                            div {
+                                strong { (t.assets_filter_heading) }
+                                p.fine-print { (t.assets_filter_intro) }
+                            }
+                            div.filter-row {
+                                a
+                                    class=(if selected_tag.is_none() { "button" } else { "ghost-button" })
+                                    href=(assets_filter_href(None, search_query)) {
+                                    (t.assets_filter_all)
                                 }
-                                div.status-row {
-                                    span.status-chip.good { (items.len()) " " (t.assets_count_suffix) }
-                                    span.command-chip { (t.assets_export_heading) }
-                                    a.ghost-button href="/assets/export?format=csv" { (t.export_csv) }
-                                    a.ghost-button href="/assets/export?format=json" { (t.export_json) }
-                                    a.ghost-button href="/import" { (t.import_open) }
+                                @for tag in all_tags {
+                                    a
+                                        class=(if selected_tag == Some(tag.as_str()) { "button" } else { "ghost-button" })
+                                        href=(assets_filter_href(Some(tag), search_query)) {
+                                        (tag)
+                                    }
                                 }
                             }
-                            form method="post" action="/assets/bulk-tags" {
-                                (csrf_field(csrf_token))
-                                div.table-wrap {
-                                    table.data-table {
-                                        thead {
-                                            tr {
-                                                th.checkbox-cell {}
-                                                th { (t.field_hostname) }
-                                                th { (t.field_protocol) }
-                                                th { (t.target_column) }
-                                                th { (t.field_tags) }
-                                                th { (t.field_credential) }
-                                                th { (t.field_action) }
-                                            }
-                                        }
-                                        tbody {
-                                            @if items.is_empty() {
-                                                tr.empty-row { td colspan="7" { (t.no_assets) } }
-                                            }
-                                            @for asset in items {
-                                                tr {
-                                                    td.checkbox-cell {
-                                                        input type="checkbox" name="asset_ids" value=(asset.id);
-                                                    }
-                                                    td {
-                                                        div.primary-cell {
-                                                            (asset.name)
-                                                            @if let Some(description) = &asset.description {
-                                                                span.subtle { (description) }
-                                                            } @else {
-                                                                span.subtle { (t.asset_activity_placeholder) }
-                                                            }
-                                                            @if let Some(command) = asset_tunnel_command(asset, ssh_port) {
-                                                                span.subtle.mono { (command) }
-                                                            }
-                                                        }
-                                                    }
-                                                    td { span.os-badge { (asset_protocol_label(t, asset_kind(asset))) } }
-                                                    td.mono { (asset.hostname) ":" (asset.port) }
-                                                    td {
-                                                        div.tag-list {
-                                                            @if asset.tags.is_empty() {
-                                                                span.status-pill.neutral { (t.untagged) }
-                                                            }
-                                                            @for tag in &asset.tags {
-                                                                a.tag href=(format!("/assets?tag={}", url_query_value(tag))) { (tag) }
-                                                            }
-                                                        }
-                                                    }
-                                                    td {
-                                                        @if let Some(credential_id) = &asset.credential_id {
-                                                            span.status-pill { (credential_id) }
-                                                        } @else {
-                                                            span.status-pill.neutral { (t.proxy_only) }
-                                                        }
-                                                    }
-                                                    td {
-                                                        div.action-row {
-                                                            a class="button" href=(format!("/assets/{}/edit", asset.id)) { (t.edit) }
-                                                            button class="danger" type="submit" formaction=(format!("/assets/{}/delete", asset.id)) { (t.delete) }
+                        }
+                    }
+                    div.assets-secondary-actions {
+                        span.fine-print { (t.assets_export_intro) }
+                        span.command-chip { (t.assets_export_heading) }
+                        a.ghost-button href="/assets/export?format=csv" { (t.export_csv) }
+                        a.ghost-button href="/assets/export?format=json" { (t.export_json) }
+                        a.ghost-button href="/import" { (t.import_open) }
+                    }
+                }
+                section.panel.assets-inventory {
+                    div.panel-header {
+                        div {
+                            h2 { (t.assets_existing_heading) }
+                            p { (t.assets_existing_intro) }
+                        }
+                        span.status-chip.good { (items.len()) " " (t.assets_count_suffix) }
+                    }
+                    form
+                        method="post"
+                        action="/assets/bulk-tags"
+                        data-assets-form
+                        onchange="if(event.target.matches('input[name=asset_ids]'))window.syncAssetBulkControls?.()" {
+                        (csrf_field(csrf_token))
+                        div.table-wrap {
+                            table.data-table {
+                                thead {
+                                    tr {
+                                        th.checkbox-cell {}
+                                        th { (t.field_hostname) }
+                                        th { (t.field_protocol) }
+                                        th { (t.target_column) }
+                                        th { (t.field_tags) }
+                                        th { (t.field_credential) }
+                                        th { (t.field_action) }
+                                    }
+                                }
+                                tbody {
+                                    @if items.is_empty() {
+                                        tr.empty-row {
+                                            td colspan="7" {
+                                                div.assets-empty-state {
+                                                    @if has_filters {
+                                                        strong { (t.assets_filter_heading) }
+                                                        span { (t.assets_filter_intro) }
+                                                        a.ghost-button href="/assets" { (t.assets_filter_all) }
+                                                    } @else {
+                                                        strong { (t.no_assets) }
+                                                        button
+                                                            type="button"
+                                                            onclick="document.getElementById('open-add-asset').click()" {
+                                                            (t.assets_add_heading)
                                                         }
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                }
-                                div.panel-header style="margin-top:18px;" {
-                                    div {
-                                        h2 { (t.assets_bulk_heading) }
-                                        p { (t.assets_bulk_intro) }
+                                    @for asset in items {
+                                        tr {
+                                            td.checkbox-cell {
+                                                input
+                                                    type="checkbox"
+                                                    name="asset_ids"
+                                                    value=(asset.id)
+                                                    aria-label=(format!("{}: {}", t.assets_bulk_heading, asset.name));
+                                            }
+                                            td {
+                                                div.primary-cell {
+                                                    (asset.name)
+                                                    @if let Some(description) = &asset.description {
+                                                        span.subtle { (description) }
+                                                    } @else {
+                                                        span.subtle { (t.asset_activity_placeholder) }
+                                                    }
+                                                    @if let Some(command) = asset_tunnel_command(asset, ssh_port) {
+                                                        span.subtle.mono { (command) }
+                                                    }
+                                                }
+                                            }
+                                            td { span.os-badge { (asset_protocol_label(t, asset_kind(asset))) } }
+                                            td.target-cell {
+                                                code
+                                                    class="target-address"
+                                                    tabindex="0"
+                                                    title=(format!("{}:{}", asset.hostname, asset.port)) {
+                                                    (asset.hostname) ":" (asset.port)
+                                                }
+                                            }
+                                            td {
+                                                div.tag-list {
+                                                    @if asset.tags.is_empty() {
+                                                        span.status-pill.neutral { (t.untagged) }
+                                                    }
+                                                    @for tag in &asset.tags {
+                                                        a.tag href=(assets_filter_href(Some(tag), search_query)) { (tag) }
+                                                    }
+                                                }
+                                            }
+                                            td {
+                                                @if let Some(credential_id) = &asset.credential_id {
+                                                    span.status-pill { (credential_id) }
+                                                } @else {
+                                                    span.status-pill.neutral { (t.proxy_only) }
+                                                }
+                                            }
+                                            td {
+                                                div.action-row {
+                                                    a class="ghost-button" href=(format!("/assets/{}/edit", asset.id)) { (t.edit) }
+                                                    button class="danger" type="submit" formaction=(format!("/assets/{}/delete", asset.id)) { (t.delete) }
+                                                }
+                                            }
+                                        }
                                     }
-                                }
-                                div.grid {
-                                    label.field {
-                                        (t.assets_bulk_tags_label)
-                                        input name="tags" placeholder="prod, web" list="asset-tags-list";
-                                    }
-                                }
-                                div.button-row {
-                                    button type="submit" { (t.assets_bulk_apply) }
                                 }
                             }
                         }
+                        div.assets-bulk-bar data-assets-bulk-controls hidden {
+                            div.assets-bulk-copy {
+                                strong { (t.assets_bulk_heading) }
+                                span
+                                    class="status-chip"
+                                    data-assets-selected-count
+                                    data-suffix=(t.assets_count_suffix)
+                                    aria-live="polite" {}
+                                p.fine-print { (t.assets_bulk_intro) }
+                            }
+                            label.field {
+                                (t.assets_bulk_tags_label)
+                                input
+                                    name="tags"
+                                    placeholder="prod, web"
+                                    list="asset-tags-list"
+                                    disabled;
+                            }
+                            button type="submit" disabled { (t.assets_bulk_apply) }
+                        }
                     }
-                    section.panel.asset-form-panel id="add-asset" {
-                        div.panel-header {
+                }
+                datalist id="asset-tags-list" {
+                    @for tag in all_tags {
+                        option value=(tag) {}
+                    }
+                }
+                dialog
+                    class="asset-dialog"
+                    id="add-asset-dialog"
+                    aria-labelledby="add-asset-title"
+                    onclick="if(event.target===this)this.close()"
+                    onkeydown="if(event.key==='Escape'){event.preventDefault();this.close()}"
+                    onclose="document.getElementById('open-add-asset').focus()" {
+                    div.asset-drawer {
+                        div.asset-drawer-header {
                             div {
-                                h2 { (t.assets_add_heading) }
+                                h2 id="add-asset-title" { (t.assets_add_heading) }
                                 p { (t.assets_add_intro) }
                             }
-                            span.status-chip { (t.draft_status) }
+                            div.asset-drawer-header-actions {
+                                span.status-chip { (t.draft_status) }
+                                button
+                                    class="drawer-close ghost-button"
+                                    type="button"
+                                    aria-label=(t.assets_close_drawer)
+                                    onclick="this.closest('dialog').close()" {
+                                    "×"
+                                }
+                            }
                         }
                         form method="post" action="/assets" {
                             (csrf_field(csrf_token))
                             div.grid {
                                 label.field {
                                     (t.field_name)
-                                    input name="name" required;
+                                    input name="name" required autofocus;
                                 }
                                 label.field {
                                     (t.field_protocol)
@@ -1479,20 +1642,41 @@ pub fn assets(
                                     textarea name="description" {}
                                 }
                             }
-                            datalist id="asset-tags-list" {
-                                @for tag in all_tags {
-                                    option value=(tag) {}
-                                }
-                            }
                             div.terminal-strip {
                                 span { "$" }
                                 span { "ssh -p 22 hop@target.internal" }
                             }
-                            div.button-row {
+                            div.button-row.asset-drawer-actions {
                                 button type="submit" { (t.save_asset) }
+                                button
+                                    class="ghost-button"
+                                    type="button"
+                                    onclick="this.closest('dialog').close()" {
+                                    (t.assets_close_drawer)
+                                }
                             }
                         }
                     }
+                }
+                script {
+                    (PreEscaped(r#"
+                        (() => {
+                            const form = document.querySelector('[data-assets-form]');
+                            if (!form) return;
+                            window.syncAssetBulkControls = () => {
+                                const count = form.querySelectorAll('input[name="asset_ids"]:checked').length;
+                                const controls = form.querySelector('[data-assets-bulk-controls]');
+                                const countLabel = form.querySelector('[data-assets-selected-count]');
+                                controls.hidden = count === 0;
+                                controls.querySelectorAll('input, button').forEach((control) => {
+                                    control.disabled = count === 0;
+                                });
+                                countLabel.textContent = `${count} ${countLabel.dataset.suffix}`;
+                            };
+                            window.addEventListener('pageshow', window.syncAssetBulkControls);
+                            window.syncAssetBulkControls();
+                        })();
+                    "#))
                 }
             }
         },
@@ -1602,6 +1786,22 @@ fn asset_protocol_options(t: &L10n, selected: &str) -> Markup {
         option value=(ASSET_PRESET_MYSQL) selected[selected == ASSET_PRESET_MYSQL] { (t.protocol_mysql) }
         option value=(ASSET_PRESET_POSTGRES) selected[selected == ASSET_PRESET_POSTGRES] { (t.protocol_postgres) }
         option value=(ASSET_PRESET_REDIS) selected[selected == ASSET_PRESET_REDIS] { (t.protocol_redis) }
+    }
+}
+
+fn assets_filter_href(tag: Option<&str>, search_query: Option<&str>) -> String {
+    let mut parameters = Vec::new();
+    if let Some(tag) = tag {
+        parameters.push(format!("tag={}", url_query_value(tag)));
+    }
+    if let Some(query) = search_query {
+        parameters.push(format!("q={}", url_query_value(query)));
+    }
+
+    if parameters.is_empty() {
+        "/assets".to_string()
+    } else {
+        format!("/assets?{}", parameters.join("&"))
     }
 }
 
@@ -2431,7 +2631,7 @@ mod tests {
 
     #[test]
     fn mutating_forms_include_csrf_token() {
-        let rendered = assets(&EN, &[], &[], "csrf-123", None, &[], 2222).into_string();
+        let rendered = assets(&EN, &[], &[], "csrf-123", None, None, &[], 2222).into_string();
 
         assert!(rendered.contains(r#"name="csrf_token""#));
         assert!(rendered.contains(r#"value="csrf-123""#));
@@ -2488,6 +2688,44 @@ mod tests {
     }
 
     #[test]
+    fn login_uses_a_dedicated_shell_without_internal_navigation() {
+        let rendered = login(&EN, None).into_string();
+
+        assert!(rendered.contains(r#"class="admin-shell login-shell""#));
+        assert!(rendered.contains(r#"class="login-brand""#));
+        assert!(rendered.contains("Loopback admin"));
+        assert!(rendered.contains("/set-language?lang=zh&amp;redirect=%2Flogin"));
+        assert!(!rendered.contains(r#"class="sidebar""#));
+        assert!(!rendered.contains(r#"class="mobile-tabbar""#));
+        assert!(!rendered.contains(r#"href="/""#));
+        assert!(!rendered.contains(r#"href="/assets""#));
+        assert!(!rendered.contains(r#"href="/credentials""#));
+        assert!(!rendered.contains(r#"href="/keys""#));
+        assert!(!rendered.contains(r#"href="/known-hosts""#));
+        assert!(!rendered.contains(r#"href="/sessions""#));
+        assert!(!rendered.contains(r#"href="/import""#));
+        assert!(!rendered.contains(r#"href="/settings""#));
+    }
+
+    #[test]
+    fn login_password_field_supports_password_managers_and_accessible_errors() {
+        let rendered = login(&EN, Some("Invalid password")).into_string();
+
+        assert!(rendered.contains(r#"id="login-password""#));
+        assert!(rendered.contains(r#"autocomplete="current-password""#));
+        assert!(rendered.contains("autofocus"));
+        assert!(rendered.contains(r#"id="login-error" role="alert""#));
+        assert!(rendered.contains(r#"aria-describedby="login-error""#));
+        assert!(rendered.contains(r#"aria-invalid="true""#));
+
+        let without_error = login(&EN, None).into_string();
+        assert!(!without_error.contains(r#"id="login-error""#));
+        assert!(!without_error.contains(r#"aria-describedby="login-error""#));
+        assert_eq!(without_error.matches(r#"aria-invalid="true""#).count(), 1);
+        assert_eq!(rendered.matches(r#"aria-invalid="true""#).count(), 2);
+    }
+
+    #[test]
     fn overview_renders_metric_tiles_with_labels() {
         let rendered = overview(&EN, 2, 3, 4, 5).into_string();
 
@@ -2508,15 +2746,86 @@ mod tests {
     #[test]
     fn assets_page_renders_tag_filters_and_bulk_editor() {
         let tags = vec!["prod".to_string(), "web".to_string()];
-        let rendered = assets(&EN, &[], &[], "csrf-123", Some("prod"), &tags, 2222).into_string();
+        let rendered = assets(
+            &EN,
+            &[],
+            &[],
+            "csrf-123",
+            Some("prod"),
+            Some("api east"),
+            &tags,
+            2222,
+        )
+        .into_string();
 
         assert!(rendered.contains(r#"class="assets-page""#));
         assert!(rendered.contains("Inventory, connectivity, and assigned access tags."));
         assert!(rendered.contains("Server inventory"));
         assert!(rendered.contains("Add Asset"));
-        assert!(rendered.contains(r#"href="/assets?tag=prod""#));
+        assert!(!rendered.contains("<h2>Assets / Servers</h2>"));
+        assert!(rendered.contains(r#"method="get" action="/assets""#));
+        assert!(rendered
+            .contains(r#"<label class="field" for="asset-search-query">Search assets</label>"#));
+        assert!(rendered.contains(r#"type="search" name="q" value="api east""#));
+        assert!(rendered.contains(">Search</button>"));
+        assert!(rendered.contains(">Clear filters</a>"));
+        assert!(rendered.contains(r#"type="hidden" name="tag" value="prod""#));
+        assert!(rendered.contains(r#"href="/assets?q=api%20east""#));
+        assert!(rendered.contains(r#"href="/assets?tag=prod&amp;q=api%20east""#));
         assert!(rendered.contains(r#"action="/assets/bulk-tags""#));
+        assert!(rendered.contains(r#"data-assets-bulk-controls hidden"#));
         assert!(rendered.contains(r#"list="asset-tags-list""#));
+    }
+
+    #[test]
+    fn assets_page_uses_an_accessible_on_demand_drawer() {
+        let rendered = assets(&EN, &[], &[], "csrf-123", None, None, &[], 2222).into_string();
+
+        assert!(rendered.contains(r#"aria-haspopup="dialog""#));
+        assert!(rendered.contains(r#"aria-controls="add-asset-dialog""#));
+        assert!(rendered.contains(r#"<dialog class="asset-dialog" id="add-asset-dialog""#));
+        assert!(rendered.contains(r#"aria-labelledby="add-asset-title""#));
+        assert!(rendered.contains("showModal()"));
+        assert!(rendered.contains("event.target===this"));
+        assert!(rendered.contains("event.key==='Escape'"));
+        assert!(rendered.contains(r#"onclose="document.getElementById('open-add-asset').focus()""#));
+        assert!(rendered.contains(r#"aria-label="Close""#));
+        assert!(!rendered.contains(r#"class="panel asset-form-panel""#));
+    }
+
+    #[test]
+    fn assets_page_keeps_targets_intact_and_bulk_controls_progressive() {
+        let item = asset("api", "api.internal.example", &["prod"]);
+        let rendered = assets(&EN, &[item], &[], "csrf-123", None, None, &[], 2222).into_string();
+
+        assert!(rendered.contains(r#"class="target-address""#));
+        assert!(rendered.contains("api.internal.example:22"));
+        assert!(rendered.contains(r#"data-assets-bulk-controls hidden"#));
+        assert!(rendered
+            .contains(r#"name="tags" placeholder="prod, web" list="asset-tags-list" disabled"#));
+        assert!(rendered.contains(r#"type="submit" disabled"#));
+        assert!(rendered.contains("syncAssetBulkControls"));
+    }
+
+    #[test]
+    fn assets_page_distinguishes_inventory_and_filter_empty_states() {
+        let no_assets = assets(&EN, &[], &[], "csrf-123", None, None, &[], 2222).into_string();
+        let no_matches = assets(
+            &EN,
+            &[],
+            &[],
+            "csrf-123",
+            Some("prod"),
+            Some("missing"),
+            &[],
+            2222,
+        )
+        .into_string();
+
+        assert!(no_assets.contains(EN.no_assets));
+        assert!(!no_matches.contains(EN.no_assets));
+        assert!(no_matches.contains(EN.assets_filter_heading));
+        assert!(no_matches.contains(EN.assets_filter_intro));
     }
 
     #[test]
@@ -2556,7 +2865,7 @@ mod tests {
         rdp.preset = Some(ASSET_PRESET_RDP.to_string());
         rdp.port = 3389;
 
-        let rendered = assets(&EN, &[rdp], &[], "csrf-123", None, &[], 2222).into_string();
+        let rendered = assets(&EN, &[rdp], &[], "csrf-123", None, None, &[], 2222).into_string();
 
         assert!(rendered.contains(r#"name="protocol""#));
         assert!(rendered.contains(r#"value="rdp""#));
@@ -2580,7 +2889,8 @@ mod tests {
             item.protocol = ASSET_PROTOCOL_TCP.to_string();
             item.preset = Some(preset.to_string());
             item.port = remote_port;
-            let rendered = assets(&EN, &[item], &[], "csrf-123", None, &[], 2222).into_string();
+            let rendered =
+                assets(&EN, &[item], &[], "csrf-123", None, None, &[], 2222).into_string();
 
             assert!(rendered.contains(&format!(r#"value="{preset}""#)));
             assert!(rendered.contains(&format!(
