@@ -1,5 +1,6 @@
 use hop_core::{
-    Asset, AssetAccessMode, AssetHealth, AuditEvent, AuthorizedKey, Credential, KnownHost, Session,
+    AdminUser, Asset, AssetAccessMode, AssetHealth, AuditEvent, AuthorizedKey, Credential,
+    KnownHost, Session, ADMIN_PROFILE_OPERATOR, ADMIN_PROFILE_OWNER, ADMIN_PROFILE_VIEWER,
     ASSET_HEALTH_FAILED, ASSET_HEALTH_HEALTHY, ASSET_HEALTH_UNKNOWN, ASSET_PRESET_MYSQL,
     ASSET_PRESET_POSTGRES, ASSET_PRESET_RDP, ASSET_PRESET_REDIS, ASSET_PRESET_VNC,
     ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
@@ -953,6 +954,66 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                         text-decoration: underline;
                     }
 
+                    .admin-access-list {
+                        display: grid;
+                        gap: 12px;
+                    }
+
+                    .admin-access-item {
+                        min-width: 0;
+                        display: grid;
+                        grid-template-columns: minmax(180px, 1fr) minmax(260px, 1.5fr);
+                        gap: 18px;
+                        align-items: center;
+                        padding: 16px;
+                        border: 1px solid var(--border);
+                        border-radius: 8px;
+                        background: var(--panel-muted);
+                    }
+
+                    .admin-access-item form {
+                        display: grid;
+                        grid-template-columns: minmax(150px, 1fr) auto auto;
+                        gap: 10px;
+                        align-items: end;
+                    }
+
+                    .admin-access-item .field {
+                        margin: 0;
+                    }
+
+                    .checkbox-line {
+                        min-height: 40px;
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 8px;
+                        white-space: nowrap;
+                    }
+
+                    .checkbox-line input[type=checkbox] {
+                        width: 18px;
+                        height: 18px;
+                        min-height: 0;
+                        flex: 0 0 auto;
+                    }
+
+                    .admin-access-item button {
+                        width: auto;
+                    }
+
+                    .admin-person {
+                        min-width: 0;
+                    }
+
+                    .admin-person b {
+                        color: var(--ink);
+                    }
+
+                    .admin-person .mono {
+                        display: block;
+                        margin-top: 4px;
+                    }
+
                     .terminal-strip {
                         display: flex;
                         align-items: center;
@@ -1167,6 +1228,13 @@ pub fn layout(title: &str, active: &str, t: &L10n, body_content: Markup) -> Mark
                             grid-column: 3;
                             grid-row: 1 / span 2;
                         }
+                        .admin-access-item,
+                        .admin-access-item form {
+                            grid-template-columns: 1fr;
+                        }
+                        .admin-access-item button {
+                            width: 100%;
+                        }
                         .heatmap {
                             grid-template-columns: repeat(8, 1fr);
                         }
@@ -1278,7 +1346,7 @@ fn login_layout(title: &str, t: &L10n, body_content: Markup) -> Markup {
     }
 }
 
-pub fn login(t: &L10n, error: Option<&str>) -> Markup {
+pub fn login(t: &L10n, error: Option<&str>, show_username: bool, username: Option<&str>) -> Markup {
     layout(
         t.login_title,
         "login",
@@ -1289,13 +1357,25 @@ pub fn login(t: &L10n, error: Option<&str>) -> Markup {
                     div.panel-header {
                         div {
                             h2 { (t.login_heading) }
-                            p { (t.login_intro) }
+                            p { (if show_username { t.login_team_intro } else { t.login_intro }) }
                         }
                     }
                     @if let Some(error) = error {
                         p.error-message id="login-error" role="alert" { (error) }
                     }
                     form method="post" action="/login" {
+                        @if show_username {
+                            label.field {
+                                (t.login_username)
+                                input
+                                    id="login-username"
+                                    name="username"
+                                    value=(username.unwrap_or(""))
+                                    autocomplete="username"
+                                    autofocus
+                                    required;
+                            }
+                        }
                         label.field {
                             (t.login_password)
                             @if error.is_some() {
@@ -1306,7 +1386,7 @@ pub fn login(t: &L10n, error: Option<&str>) -> Markup {
                                     autocomplete="current-password"
                                     aria-describedby="login-error"
                                     aria-invalid="true"
-                                    autofocus
+                                    autofocus[!show_username]
                                     required;
                             } @else {
                                 input
@@ -1314,7 +1394,7 @@ pub fn login(t: &L10n, error: Option<&str>) -> Markup {
                                     type="password"
                                     name="password"
                                     autocomplete="current-password"
-                                    autofocus
+                                    autofocus[!show_username]
                                     required;
                             }
                         }
@@ -1328,7 +1408,71 @@ pub fn login(t: &L10n, error: Option<&str>) -> Markup {
     )
 }
 
-pub fn settings(t: &L10n, csrf_token: &str, error: Option<&str>) -> Markup {
+pub fn permission_denied(t: &L10n, task: &str, access_profile: &str) -> Markup {
+    layout(
+        t.permission_denied_title,
+        "",
+        t,
+        html! {
+            div.page-intro {
+                h2 { (t.permission_denied_heading) }
+                p { (t.permission_denied_intro) }
+            }
+            section.panel {
+                div.posture-list {
+                    div.posture-item {
+                        span.status-dot.warn {}
+                        b { (t.permission_current_access) }
+                        span { (admin_profile_label(t, access_profile)) }
+                    }
+                    div.posture-item {
+                        span.status-dot.good {}
+                        b { (t.permission_owner_action) }
+                        a.dashboard-panel-link href="/settings" { (t.nav_settings) }
+                    }
+                }
+                pre {
+                    @match t.locale {
+                        Locale::En => { (t.permission_request_prefix) " " (task) "." }
+                        Locale::Zh => { (t.permission_request_prefix) (task) "。" }
+                    }
+                }
+            }
+        },
+    )
+}
+
+fn admin_profile_label<'a>(t: &'a L10n, profile: &str) -> &'a str {
+    match profile {
+        ADMIN_PROFILE_OWNER => t.admin_profile_owner,
+        ADMIN_PROFILE_OPERATOR => t.admin_profile_operator,
+        ADMIN_PROFILE_VIEWER => t.admin_profile_viewer,
+        _ => t.none,
+    }
+}
+
+fn admin_profile_intro<'a>(t: &'a L10n, profile: &str) -> &'a str {
+    match profile {
+        ADMIN_PROFILE_OWNER => t.admin_profile_owner_intro,
+        ADMIN_PROFILE_OPERATOR => t.admin_profile_operator_intro,
+        ADMIN_PROFILE_VIEWER => t.admin_profile_viewer_intro,
+        _ => t.none,
+    }
+}
+
+pub fn settings(
+    t: &L10n,
+    current_admin: &AdminUser,
+    admins: &[AdminUser],
+    csrf_token: &str,
+    error: Option<&str>,
+    can_manage_admins: bool,
+) -> Markup {
+    let active_admin_count = admins.iter().filter(|admin| admin.is_active).count();
+    let active_owner_count = admins
+        .iter()
+        .filter(|admin| admin.is_active && admin.access_profile == ADMIN_PROFILE_OWNER)
+        .count();
     layout(
         t.settings_title,
         "settings",
@@ -1338,15 +1482,18 @@ pub fn settings(t: &L10n, csrf_token: &str, error: Option<&str>) -> Markup {
                 h2 { (t.settings_heading) }
                 p { (t.settings_intro) }
             }
+            @if let Some(error) = error {
+                p.error-message role="alert" { (error) }
+            }
+            @if current_admin.must_change_password {
+                p.error-message role="status" { (t.admin_must_change_password) }
+            }
             section.panel {
                 div.panel-header {
                     div {
                         h2 { (t.admin_password_heading) }
                         p { (t.admin_password_intro) }
                     }
-                }
-                @if let Some(error) = error {
-                    p.error-message { (error) }
                 }
                 form method="post" action="/settings" {
                     (csrf_field(csrf_token))
@@ -1357,11 +1504,11 @@ pub fn settings(t: &L10n, csrf_token: &str, error: Option<&str>) -> Markup {
                         }
                         label.field {
                             (t.new_password)
-                            input type="password" name="new_password" autocomplete="new-password" required;
+                            input type="password" name="new_password" autocomplete="new-password" minlength="12" required;
                         }
                         label.field {
                             (t.confirm_password)
-                            input type="password" name="confirm_password" autocomplete="new-password" required;
+                            input type="password" name="confirm_password" autocomplete="new-password" minlength="12" required;
                         }
                     }
                     div.button-row {
@@ -1369,8 +1516,162 @@ pub fn settings(t: &L10n, csrf_token: &str, error: Option<&str>) -> Markup {
                     }
                 }
             }
+            section.panel {
+                div.panel-header {
+                    div {
+                        h2 { (t.admin_access_heading) }
+                        p { (t.admin_access_intro) }
+                    }
+                    div.status-row {
+                        span.status-chip { (active_admin_count) " · " (t.admin_access_heading) }
+                        @if can_manage_admins {
+                            button
+                                id="open-add-admin"
+                                type="button"
+                                aria-haspopup="dialog"
+                                aria-controls="add-admin-dialog"
+                                onclick="document.getElementById('add-admin-dialog').showModal()" {
+                                (t.admin_add_action)
+                            }
+                        }
+                    }
+                }
+                p.fine-print {
+                    (if active_admin_count == 1 { t.admin_single_mode } else { t.admin_team_mode })
+                }
+                div.panel-header {
+                    div {
+                        h3 { (t.admin_existing_heading) }
+                        p { (t.admin_existing_intro) }
+                    }
+                }
+                div.admin-access-list {
+                    @for admin in admins {
+                        @let is_current = admin.id == current_admin.id;
+                        @let is_last_owner = admin.is_active
+                            && admin.access_profile == ADMIN_PROFILE_OWNER
+                            && active_owner_count == 1;
+                        div.admin-access-item {
+                            div.admin-person {
+                                b {
+                                    (admin.display_name)
+                                    @if is_current {
+                                        " · " (t.admin_current_user)
+                                    }
+                                }
+                                span.mono { "@" (admin.username) }
+                                span.subtle {
+                                    (t.admin_last_login) ": "
+                                    (admin.last_login_at.as_deref().unwrap_or("-"))
+                                }
+                                @if admin.must_change_password {
+                                    span.status-chip.warn { (t.admin_must_change_password) }
+                                }
+                            }
+                            @if can_manage_admins && !is_last_owner {
+                                form method="post" action=(format!("/settings/admins/{}/access", admin.id)) {
+                                    (csrf_field(csrf_token))
+                                    label.field {
+                                        (t.admin_access_level)
+                                        select name="access_profile" {
+                                            (admin_profile_options(t, &admin.access_profile))
+                                        }
+                                    }
+                                    label.checkbox-line {
+                                        input type="checkbox" name="is_active" value="yes" checked[admin.is_active];
+                                        (t.admin_login_active)
+                                    }
+                                    button type="submit" { (t.admin_save_access) }
+                                }
+                            } @else {
+                                div.primary-cell {
+                                    span.status-pill {
+                                        (admin_profile_label(t, &admin.access_profile))
+                                    }
+                                    span.subtle {
+                                        (admin_profile_intro(t, &admin.access_profile))
+                                    }
+                                    @if is_last_owner {
+                                        span.subtle { (t.admin_last_owner_note) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            @if can_manage_admins {
+                dialog.asset-drawer
+                    id="add-admin-dialog"
+                    aria-labelledby="add-admin-title"
+                    onclose="document.getElementById('open-add-admin').focus()" {
+                    div.drawer-frame {
+                        div.drawer-header {
+                            div {
+                                span.status-chip { (t.admin_add_action) }
+                                h2 id="add-admin-title" { (t.admin_add_heading) }
+                                p { (t.admin_add_intro) }
+                            }
+                            form method="dialog" {
+                                button.ghost-button type="submit" { (t.close) }
+                            }
+                        }
+                        form method="post" action="/settings/admins" {
+                            (csrf_field(csrf_token))
+                            div.grid {
+                                label.field {
+                                    (t.admin_display_name)
+                                    input name="display_name" autocomplete="name" required autofocus;
+                                }
+                                label.field {
+                                    (t.admin_username)
+                                    input name="username" autocomplete="off" pattern="[A-Za-z0-9_.-]+" required;
+                                }
+                                label.field.field-wide {
+                                    (t.admin_temporary_password)
+                                    input type="password" name="temporary_password" autocomplete="new-password" minlength="12" required;
+                                    span.subtle { (t.admin_temporary_password_note) }
+                                }
+                                label.field.field-wide {
+                                    (t.admin_access_level)
+                                    select name="access_profile" {
+                                        option value=(ADMIN_PROFILE_OPERATOR) selected {
+                                            (t.admin_profile_operator) " · " (t.admin_recommended)
+                                        }
+                                        option value=(ADMIN_PROFILE_VIEWER) { (t.admin_profile_viewer) }
+                                        option value=(ADMIN_PROFILE_OWNER) { (t.admin_profile_owner) }
+                                    }
+                                }
+                            }
+                            details {
+                                summary { (t.admin_access_level) }
+                                p { b { (t.admin_profile_operator) } " — " (t.admin_profile_operator_intro) }
+                                p { b { (t.admin_profile_viewer) } " — " (t.admin_profile_viewer_intro) }
+                                p { b { (t.admin_profile_owner) } " — " (t.admin_profile_owner_intro) }
+                            }
+                            div.button-row {
+                                button type="submit" { (t.admin_add_action) }
+                            }
+                        }
+                    }
+                }
+            }
         },
     )
+}
+
+fn admin_profile_options(t: &L10n, selected: &str) -> Markup {
+    html! {
+        option value=(ADMIN_PROFILE_OPERATOR) selected[selected == ADMIN_PROFILE_OPERATOR] {
+            (t.admin_profile_operator)
+        }
+        option value=(ADMIN_PROFILE_VIEWER) selected[selected == ADMIN_PROFILE_VIEWER] {
+            (t.admin_profile_viewer)
+        }
+        option value=(ADMIN_PROFILE_OWNER) selected[selected == ADMIN_PROFILE_OWNER] {
+            (t.admin_profile_owner)
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1726,11 +2027,10 @@ fn asset_health_status<'a>(data: &'a DashboardData, asset_id: &str) -> &'a str {
 }
 
 fn coverage_percent(numerator: usize, denominator: usize) -> usize {
-    if denominator == 0 {
-        0
-    } else {
-        numerator.saturating_mul(100) / denominator
-    }
+    numerator
+        .saturating_mul(100)
+        .checked_div(denominator)
+        .unwrap_or(0)
 }
 
 fn coverage_item(label: &str, numerator: usize, denominator: usize, percent: usize) -> Markup {
@@ -1813,6 +2113,7 @@ fn parse_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn assets(
     t: &L10n,
     items: &[Asset],
@@ -1822,6 +2123,7 @@ pub fn assets(
     search_query: Option<&str>,
     all_tags: &[String],
     ssh_port: u16,
+    can_manage: bool,
 ) -> Markup {
     let search_query = search_query
         .map(str::trim)
@@ -1841,13 +2143,15 @@ pub fn assets(
                     }
                     div.console-actions {
                         span.status-chip.good { span.status-dot.good {} (items.len()) " " (t.assets_count_suffix) }
-                        button
-                            id="open-add-asset"
-                            type="button"
-                            aria-haspopup="dialog"
-                            aria-controls="add-asset-dialog"
-                            onclick="document.getElementById('add-asset-dialog').showModal()" {
-                            (t.assets_add_heading)
+                        @if can_manage {
+                            button
+                                id="open-add-asset"
+                                type="button"
+                                aria-haspopup="dialog"
+                                aria-controls="add-asset-dialog"
+                                onclick="document.getElementById('add-asset-dialog').showModal()" {
+                                (t.assets_add_heading)
+                            }
                         }
                     }
                 }
@@ -1899,7 +2203,9 @@ pub fn assets(
                         span.command-chip { (t.assets_export_heading) }
                         a.ghost-button href="/assets/export?format=csv" { (t.export_csv) }
                         a.ghost-button href="/assets/export?format=json" { (t.export_json) }
-                        a.ghost-button href="/import" { (t.import_open) }
+                        @if can_manage {
+                            a.ghost-button href="/import" { (t.import_open) }
+                        }
                     }
                 }
                 section.panel.assets-inventory {
@@ -1920,19 +2226,23 @@ pub fn assets(
                             table.data-table {
                                 thead {
                                     tr {
-                                        th.checkbox-cell {}
+                                        @if can_manage {
+                                            th.checkbox-cell {}
+                                        }
                                         th { (t.field_hostname) }
                                         th { (t.field_protocol) }
                                         th { (t.target_column) }
                                         th { (t.field_tags) }
                                         th { (t.field_credential) }
-                                        th { (t.field_action) }
+                                        @if can_manage {
+                                            th { (t.field_action) }
+                                        }
                                     }
                                 }
                                 tbody {
                                     @if items.is_empty() {
                                         tr.empty-row {
-                                            td colspan="7" {
+                                            td colspan=(if can_manage { "7" } else { "5" }) {
                                                 div.assets-empty-state {
                                                     @if has_filters {
                                                         strong { (t.assets_filter_heading) }
@@ -1940,10 +2250,12 @@ pub fn assets(
                                                         a.ghost-button href="/assets" { (t.assets_filter_all) }
                                                     } @else {
                                                         strong { (t.no_assets) }
-                                                        button
-                                                            type="button"
-                                                            onclick="document.getElementById('open-add-asset').click()" {
-                                                            (t.assets_add_heading)
+                                                        @if can_manage {
+                                                            button
+                                                                type="button"
+                                                                onclick="document.getElementById('open-add-asset').click()" {
+                                                                (t.assets_add_heading)
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -1952,12 +2264,14 @@ pub fn assets(
                                     }
                                     @for asset in items {
                                         tr {
-                                            td.checkbox-cell {
-                                                input
-                                                    type="checkbox"
-                                                    name="asset_ids"
-                                                    value=(asset.id)
-                                                    aria-label=(format!("{}: {}", t.assets_bulk_heading, asset.name));
+                                            @if can_manage {
+                                                td.checkbox-cell {
+                                                    input
+                                                        type="checkbox"
+                                                        name="asset_ids"
+                                                        value=(asset.id)
+                                                        aria-label=(format!("{}: {}", t.assets_bulk_heading, asset.name));
+                                                }
                                             }
                                             td {
                                                 div.primary-cell {
@@ -2013,31 +2327,33 @@ pub fn assets(
                                                     span.status-pill.neutral { (t.proxy_only) }
                                                 }
                                             }
-                                            td {
-                                                div.action-row {
-                                                    a
-                                                        id=(format!("edit-asset-{}", asset.id))
-                                                        class="ghost-button"
-                                                        href=(format!(
-                                                            "/assets/{}/edit?return_to={}",
-                                                            asset.id,
-                                                            url_query_value(&return_to)
-                                                        ))
-                                                        aria-haspopup="dialog"
-                                                        aria-controls="edit-asset-dialog"
-                                                        data-asset-id=(asset.id)
-                                                        data-asset-name=(asset.name)
-                                                        data-asset-protocol=(asset_kind(asset))
-                                                        data-asset-hostname=(asset.hostname)
-                                                        data-asset-port=(asset.port)
-                                                        data-asset-tags=(asset.tags.join(", "))
-                                                        data-asset-credential=(asset.credential_id.as_deref().unwrap_or(""))
-                                                        data-asset-description=(asset.description.as_deref().unwrap_or(""))
-                                                        data-return-to=(return_to)
-                                                        onclick="window.openAssetEditor(this);return false" {
-                                                        (t.edit)
+                                            @if can_manage {
+                                                td {
+                                                    div.action-row {
+                                                        a
+                                                            id=(format!("edit-asset-{}", asset.id))
+                                                            class="ghost-button"
+                                                            href=(format!(
+                                                                "/assets/{}/edit?return_to={}",
+                                                                asset.id,
+                                                                url_query_value(&return_to)
+                                                            ))
+                                                            aria-haspopup="dialog"
+                                                            aria-controls="edit-asset-dialog"
+                                                            data-asset-id=(asset.id)
+                                                            data-asset-name=(asset.name)
+                                                            data-asset-protocol=(asset_kind(asset))
+                                                            data-asset-hostname=(asset.hostname)
+                                                            data-asset-port=(asset.port)
+                                                            data-asset-tags=(asset.tags.join(", "))
+                                                            data-asset-credential=(asset.credential_id.as_deref().unwrap_or(""))
+                                                            data-asset-description=(asset.description.as_deref().unwrap_or(""))
+                                                            data-return-to=(return_to)
+                                                            onclick="window.openAssetEditor(this);return false" {
+                                                            (t.edit)
+                                                        }
+                                                        button class="danger" type="submit" formaction=(format!("/assets/{}/delete", asset.id)) { (t.delete) }
                                                     }
-                                                    button class="danger" type="submit" formaction=(format!("/assets/{}/delete", asset.id)) { (t.delete) }
                                                 }
                                             }
                                         }
@@ -2045,25 +2361,27 @@ pub fn assets(
                                 }
                             }
                         }
-                        div.assets-bulk-bar data-assets-bulk-controls hidden {
-                            div.assets-bulk-copy {
-                                strong { (t.assets_bulk_heading) }
-                                span
-                                    class="status-chip"
-                                    data-assets-selected-count
-                                    data-suffix=(t.assets_count_suffix)
-                                    aria-live="polite" {}
-                                p.fine-print { (t.assets_bulk_intro) }
+                        @if can_manage {
+                            div.assets-bulk-bar data-assets-bulk-controls hidden {
+                                div.assets-bulk-copy {
+                                    strong { (t.assets_bulk_heading) }
+                                    span
+                                        class="status-chip"
+                                        data-assets-selected-count
+                                        data-suffix=(t.assets_count_suffix)
+                                        aria-live="polite" {}
+                                    p.fine-print { (t.assets_bulk_intro) }
+                                }
+                                label.field {
+                                    (t.assets_bulk_tags_label)
+                                    input
+                                        name="tags"
+                                        placeholder="prod, web"
+                                        list="asset-tags-list"
+                                        disabled;
+                                }
+                                button type="submit" disabled { (t.assets_bulk_apply) }
                             }
-                            label.field {
-                                (t.assets_bulk_tags_label)
-                                input
-                                    name="tags"
-                                    placeholder="prod, web"
-                                    list="asset-tags-list"
-                                    disabled;
-                            }
-                            button type="submit" disabled { (t.assets_bulk_apply) }
                         }
                     }
                 }
@@ -2432,6 +2750,7 @@ pub fn credentials(
     assets: &[Asset],
     csrf_token: &str,
     error: Option<&str>,
+    can_manage: bool,
 ) -> Markup {
     layout(
         t.credentials_title,
@@ -2448,13 +2767,15 @@ pub fn credentials(
                             span.status-dot.good {}
                             (items.len()) " " (t.credentials_title)
                         }
-                        button
-                            id="open-add-credential"
-                            type="button"
-                            aria-haspopup="dialog"
-                            aria-controls="add-credential-dialog"
-                            onclick="document.getElementById('add-credential-dialog').showModal()" {
-                            (t.credentials_add_heading)
+                        @if can_manage {
+                            button
+                                id="open-add-credential"
+                                type="button"
+                                aria-haspopup="dialog"
+                                aria-controls="add-credential-dialog"
+                                onclick="document.getElementById('add-credential-dialog').showModal()" {
+                                (t.credentials_add_heading)
+                            }
                         }
                     }
                 }
@@ -2469,7 +2790,9 @@ pub fn credentials(
                     div.button-row {
                         a.ghost-button href="/credentials/export?format=csv" { (t.export_csv) }
                         a.ghost-button href="/credentials/export?format=json" { (t.export_json) }
-                        a.ghost-button href="/import" { (t.import_open) }
+                        @if can_manage {
+                            a.ghost-button href="/import" { (t.import_open) }
+                        }
                     }
                 }
                 section.panel.credentials-inventory {
@@ -2489,19 +2812,23 @@ pub fn credentials(
                                     th { (t.field_auth_type) }
                                     th { (t.secrets_label) }
                                     th { (t.credential_usage_heading) }
-                                    th { (t.field_action) }
+                                    @if can_manage {
+                                        th { (t.field_action) }
+                                    }
                                 }
                             }
                             tbody {
                                 @if items.is_empty() {
                                     tr.empty-row {
-                                        td colspan="6" {
+                                        td colspan=(if can_manage { "6" } else { "5" }) {
                                             div.assets-empty-state {
                                                 strong { (t.no_credentials) }
-                                                button
-                                                    type="button"
-                                                    onclick="document.getElementById('open-add-credential').click()" {
-                                                    (t.credentials_add_heading)
+                                                @if can_manage {
+                                                    button
+                                                        type="button"
+                                                        onclick="document.getElementById('open-add-credential').click()" {
+                                                        (t.credentials_add_heading)
+                                                    }
                                                 }
                                             }
                                         }
@@ -2547,40 +2874,42 @@ pub fn credentials(
                                                 }
                                             }
                                         }
-                                        td {
-                                            div.action-row {
-                                                a
-                                                    id=(format!("edit-credential-{}", credential.id))
-                                                    class="ghost-button"
-                                                    href=(format!("/credentials/{}/edit", credential.id))
-                                                    aria-haspopup="dialog"
-                                                    aria-controls="edit-credential-dialog"
-                                                    data-credential-id=(credential.id)
-                                                    data-credential-name=(credential.name)
-                                                    data-credential-username=(credential.username)
-                                                    data-credential-auth-type=(credential.auth_type)
-                                                    data-has-password=(credential.password_enc.is_some())
-                                                    data-has-private-key=(credential.private_key_enc.is_some())
-                                                    data-has-passphrase=(credential.passphrase_enc.is_some())
-                                                    onclick="window.openCredentialEditor(this);return false" {
-                                                    (t.edit)
-                                                }
-                                                form
-                                                    method="post"
-                                                    action=(format!("/credentials/{}/delete", credential.id))
-                                                    data-confirm=(t.credential_delete_confirm)
-                                                    onsubmit="return window.confirm(this.dataset.confirm)" {
-                                                    (csrf_field(csrf_token))
-                                                    button
-                                                        class="danger"
-                                                        type="submit"
-                                                        disabled[usage_count > 0]
-                                                        title=(if usage_count > 0 {
-                                                            t.credential_delete_in_use
-                                                        } else {
-                                                            t.credential_delete_confirm
-                                                        }) {
-                                                        (t.delete)
+                                        @if can_manage {
+                                            td {
+                                                div.action-row {
+                                                    a
+                                                        id=(format!("edit-credential-{}", credential.id))
+                                                        class="ghost-button"
+                                                        href=(format!("/credentials/{}/edit", credential.id))
+                                                        aria-haspopup="dialog"
+                                                        aria-controls="edit-credential-dialog"
+                                                        data-credential-id=(credential.id)
+                                                        data-credential-name=(credential.name)
+                                                        data-credential-username=(credential.username)
+                                                        data-credential-auth-type=(credential.auth_type)
+                                                        data-has-password=(credential.password_enc.is_some())
+                                                        data-has-private-key=(credential.private_key_enc.is_some())
+                                                        data-has-passphrase=(credential.passphrase_enc.is_some())
+                                                        onclick="window.openCredentialEditor(this);return false" {
+                                                        (t.edit)
+                                                    }
+                                                    form
+                                                        method="post"
+                                                        action=(format!("/credentials/{}/delete", credential.id))
+                                                        data-confirm=(t.credential_delete_confirm)
+                                                        onsubmit="return window.confirm(this.dataset.confirm)" {
+                                                        (csrf_field(csrf_token))
+                                                        button
+                                                            class="danger"
+                                                            type="submit"
+                                                            disabled[usage_count > 0]
+                                                            title=(if usage_count > 0 {
+                                                                t.credential_delete_in_use
+                                                            } else {
+                                                                t.credential_delete_confirm
+                                                            }) {
+                                                            (t.delete)
+                                                        }
                                                     }
                                                 }
                                             }
@@ -2893,7 +3222,14 @@ fn credential_drawer_script() -> &'static str {
     "#
 }
 
-pub fn keys(t: &L10n, items: &[AuthorizedKey], csrf_token: &str) -> Markup {
+pub fn keys(
+    t: &L10n,
+    items: &[AuthorizedKey],
+    assets: &[Asset],
+    csrf_token: &str,
+    error: Option<&str>,
+    can_manage: bool,
+) -> Markup {
     layout(
         t.keys_title,
         "keys",
@@ -2903,28 +3239,35 @@ pub fn keys(t: &L10n, items: &[AuthorizedKey], csrf_token: &str) -> Markup {
                 h2 { (t.keys_heading) }
                 p { (t.keys_intro) }
             }
-            section.panel {
-                div.panel-header {
-                    div {
-                        h2 { (t.keys_add_heading) }
-                        p { (t.keys_add_intro) }
-                    }
-                }
-                form method="post" action="/keys" {
-                    (csrf_field(csrf_token))
-                    div.grid {
-                        label.field {
-                            (t.field_name)
-                            input name="name" required;
-                        }
-                        label.field.field-wide {
-                            (t.field_public_key)
-                            textarea name="public_key" rows="4" required {}
+            @if can_manage {
+                section.panel {
+                    div.panel-header {
+                        div {
+                            h2 { (t.keys_add_heading) }
+                            p { (t.keys_add_intro) }
                         }
                     }
-                    div.button-row {
-                        button type="submit" { (t.save_key) }
+                    form method="post" action="/keys" {
+                        (csrf_field(csrf_token))
+                        @if let Some(error) = error {
+                            p.error-message role="alert" { (error) }
+                        }
+                        div.grid {
+                            label.field {
+                                (t.field_name)
+                                input name="name" required;
+                            }
+                            label.field.field-wide {
+                                (t.field_public_key)
+                                textarea name="public_key" rows="4" required {}
+                            }
+                        }
+                        (key_access_selector(t, assets, false, &[]))
+                        div.button-row {
+                            button type="submit" { (t.save_key) }
+                        }
                     }
+                    script { (PreEscaped(key_access_script())) }
                 }
             }
             section.panel {
@@ -2937,11 +3280,21 @@ pub fn keys(t: &L10n, items: &[AuthorizedKey], csrf_token: &str) -> Markup {
                 div.table-wrap {
                     table.data-table {
                         thead {
-                            tr { th { (t.field_name) } th { (t.field_fingerprint) } th { (t.field_status) } th { (t.field_action) } }
+                            tr {
+                                th { (t.field_name) }
+                                th { (t.field_fingerprint) }
+                                th { (t.key_access_mode) }
+                                th { (t.field_status) }
+                                @if can_manage {
+                                    th { (t.field_action) }
+                                }
+                            }
                         }
                         tbody {
                             @if items.is_empty() {
-                                tr.empty-row { td colspan="4" { (t.no_keys) } }
+                                tr.empty-row {
+                                    td colspan=(if can_manage { "5" } else { "4" }) { (t.no_keys) }
+                                }
                             }
                             @for key in items {
                                 tr {
@@ -2955,24 +3308,35 @@ pub fn keys(t: &L10n, items: &[AuthorizedKey], csrf_token: &str) -> Markup {
                                     }
                                     td.mono { (key.fingerprint) }
                                     td {
+                                        span.status-pill.neutral {
+                                            (if key.asset_access_mode == AssetAccessMode::Restricted {
+                                                t.key_access_restricted
+                                            } else {
+                                                t.key_access_all
+                                            })
+                                        }
+                                    }
+                                    td {
                                         @if key.is_active {
                                             span.status-pill { (t.active) }
                                         } @else {
                                             span.status-pill.neutral { (t.inactive) }
                                         }
                                     }
-                                    td {
-                                        div.action-row {
-                                            a class="button" href=(format!("/keys/{}/edit", key.id)) { (t.edit) }
-                                            @if key.is_active {
-                                                form method="post" action=(format!("/keys/{}/deactivate", key.id)) {
-                                                    (csrf_field(csrf_token))
-                                                    button class="danger" type="submit" { (t.deactivate) }
-                                                }
-                                            } @else {
-                                                form method="post" action=(format!("/keys/{}/activate", key.id)) {
-                                                    (csrf_field(csrf_token))
-                                                    button type="submit" { (t.activate) }
+                                    @if can_manage {
+                                        td {
+                                            div.action-row {
+                                                a class="button" href=(format!("/keys/{}/edit", key.id)) { (t.edit) }
+                                                @if key.is_active {
+                                                    form method="post" action=(format!("/keys/{}/deactivate", key.id)) {
+                                                        (csrf_field(csrf_token))
+                                                        button class="danger" type="submit" { (t.deactivate) }
+                                                    }
+                                                } @else {
+                                                    form method="post" action=(format!("/keys/{}/activate", key.id)) {
+                                                        (csrf_field(csrf_token))
+                                                        button type="submit" { (t.activate) }
+                                                    }
                                                 }
                                             }
                                         }
@@ -2996,11 +3360,6 @@ pub fn edit_key(
     error: Option<&str>,
 ) -> Markup {
     let restricted = key.asset_access_mode == AssetAccessMode::Restricted;
-    let accessible_count = if restricted {
-        assigned_ids.len()
-    } else {
-        assets.len()
-    };
     layout(
         t.edit_key_title,
         "keys",
@@ -3032,63 +3391,7 @@ pub fn edit_key(
                             textarea name="public_key" rows="4" required { (key.public_key) }
                         }
                     }
-                    section.asset-access-list {
-                        div.panel-header {
-                            div {
-                                h2 { (t.key_access_heading) }
-                                p { (t.key_access_intro) }
-                            }
-                            span.status-pill {
-                                (accessible_count) " / " (assets.len()) " " (t.key_assets_suffix)
-                            }
-                        }
-                        label.field {
-                            (t.key_access_mode)
-                            select name="asset_access_mode" data-asset-access-mode onchange=(key_access_mode_onchange()) {
-                                option value="all" selected[!restricted] { (t.key_access_all) }
-                                option value="restricted" selected[restricted] { (t.key_access_restricted) }
-                            }
-                        }
-                        p.fine-print data-access-all-note hidden[restricted] { (t.key_access_all_intro) }
-                        div data-asset-access-list hidden[!restricted] {
-                            p.fine-print { (t.key_access_restricted_intro) }
-                            label.field {
-                                (t.key_asset_search)
-                                input type="search" data-asset-filter oninput=(key_asset_filter_oninput());
-                            }
-                            div.asset-access-list {
-                                @for asset in assets {
-                                    @let assigned = assigned_ids.iter().any(|id| id == &asset.id);
-                                    @let search = format!(
-                                        "{} {} {} {} {}",
-                                        asset.name,
-                                        asset_kind(asset),
-                                        asset.hostname,
-                                        asset.port,
-                                        asset.tags.join(" ")
-                                    ).to_ascii_lowercase();
-                                    label.asset-access-item data-asset-search=(search) {
-                                        input type="checkbox" name="asset_id" value=(asset.id)
-                                            checked[assigned] disabled[!restricted];
-                                        div.primary-cell {
-                                            span { (asset.name) }
-                                            span.subtle {
-                                                (asset_protocol_label(t, asset_kind(asset))) " · "
-                                                (asset.hostname) ":" (asset.port)
-                                            }
-                                            @if !asset.tags.is_empty() {
-                                                div.tag-list {
-                                                    @for tag in &asset.tags {
-                                                        span.tag { (tag) }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    (key_access_selector(t, assets, restricted, assigned_ids))
                     div.button-row {
                         button type="submit" { (t.save_changes) }
                         a.ghost-button href="/keys" { (t.back_to_keys) }
@@ -3112,6 +3415,78 @@ pub fn edit_key(
     )
 }
 
+fn key_access_selector(
+    t: &L10n,
+    assets: &[Asset],
+    restricted: bool,
+    assigned_ids: &[String],
+) -> Markup {
+    let accessible_count = if restricted {
+        assigned_ids.len()
+    } else {
+        assets.len()
+    };
+    html! {
+        section.asset-access-list {
+            div.panel-header {
+                div {
+                    h2 { (t.key_access_heading) }
+                    p { (t.key_access_intro) }
+                }
+                span.status-pill {
+                    (accessible_count) " / " (assets.len()) " " (t.key_assets_suffix)
+                }
+            }
+            label.field {
+                (t.key_access_mode)
+                select name="asset_access_mode" data-asset-access-mode onchange=(key_access_mode_onchange()) {
+                    option value="all" selected[!restricted] { (t.key_access_all) }
+                    option value="restricted" selected[restricted] { (t.key_access_restricted) }
+                }
+            }
+            p.fine-print data-access-all-note hidden[restricted] { (t.key_access_all_intro) }
+            div data-asset-access-list hidden[!restricted] {
+                p.fine-print { (t.key_access_restricted_intro) }
+                label.field {
+                    (t.key_asset_search)
+                    input type="search" data-asset-filter oninput=(key_asset_filter_oninput());
+                }
+                div.asset-access-list {
+                    @for asset in assets {
+                        @let assigned = assigned_ids.iter().any(|id| id == &asset.id);
+                        @let search = format!(
+                            "{} {} {} {} {}",
+                            asset.name,
+                            asset_kind(asset),
+                            asset.hostname,
+                            asset.port,
+                            asset.tags.join(" ")
+                        ).to_ascii_lowercase();
+                        label.asset-access-item data-asset-search=(search) {
+                            input type="checkbox" name="asset_id" value=(asset.id)
+                                checked[assigned] disabled[!restricted];
+                            div.primary-cell {
+                                span { (asset.name) }
+                                span.subtle {
+                                    (asset_protocol_label(t, asset_kind(asset))) " · "
+                                    (asset.hostname) ":" (asset.port)
+                                }
+                                @if !asset.tags.is_empty() {
+                                    div.tag-list {
+                                        @for tag in &asset.tags {
+                                            span.tag { (tag) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn key_access_mode_onchange() -> &'static str {
     "window.hopToggleKeyAccess(this.form)"
 }
@@ -3124,7 +3499,13 @@ fn key_access_script() -> &'static str {
     r#"window.hopToggleKeyAccess=function(form){const mode=form.querySelector('[data-asset-access-mode]').value;const restricted=mode==='restricted';const list=form.querySelector('[data-asset-access-list]');const note=form.querySelector('[data-access-all-note]');list.hidden=!restricted;note.hidden=restricted;list.querySelectorAll('input[type=checkbox]').forEach((input)=>input.disabled=!restricted);};"#
 }
 
-pub fn known_hosts(t: &L10n, items: &[KnownHost], assets: &[Asset], csrf_token: &str) -> Markup {
+pub fn known_hosts(
+    t: &L10n,
+    items: &[KnownHost],
+    assets: &[Asset],
+    csrf_token: &str,
+    can_manage: bool,
+) -> Markup {
     layout(
         t.known_hosts_title,
         "known-hosts",
@@ -3165,12 +3546,16 @@ pub fn known_hosts(t: &L10n, items: &[KnownHost], assets: &[Asset], csrf_token: 
                                     th { (t.field_fingerprint) }
                                     th { (t.first_seen_column) }
                                     th { (t.known_hosts_asset_usage) }
-                                    th { (t.field_action) }
+                                    @if can_manage {
+                                        th { (t.field_action) }
+                                    }
                                 }
                             }
                             tbody {
                                 @if items.is_empty() {
-                                    tr.empty-row { td colspan="6" { (t.no_known_hosts) } }
+                                    tr.empty-row {
+                                        td colspan=(if can_manage { "6" } else { "5" }) { (t.no_known_hosts) }
+                                    }
                                 }
                                 @for host in items {
                                     @let used_assets = known_host_assets(assets, host);
@@ -3221,24 +3606,26 @@ pub fn known_hosts(t: &L10n, items: &[KnownHost], assets: &[Asset], csrf_token: 
                                                 }
                                             }
                                         }
-                                        td {
-                                            button
-                                                id=(format!(
-                                                    "reset-known-host-{}-{}-{}",
-                                                    host.hostname,
-                                                    host.port,
-                                                    host.key_type
-                                                ))
-                                                class="danger"
-                                                type="button"
-                                                aria-haspopup="dialog"
-                                                aria-controls="reset-known-host-dialog"
-                                                data-hostname=(host.hostname)
-                                                data-port=(host.port)
-                                                data-key-type=(host.key_type)
-                                                data-fingerprint=(host.fingerprint)
-                                                onclick="window.openKnownHostReset(this)" {
-                                                (t.known_host_reset_action)
+                                        @if can_manage {
+                                            td {
+                                                button
+                                                    id=(format!(
+                                                        "reset-known-host-{}-{}-{}",
+                                                        host.hostname,
+                                                        host.port,
+                                                        host.key_type
+                                                    ))
+                                                    class="danger"
+                                                    type="button"
+                                                    aria-haspopup="dialog"
+                                                    aria-controls="reset-known-host-dialog"
+                                                    data-hostname=(host.hostname)
+                                                    data-port=(host.port)
+                                                    data-key-type=(host.key_type)
+                                                    data-fingerprint=(host.fingerprint)
+                                                    onclick="window.openKnownHostReset(this)" {
+                                                    (t.known_host_reset_action)
+                                                }
                                             }
                                         }
                                     }
@@ -3723,7 +4110,7 @@ mod tests {
 
     #[test]
     fn mutating_forms_include_csrf_token() {
-        let rendered = assets(&EN, &[], &[], "csrf-123", None, None, &[], 2222).into_string();
+        let rendered = assets(&EN, &[], &[], "csrf-123", None, None, &[], 2222, true).into_string();
 
         assert!(rendered.contains(r#"name="csrf_token""#));
         assert!(rendered.contains(r#"value="csrf-123""#));
@@ -3783,7 +4170,7 @@ mod tests {
 
     #[test]
     fn login_uses_a_dedicated_shell_without_internal_navigation() {
-        let rendered = login(&EN, None).into_string();
+        let rendered = login(&EN, None, false, None).into_string();
 
         assert!(rendered.contains(r#"class="admin-shell login-shell""#));
         assert!(rendered.contains(r#"class="login-brand""#));
@@ -3803,7 +4190,7 @@ mod tests {
 
     #[test]
     fn login_password_field_supports_password_managers_and_accessible_errors() {
-        let rendered = login(&EN, Some("Invalid password")).into_string();
+        let rendered = login(&EN, Some("Invalid password"), false, None).into_string();
 
         assert!(rendered.contains(r#"id="login-password""#));
         assert!(rendered.contains(r#"autocomplete="current-password""#));
@@ -3812,11 +4199,23 @@ mod tests {
         assert!(rendered.contains(r#"aria-describedby="login-error""#));
         assert!(rendered.contains(r#"aria-invalid="true""#));
 
-        let without_error = login(&EN, None).into_string();
+        let without_error = login(&EN, None, false, None).into_string();
         assert!(!without_error.contains(r#"id="login-error""#));
         assert!(!without_error.contains(r#"aria-describedby="login-error""#));
         assert_eq!(without_error.matches(r#"aria-invalid="true""#).count(), 1);
         assert_eq!(rendered.matches(r#"aria-invalid="true""#).count(), 2);
+    }
+
+    #[test]
+    fn login_adds_account_name_only_after_team_mode_is_enabled() {
+        let single = login(&EN, None, false, None).into_string();
+        let team = login(&EN, None, true, Some("alice")).into_string();
+
+        assert!(!single.contains(r#"name="username""#));
+        assert!(team.contains(r#"name="username""#));
+        assert!(team.contains(r#"value="alice""#));
+        assert!(team.contains(r#"autocomplete="username""#));
+        assert!(team.contains(EN.login_team_intro));
     }
 
     #[test]
@@ -3877,6 +4276,7 @@ mod tests {
             Some("api east"),
             &tags,
             2222,
+            true,
         )
         .into_string();
 
@@ -3901,7 +4301,7 @@ mod tests {
 
     #[test]
     fn assets_page_uses_an_accessible_on_demand_drawer() {
-        let rendered = assets(&EN, &[], &[], "csrf-123", None, None, &[], 2222).into_string();
+        let rendered = assets(&EN, &[], &[], "csrf-123", None, None, &[], 2222, true).into_string();
 
         assert!(rendered.contains(r#"aria-haspopup="dialog""#));
         assert!(rendered.contains(r#"aria-controls="add-asset-dialog""#));
@@ -3918,7 +4318,8 @@ mod tests {
     #[test]
     fn assets_page_keeps_targets_intact_and_bulk_controls_progressive() {
         let item = asset("api", "api.internal.example", &["prod"]);
-        let rendered = assets(&EN, &[item], &[], "csrf-123", None, None, &[], 2222).into_string();
+        let rendered =
+            assets(&EN, &[item], &[], "csrf-123", None, None, &[], 2222, true).into_string();
 
         assert!(rendered.contains(r#"class="target-address""#));
         assert!(rendered.contains("api.internal.example:22"));
@@ -3946,6 +4347,7 @@ mod tests {
             Some("api"),
             &[],
             2222,
+            true,
         )
         .into_string();
 
@@ -3985,7 +4387,8 @@ mod tests {
 
     #[test]
     fn assets_page_distinguishes_inventory_and_filter_empty_states() {
-        let no_assets = assets(&EN, &[], &[], "csrf-123", None, None, &[], 2222).into_string();
+        let no_assets =
+            assets(&EN, &[], &[], "csrf-123", None, None, &[], 2222, true).into_string();
         let no_matches = assets(
             &EN,
             &[],
@@ -3995,6 +4398,7 @@ mod tests {
             Some("missing"),
             &[],
             2222,
+            true,
         )
         .into_string();
 
@@ -4009,8 +4413,15 @@ mod tests {
         let credential = credential("cred-1", "prod-root", "root", "password");
         let mut assigned_asset = asset("api", "api.internal", &["prod"]);
         assigned_asset.credential_id = Some("cred-1".to_string());
-        let rendered =
-            credentials(&EN, &[credential], &[assigned_asset], "csrf-123", None).into_string();
+        let rendered = credentials(
+            &EN,
+            &[credential],
+            &[assigned_asset],
+            "csrf-123",
+            None,
+            true,
+        )
+        .into_string();
 
         assert!(rendered.contains(r#"aria-controls="add-credential-dialog""#));
         assert!(rendered.contains(r#"aria-controls="edit-credential-dialog""#));
@@ -4051,7 +4462,7 @@ mod tests {
             first_seen: Some("2026-07-28 10:00:00".to_string()),
         };
         let assigned_asset = asset("api", "api.internal", &["prod"]);
-        let rendered = known_hosts(&EN, &[host], &[assigned_asset], "csrf-123").into_string();
+        let rendered = known_hosts(&EN, &[host], &[assigned_asset], "csrf-123", true).into_string();
 
         assert!(rendered.contains(EN.known_hosts_reset_note));
         assert!(rendered.contains("1 assets"));
@@ -4116,7 +4527,8 @@ mod tests {
         rdp.preset = Some(ASSET_PRESET_RDP.to_string());
         rdp.port = 3389;
 
-        let rendered = assets(&EN, &[rdp], &[], "csrf-123", None, None, &[], 2222).into_string();
+        let rendered =
+            assets(&EN, &[rdp], &[], "csrf-123", None, None, &[], 2222, true).into_string();
 
         assert!(rendered.contains(r#"name="protocol""#));
         assert!(rendered.contains(r#"value="rdp""#));
@@ -4141,7 +4553,7 @@ mod tests {
             item.preset = Some(preset.to_string());
             item.port = remote_port;
             let rendered =
-                assets(&EN, &[item], &[], "csrf-123", None, None, &[], 2222).into_string();
+                assets(&EN, &[item], &[], "csrf-123", None, None, &[], 2222, true).into_string();
 
             assert!(rendered.contains(&format!(r#"value="{preset}""#)));
             assert!(rendered.contains(&format!(
@@ -4152,7 +4564,16 @@ mod tests {
 
     #[test]
     fn settings_page_renders_admin_password_form() {
-        let rendered = settings(&EN, "csrf-123", Some("problem")).into_string();
+        let current = admin_user("local-admin", "admin", ADMIN_PROFILE_OWNER, true);
+        let rendered = settings(
+            &EN,
+            &current,
+            std::slice::from_ref(&current),
+            "csrf-123",
+            Some("problem"),
+            true,
+        )
+        .into_string();
 
         assert!(rendered.contains(r#"action="/settings""#));
         assert!(rendered.contains(r#"name="current_password""#));
@@ -4160,6 +4581,116 @@ mod tests {
         assert!(rendered.contains(r#"name="confirm_password""#));
         assert!(rendered.contains(r#"value="csrf-123""#));
         assert!(rendered.contains("problem"));
+        assert!(rendered.contains(r#"id="add-admin-dialog""#));
+        assert!(rendered.contains(EN.admin_single_mode));
+        assert!(rendered.contains(r#"name="access_profile""#));
+        assert!(!rendered.contains("RBAC"));
+    }
+
+    #[test]
+    fn settings_progressively_shows_team_accounts_and_hides_management_for_viewers() {
+        let owner = admin_user("local-admin", "admin", ADMIN_PROFILE_OWNER, true);
+        let viewer = admin_user("viewer-1", "auditor", ADMIN_PROFILE_VIEWER, true);
+        let rendered = settings(
+            &EN,
+            &viewer,
+            &[owner, viewer.clone()],
+            "csrf-123",
+            None,
+            false,
+        )
+        .into_string();
+
+        assert!(rendered.contains(EN.admin_team_mode));
+        assert!(rendered.contains("@auditor"));
+        assert!(rendered.contains(EN.admin_profile_viewer));
+        assert!(!rendered.contains(r#"id="add-admin-dialog""#));
+        assert!(!rendered.contains(r#"action="/settings/admins""#));
+    }
+
+    #[test]
+    fn access_page_creates_scope_in_the_same_lightweight_flow() {
+        let first = asset("first", "10.0.0.1", &["prod"]);
+        let rendered = keys(&EN, &[], &[first], "csrf-123", None, true).into_string();
+
+        assert!(rendered.contains("People &amp; SSH access"));
+        assert!(rendered.contains(r#"name="asset_access_mode""#));
+        assert!(rendered.contains(r#"name="asset_id""#));
+        assert!(rendered.contains(EN.key_access_all));
+        assert!(rendered.contains(EN.key_access_restricted));
+        assert!(!rendered.contains("RBAC"));
+    }
+
+    #[test]
+    fn read_only_pages_hide_mutating_affordances_but_keep_safe_actions() {
+        let item = asset("first", "10.0.0.1", &["prod"]);
+        let asset_page = assets(
+            &EN,
+            std::slice::from_ref(&item),
+            &[],
+            "csrf-123",
+            None,
+            None,
+            &["prod".to_string()],
+            2222,
+            false,
+        )
+        .into_string();
+        assert!(asset_page.contains(EN.asset_copy_target));
+        assert!(asset_page.contains(EN.export_csv));
+        assert!(!asset_page.contains(r#"id="open-add-asset""#));
+        assert!(!asset_page.contains(r#"type="checkbox" name="asset_ids""#));
+        assert!(!asset_page.contains(r#"id="edit-asset-first""#));
+        assert!(!asset_page.contains(r#"formaction="/assets/first/delete""#));
+        assert!(!asset_page.contains(r#"class="ghost-button" href="/import""#));
+
+        let credential_page = credentials(
+            &EN,
+            &[credential("cred-1", "prod-root", "root", "password")],
+            &[],
+            "csrf-123",
+            None,
+            false,
+        )
+        .into_string();
+        assert!(credential_page.contains(EN.export_csv));
+        assert!(!credential_page.contains(r#"id="open-add-credential""#));
+        assert!(!credential_page.contains(r#"id="edit-credential-cred-1""#));
+        assert!(!credential_page.contains(r#"/credentials/cred-1/delete"#));
+
+        let key_page = keys(
+            &EN,
+            &[authorized_key(AssetAccessMode::All)],
+            &[item],
+            "csrf-123",
+            None,
+            false,
+        )
+        .into_string();
+        assert!(key_page.contains(EN.keys_existing_heading));
+        assert!(!key_page.contains(r#"action="/keys""#));
+        assert!(!key_page.contains("/edit"));
+        assert!(!key_page.contains("/deactivate"));
+
+        let host = KnownHost {
+            hostname: "10.0.0.1".to_string(),
+            port: 22,
+            key_type: "ssh-ed25519".to_string(),
+            fingerprint: "SHA256:trusted".to_string(),
+            first_seen: None,
+        };
+        let host_page = known_hosts(&EN, &[host], &[], "csrf-123", false).into_string();
+        assert!(host_page.contains(EN.known_host_copy_fingerprint));
+        assert!(!host_page.contains(r#"aria-controls="reset-known-host-dialog""#));
+    }
+
+    #[test]
+    fn permission_request_copy_uses_locale_appropriate_spacing_and_punctuation() {
+        let english = permission_denied(&EN, EN.nav_assets, ADMIN_PROFILE_VIEWER).into_string();
+        let chinese = permission_denied(&ZH, ZH.nav_assets, ADMIN_PROFILE_VIEWER).into_string();
+
+        assert!(english.contains("Request: please allow me to manage Assets."));
+        assert!(chinese.contains("请求文案：请允许我管理资产。"));
     }
 
     #[test]
@@ -4239,6 +4770,24 @@ mod tests {
             is_active: true,
             asset_access_mode: mode,
             created_at: None,
+        }
+    }
+
+    fn admin_user(id: &str, username: &str, access_profile: &str, is_active: bool) -> AdminUser {
+        AdminUser {
+            id: id.to_string(),
+            username: username.to_string(),
+            display_name: if id == "local-admin" {
+                "Local admin".to_string()
+            } else {
+                username.to_string()
+            },
+            auth_source: "local".to_string(),
+            is_active,
+            access_profile: access_profile.to_string(),
+            must_change_password: false,
+            created_at: Some("2026-07-28 10:00:00".to_string()),
+            last_login_at: None,
         }
     }
 

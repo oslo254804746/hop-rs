@@ -16,8 +16,8 @@ use axum::{
 };
 use hop_core::{
     encrypt_envelope, new_id, protocol_supports_managed_credentials, validate_credential_material,
-    validate_tcp_port, AssetAccessMode, AuthType, HopDb, MasterKey, NewAsset, NewAuditEvent,
-    NewAuthorizedKey, NewCredential, ASSET_PROTOCOL_SSH,
+    validate_tcp_port, AssetAccessMode, AuthType, HopDb, MasterKey, NewAdminUser, NewAsset,
+    NewAuditEvent, NewAuthorizedKey, NewCredential, ASSET_PROTOCOL_SSH,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -30,8 +30,8 @@ use tracing::{info, warn};
 
 use super::{
     auth::{
-        clear_cookie, cookie_token, require_login, session_cookie, AdminSessions,
-        AuthenticatedSession,
+        clear_cookie, cookie_token, profile_has_capability, require_login, session_cookie,
+        AdminCapability, AdminSessions, AuthenticatedSession,
     },
     bootstrap, html,
     i18n::{l10n, locale_from_code, resolve_locale, L10n, LOCALE_COOKIE},
@@ -125,6 +125,11 @@ fn admin_router_with_static_dir(state: AdminState, static_dir: impl Into<PathBuf
         .route("/sessions", get(sessions))
         .route("/import", get(import_page).post(import_data))
         .route("/settings", get(settings).post(update_settings))
+        .route("/settings/admins", post(create_admin_user))
+        .route(
+            "/settings/admins/{id}/access",
+            post(update_admin_user_access),
+        )
         .nest_service("/admin-static", ServeDir::new(static_dir.into()))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -155,12 +160,46 @@ async fn csrf_guard(
     }
 }
 
+fn capability_guard(
+    headers: &HeaderMap,
+    session: &AuthenticatedSession,
+    capability: AdminCapability,
+) -> Option<Response> {
+    if session.must_change_password
+        && !matches!(
+            capability,
+            AdminCapability::InventoryRead | AdminCapability::SessionsRead
+        )
+    {
+        return Some(Redirect::to("/settings").into_response());
+    }
+    if profile_has_capability(&session.access_profile, capability) {
+        return None;
+    }
+    let t = request_l10n(headers);
+    let task = match capability {
+        AdminCapability::InventoryRead | AdminCapability::AssetsManage => t.nav_assets,
+        AdminCapability::CredentialsManage => t.nav_credentials,
+        AdminCapability::AccessManage => t.nav_keys,
+        AdminCapability::SessionsRead => t.nav_sessions,
+        AdminCapability::AdminsManage => t.nav_settings,
+    };
+    Some(
+        (
+            StatusCode::FORBIDDEN,
+            Html(html::permission_denied(t, task, &session.access_profile).into_string()),
+        )
+            .into_response(),
+    )
+}
+
 type OptionalPeer = Option<Extension<ConnectInfo<SocketAddr>>>;
 
 fn source_ip(peer: Option<&Extension<ConnectInfo<SocketAddr>>>) -> Option<String> {
     peer.map(|Extension(ConnectInfo(address))| address.ip().to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn record_audit(
     state: &AdminState,
     session: Option<&AuthenticatedSession>,
@@ -198,9 +237,12 @@ async fn record_audit(
 
 async fn index(State(state): State<AdminState>, headers: HeaderMap) -> Response {
     let t = request_l10n(&headers);
-    let Ok(_session) = guard(&headers, &state).await else {
+    let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::InventoryRead) {
+        return resp;
+    }
     let database_healthy = state.db.health_check().await.is_ok();
     let ssh_reachable = probe_tcp_bind(state.ssh_bind).await;
     let mut source_errors = Vec::new();
@@ -305,13 +347,20 @@ async fn probe_tcp_bind(bind: SocketAddr) -> bool {
     )
 }
 
-async fn login_page(headers: HeaderMap) -> Html<String> {
+async fn login_page(State(state): State<AdminState>, headers: HeaderMap) -> Html<String> {
     let t = request_l10n(&headers);
-    Html(html::login(t, None).into_string())
+    let show_username = state
+        .db
+        .count_active_admin_users()
+        .await
+        .map(|count| count > 1)
+        .unwrap_or(true);
+    Html(html::login(t, None, show_username, None).into_string())
 }
 
 #[derive(Deserialize)]
 struct LoginForm {
+    username: Option<String>,
     password: String,
 }
 
@@ -322,19 +371,48 @@ async fn login(
     Form(form): Form<LoginForm>,
 ) -> Response {
     let t = request_l10n(&headers);
-    let admin = state
+    let active_admins = state
         .db
-        .get_admin_user_by_username("admin")
+        .list_admin_users()
         .await
-        .ok()
-        .flatten();
-    match (
-        bootstrap::verify_admin_password(&state.db, &form.password).await,
-        admin.filter(|admin| admin.is_active),
-    ) {
-        (Ok(true), Some(admin)) => {
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|admin| admin.is_active)
+        .collect::<Vec<_>>();
+    let show_username = active_admins.len() > 1;
+    let submitted_username = form
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|username| !username.is_empty());
+    let admin = if show_username {
+        submitted_username.and_then(|username| {
+            active_admins
+                .iter()
+                .find(|admin| admin.username.eq_ignore_ascii_case(username))
+                .cloned()
+        })
+    } else {
+        active_admins.into_iter().next()
+    };
+    let verified = match &admin {
+        Some(admin) => bootstrap::verify_admin_user_password(&state.db, &admin.id, &form.password)
+            .await
+            .unwrap_or(false),
+        None => false,
+    };
+    match (verified, admin) {
+        (true, Some(admin)) => {
             let _ = state.db.mark_admin_login(&admin.id).await;
-            let token = state.sessions.create(&admin.id, &admin.display_name).await;
+            let token = state
+                .sessions
+                .create(
+                    &admin.id,
+                    &admin.display_name,
+                    &admin.access_profile,
+                    admin.must_change_password,
+                )
+                .await;
             let authenticated = state.sessions.authenticate(&token).await;
             record_audit(
                 &state,
@@ -355,7 +433,14 @@ async fn login(
                         header::SET_COOKIE,
                         session_cookie(&token, state.cookie_secure),
                     ),
-                    (header::LOCATION, "/".to_string()),
+                    (
+                        header::LOCATION,
+                        if admin.must_change_password {
+                            "/settings".to_string()
+                        } else {
+                            "/".to_string()
+                        },
+                    ),
                 ],
             )
                 .into_response()
@@ -368,12 +453,21 @@ async fn login(
                 "admin.login",
                 "admin_user",
                 None,
-                Some("admin"),
+                Some(submitted_username.unwrap_or("password-only")),
                 "failure",
                 None,
             )
             .await;
-            Html(html::login(t, Some(t.login_invalid_password)).into_string()).into_response()
+            Html(
+                html::login(
+                    t,
+                    Some(t.login_invalid_password),
+                    show_username,
+                    submitted_username,
+                )
+                .into_string(),
+            )
+            .into_response()
         }
     }
 }
@@ -414,7 +508,36 @@ async fn settings(State(state): State<AdminState>, headers: HeaderMap) -> Respon
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
-    Html(html::settings(t, &session.csrf_token, None).into_string()).into_response()
+    render_settings(&state, t, &session, None).await
+}
+
+async fn render_settings(
+    state: &AdminState,
+    t: &L10n,
+    session: &AuthenticatedSession,
+    error: Option<&str>,
+) -> Response {
+    let current_admin = match state.db.get_admin_user_by_id(&session.admin_id).await {
+        Ok(Some(admin)) => admin,
+        Ok(None) => return Redirect::to("/login").into_response(),
+        Err(err) => return admin_db_error("load current admin settings", err),
+    };
+    let admins = match state.db.list_admin_users().await {
+        Ok(admins) => admins,
+        Err(err) => return admin_db_error("list admins for settings", err),
+    };
+    Html(
+        html::settings(
+            t,
+            &current_admin,
+            &admins,
+            &session.csrf_token,
+            error,
+            profile_has_capability(&session.access_profile, AdminCapability::AdminsManage),
+        )
+        .into_string(),
+    )
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -438,8 +561,9 @@ async fn update_settings(
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
-    match bootstrap::change_admin_password(
+    match bootstrap::change_admin_user_password(
         &state.db,
+        &session.admin_id,
         &form.current_password,
         &form.new_password,
         &form.confirm_password,
@@ -484,21 +608,199 @@ async fn update_settings(
                 })),
             )
             .await;
-            Html(
-                html::settings(
-                    t,
-                    &session.csrf_token,
-                    Some(settings_password_error_message(t, err)),
-                )
-                .into_string(),
+            render_settings(
+                &state,
+                t,
+                &session,
+                Some(settings_password_error_message(t, err)),
             )
-            .into_response()
+            .await
         }
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "failed to change admin password",
         )
             .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateAdminForm {
+    csrf_token: String,
+    display_name: String,
+    username: String,
+    temporary_password: String,
+    access_profile: String,
+}
+
+async fn create_admin_user(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    peer: OptionalPeer,
+    Form(form): Form<CreateAdminForm>,
+) -> Response {
+    let t = request_l10n(&headers);
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AdminsManage) {
+        return resp;
+    }
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
+        return resp;
+    }
+    if form.temporary_password.chars().count() < 12 {
+        return render_settings(
+            &state,
+            t,
+            &session,
+            Some(t.admin_temporary_password_too_short),
+        )
+        .await;
+    }
+    let password_hash = match bootstrap::hash_password(&form.temporary_password) {
+        Ok(hash) => hash,
+        Err(err) => return admin_db_error("hash temporary admin password", err),
+    };
+    match state
+        .db
+        .add_admin_user(NewAdminUser {
+            username: form.username,
+            display_name: form.display_name,
+            password_hash,
+            access_profile: form.access_profile,
+            must_change_password: true,
+        })
+        .await
+    {
+        Ok(admin) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "admin_user.create",
+                "admin_user",
+                Some(&admin.id),
+                Some(&admin.display_name),
+                "success",
+                Some(serde_json::json!({
+                    "access_profile": admin.access_profile,
+                    "must_change_password": true
+                })),
+            )
+            .await;
+            Redirect::to("/settings").into_response()
+        }
+        Err(err) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "admin_user.create",
+                "admin_user",
+                None,
+                None,
+                "failure",
+                Some(serde_json::json!({"reason": "validation_or_database"})),
+            )
+            .await;
+            render_settings(&state, t, &session, Some(&err.to_string())).await
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct UpdateAdminAccessForm {
+    csrf_token: String,
+    access_profile: String,
+    is_active: Option<String>,
+}
+
+async fn update_admin_user_access(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    peer: OptionalPeer,
+    Form(form): Form<UpdateAdminAccessForm>,
+) -> Response {
+    let t = request_l10n(&headers);
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AdminsManage) {
+        return resp;
+    }
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
+        return resp;
+    }
+    let before = match state.db.get_admin_user_by_id(&id).await {
+        Ok(Some(admin)) => admin,
+        Ok(None) => return render_settings(&state, t, &session, Some(t.admin_not_found)).await,
+        Err(err) => return admin_db_error("load admin before access update", err),
+    };
+    let is_active = form.is_active.as_deref() == Some("yes");
+    match state
+        .db
+        .update_admin_user_access(&id, &form.access_profile, is_active)
+        .await
+    {
+        Ok(()) => {
+            state.sessions.remove_admin(&id).await;
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "admin_user.access_update",
+                "admin_user",
+                Some(&id),
+                Some(&before.display_name),
+                "success",
+                Some(serde_json::json!({
+                    "before": {
+                        "access_profile": before.access_profile,
+                        "is_active": before.is_active
+                    },
+                    "after": {
+                        "access_profile": form.access_profile,
+                        "is_active": is_active
+                    }
+                })),
+            )
+            .await;
+            if id == session.admin_id {
+                (
+                    StatusCode::SEE_OTHER,
+                    [
+                        (header::SET_COOKIE, clear_cookie(state.cookie_secure)),
+                        (header::LOCATION, "/login".to_string()),
+                    ],
+                )
+                    .into_response()
+            } else {
+                Redirect::to("/settings").into_response()
+            }
+        }
+        Err(err) => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "admin_user.access_update",
+                "admin_user",
+                Some(&id),
+                Some(&before.display_name),
+                "failure",
+                Some(serde_json::json!({"reason": "guard_or_database"})),
+            )
+            .await;
+            let error = err.to_string();
+            let message = if error.contains("last full-control admin") {
+                t.admin_last_owner_note
+            } else {
+                &error
+            };
+            render_settings(&state, t, &session, Some(message)).await
+        }
     }
 }
 
@@ -537,6 +839,7 @@ async fn assets(
             query.q.as_deref(),
             &all_tags,
             state.ssh_port,
+            profile_has_capability(&session.access_profile, AdminCapability::AssetsManage),
         )
         .into_string(),
     )
@@ -579,6 +882,9 @@ async fn create_asset(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AssetsManage) {
+        return resp;
+    }
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
@@ -653,6 +959,9 @@ async fn edit_asset(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AssetsManage) {
+        return resp;
+    }
     let Ok(Some(asset)) = state.db.get_asset_by_id(&id).await else {
         return Redirect::to("/assets").into_response();
     };
@@ -691,6 +1000,9 @@ async fn update_asset(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AssetsManage) {
+        return resp;
+    }
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
@@ -761,6 +1073,9 @@ async fn delete_asset(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AssetsManage) {
+        return resp;
+    }
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
@@ -817,6 +1132,9 @@ async fn bulk_update_asset_tags(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AssetsManage) {
+        return resp;
+    }
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
@@ -873,8 +1191,18 @@ async fn credentials(State(state): State<AdminState>, headers: HeaderMap) -> Res
         Ok(assets) => assets,
         Err(err) => return admin_db_error("list assets for credential usage", err),
     };
-    Html(html::credentials(t, &credentials, &assets, &session.csrf_token, None).into_string())
-        .into_response()
+    Html(
+        html::credentials(
+            t,
+            &credentials,
+            &assets,
+            &session.csrf_token,
+            None,
+            profile_has_capability(&session.access_profile, AdminCapability::CredentialsManage),
+        )
+        .into_string(),
+    )
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -897,6 +1225,9 @@ async fn create_credential(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::CredentialsManage) {
+        return resp;
+    }
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
@@ -1007,6 +1338,9 @@ async fn edit_credential(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::CredentialsManage) {
+        return resp;
+    }
     let Ok(Some(credential)) = state.db.get_credential(&id).await else {
         return Redirect::to("/credentials").into_response();
     };
@@ -1028,6 +1362,9 @@ async fn update_credential(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::CredentialsManage) {
+        return resp;
+    }
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
@@ -1197,6 +1534,9 @@ async fn delete_credential(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::CredentialsManage) {
+        return resp;
+    }
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
@@ -1237,6 +1577,7 @@ async fn delete_credential(
                     &assets,
                     &session.csrf_token,
                     Some(t.credential_delete_in_use),
+                    true,
                 )
                 .into_string(),
             ),
@@ -1286,14 +1627,22 @@ async fn keys(State(state): State<AdminState>, headers: HeaderMap) -> Response {
         Ok(keys) => keys,
         Err(err) => return admin_db_error("list authorized keys", err),
     };
-    Html(html::keys(t, &keys, &session.csrf_token).into_string()).into_response()
-}
-
-#[derive(Deserialize)]
-struct CreateKeyForm {
-    csrf_token: String,
-    name: String,
-    public_key: String,
+    let assets = match state.db.list_assets().await {
+        Ok(assets) => assets,
+        Err(err) => return admin_db_error("list assets for authorized keys", err),
+    };
+    Html(
+        html::keys(
+            t,
+            &keys,
+            &assets,
+            &session.csrf_token,
+            None,
+            profile_has_capability(&session.access_profile, AdminCapability::AccessManage),
+        )
+        .into_string(),
+    )
+    .into_response()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1309,18 +1658,30 @@ async fn create_key(
     State(state): State<AdminState>,
     headers: HeaderMap,
     peer: OptionalPeer,
-    Form(form): Form<CreateKeyForm>,
+    body: Bytes,
 ) -> Response {
+    let t = request_l10n(&headers);
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AccessManage) {
+        return resp;
+    }
+    let form = match parse_key_access_form(&body) {
+        Ok(form) => form,
+        Err(err) => return render_keys_error(&state, t, &session, &err.to_string()).await,
     };
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
+    let mode = match AssetAccessMode::try_from(form.asset_access_mode.as_str()) {
+        Ok(mode) => mode,
+        Err(err) => return render_keys_error(&state, t, &session, &err.to_string()).await,
+    };
     let requested_name = form.name.clone();
     let (public_key, fingerprint) = match parse_public_key_line(&form.public_key) {
         Ok(parsed) => parsed,
-        Err(_) => {
+        Err(err) => {
             record_audit(
                 &state,
                 Some(&session),
@@ -1333,12 +1694,18 @@ async fn create_key(
                 Some(serde_json::json!({"reason": "invalid_public_key"})),
             )
             .await;
-            return Redirect::to("/keys").into_response();
+            return render_keys_error(&state, t, &session, &err.to_string()).await;
         }
     };
+    let audit_mode = form.asset_access_mode.clone();
+    let audit_asset_count = form.asset_ids.len();
     match state
         .db
-        .add_authorized_key(NewAuthorizedKey::new(form.name, public_key, fingerprint))
+        .add_authorized_key_with_access(
+            NewAuthorizedKey::new(form.name, public_key, fingerprint),
+            mode,
+            &form.asset_ids,
+        )
         .await
     {
         Ok(created) => {
@@ -1351,7 +1718,11 @@ async fn create_key(
                 Some(&created.id),
                 Some(&created.name),
                 "success",
-                Some(serde_json::json!({"fingerprint": created.fingerprint})),
+                Some(serde_json::json!({
+                    "fingerprint": created.fingerprint,
+                    "access_mode": audit_mode,
+                    "asset_count": audit_asset_count
+                })),
             )
             .await;
             Redirect::to("/keys").into_response()
@@ -1369,9 +1740,30 @@ async fn create_key(
                 Some(serde_json::json!({"reason": "database"})),
             )
             .await;
-            admin_db_error("create authorized key", err)
+            render_keys_error(&state, t, &session, &err.to_string()).await
         }
     }
+}
+
+async fn render_keys_error(
+    state: &AdminState,
+    t: &L10n,
+    session: &AuthenticatedSession,
+    error: &str,
+) -> Response {
+    let keys = match state.db.list_authorized_keys().await {
+        Ok(keys) => keys,
+        Err(err) => return admin_db_error("list authorized keys after create error", err),
+    };
+    let assets = match state.db.list_assets().await {
+        Ok(assets) => assets,
+        Err(err) => return admin_db_error("list assets after key create error", err),
+    };
+    (
+        StatusCode::BAD_REQUEST,
+        Html(html::keys(t, &keys, &assets, &session.csrf_token, Some(error), true).into_string()),
+    )
+        .into_response()
 }
 
 async fn edit_key(
@@ -1383,6 +1775,9 @@ async fn edit_key(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AccessManage) {
+        return resp;
+    }
     let Ok(Some(key)) = state.db.get_authorized_key_by_id(&id).await else {
         return Redirect::to("/keys").into_response();
     };
@@ -1409,6 +1804,9 @@ async fn update_key(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AccessManage) {
+        return resp;
+    }
     let form = match parse_key_access_form(&body) {
         Ok(form) => form,
         Err(err) => {
@@ -1554,6 +1952,9 @@ async fn deactivate_key(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AccessManage) {
+        return resp;
+    }
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
@@ -1570,6 +1971,9 @@ async fn activate_key(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AccessManage) {
+        return resp;
+    }
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
@@ -1639,6 +2043,9 @@ async fn delete_key(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AccessManage) {
+        return resp;
+    }
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
@@ -1696,7 +2103,17 @@ async fn known_hosts(State(state): State<AdminState>, headers: HeaderMap) -> Res
         Ok(assets) => assets,
         Err(err) => return admin_db_error("list assets for known hosts", err),
     };
-    Html(html::known_hosts(t, &hosts, &assets, &session.csrf_token).into_string()).into_response()
+    Html(
+        html::known_hosts(
+            t,
+            &hosts,
+            &assets,
+            &session.csrf_token,
+            profile_has_capability(&session.access_profile, AdminCapability::AccessManage),
+        )
+        .into_string(),
+    )
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -1716,6 +2133,9 @@ async fn delete_known_host(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AccessManage) {
+        return resp;
+    }
     if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
         return resp;
     }
@@ -1780,9 +2200,12 @@ async fn delete_known_host(
 
 async fn sessions(State(state): State<AdminState>, headers: HeaderMap) -> Response {
     let t = request_l10n(&headers);
-    let Ok(_session) = guard(&headers, &state).await else {
+    let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::SessionsRead) {
+        return resp;
+    }
     let sessions = match state.db.list_sessions(100).await {
         Ok(sessions) => sessions,
         Err(err) => return admin_db_error("list sessions", err),
@@ -1877,6 +2300,9 @@ async fn import_page(State(state): State<AdminState>, headers: HeaderMap) -> Res
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AssetsManage) {
+        return resp;
+    }
     Html(html::import_export(t, &session.csrf_token, None).into_string()).into_response()
 }
 
@@ -1890,6 +2316,9 @@ async fn import_data(
     let Ok(session) = guard(&headers, &state).await else {
         return Redirect::to("/login").into_response();
     };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AssetsManage) {
+        return resp;
+    }
 
     let mut csrf_token = String::new();
     let mut kind = TransferKind::Assets;
@@ -2059,6 +2488,9 @@ fn settings_password_error_message(
             t.settings_current_password_invalid
         }
         bootstrap::AdminPasswordChangeError::NewPasswordEmpty => t.settings_new_password_empty,
+        bootstrap::AdminPasswordChangeError::NewPasswordTooShort => {
+            t.settings_new_password_too_short
+        }
         bootstrap::AdminPasswordChangeError::ConfirmationMismatch => {
             t.settings_password_confirmation_mismatch
         }
@@ -2069,6 +2501,7 @@ fn settings_password_error_code(err: bootstrap::AdminPasswordChangeError) -> &'s
     match err {
         bootstrap::AdminPasswordChangeError::CurrentPasswordInvalid => "current_password_invalid",
         bootstrap::AdminPasswordChangeError::NewPasswordEmpty => "new_password_empty",
+        bootstrap::AdminPasswordChangeError::NewPasswordTooShort => "new_password_too_short",
         bootstrap::AdminPasswordChangeError::ConfirmationMismatch => "confirmation_mismatch",
     }
 }
@@ -2109,9 +2542,8 @@ fn filter_assets(
     assets
         .iter()
         .filter(|asset| {
-            selected_tag.map_or(true, |tag| {
-                asset.tags.iter().any(|asset_tag| asset_tag == tag)
-            }) && query.map_or(true, |query| asset_matches_query(asset, query))
+            selected_tag.is_none_or(|tag| asset.tags.iter().any(|asset_tag| asset_tag == tag))
+                && query.is_none_or(|query| asset_matches_query(asset, query))
         })
         .cloned()
         .collect()
@@ -2370,6 +2802,8 @@ mod tests {
             csrf_token: "csrf-token".to_string(),
             admin_id: "local-admin".to_string(),
             admin_label: "Local admin".to_string(),
+            access_profile: hop_core::ADMIN_PROFILE_OWNER.to_string(),
+            must_change_password: false,
         };
 
         record_audit(
@@ -2429,6 +2863,74 @@ mod tests {
         );
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
         assert_eq!(&body[..], b"body{background:#0d1117}");
+    }
+
+    #[tokio::test]
+    async fn login_stays_password_only_until_a_second_admin_is_added() {
+        let state = test_admin_state().await;
+        let dist = tempfile::tempdir().unwrap();
+        let first = admin_router_with_static_dir(state.clone(), dist.path())
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let first_body = to_bytes(first.into_body(), 64 * 1024).await.unwrap();
+        let first_html = String::from_utf8(first_body.to_vec()).unwrap();
+        assert!(!first_html.contains(r#"name="username""#));
+
+        state
+            .db
+            .add_admin_user(NewAdminUser {
+                username: "ops".to_string(),
+                display_name: "Operations".to_string(),
+                password_hash: "test-hash".to_string(),
+                access_profile: hop_core::ADMIN_PROFILE_OPERATOR.to_string(),
+                must_change_password: true,
+            })
+            .await
+            .unwrap();
+        let team = admin_router_with_static_dir(state, dist.path())
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let team_body = to_bytes(team.into_body(), 64 * 1024).await.unwrap();
+        let team_html = String::from_utf8(team_body.to_vec()).unwrap();
+        assert!(team_html.contains(r#"name="username""#));
+        assert!(team_html.contains(super::super::i18n::EN.login_team_intro));
+    }
+
+    #[tokio::test]
+    async fn denied_mutations_explain_the_required_task_access() {
+        let session = AuthenticatedSession {
+            token: "viewer-token".to_string(),
+            csrf_token: "viewer-csrf".to_string(),
+            admin_id: "viewer".to_string(),
+            admin_label: "Viewer".to_string(),
+            access_profile: hop_core::ADMIN_PROFILE_VIEWER.to_string(),
+            must_change_password: false,
+        };
+
+        let response = capability_guard(
+            &HeaderMap::new(),
+            &session,
+            AdminCapability::CredentialsManage,
+        )
+        .expect("viewer should not manage credentials");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let rendered = String::from_utf8(body.to_vec()).unwrap();
+        assert!(rendered.contains(super::super::i18n::EN.permission_denied_heading));
+        assert!(rendered.contains(super::super::i18n::EN.admin_profile_viewer));
+        assert!(!rendered.contains("RBAC"));
     }
 
     #[test]
@@ -2508,6 +3010,13 @@ mod tests {
                 AdminPasswordChangeError::NewPasswordEmpty
             ),
             super::super::i18n::EN.settings_new_password_empty
+        );
+        assert_eq!(
+            settings_password_error_message(
+                &super::super::i18n::EN,
+                AdminPasswordChangeError::NewPasswordTooShort
+            ),
+            super::super::i18n::EN.settings_new_password_too_short
         );
         assert_eq!(
             settings_password_error_message(

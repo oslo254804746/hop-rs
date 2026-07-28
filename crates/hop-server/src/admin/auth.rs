@@ -9,13 +9,46 @@ use cookie::{Cookie, SameSite};
 use rand::{distributions::Alphanumeric, Rng};
 use tokio::sync::Mutex;
 
+use hop_core::{ADMIN_PROFILE_OPERATOR, ADMIN_PROFILE_OWNER, ADMIN_PROFILE_VIEWER};
+
 const SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminCapability {
+    InventoryRead,
+    AssetsManage,
+    CredentialsManage,
+    AccessManage,
+    SessionsRead,
+    AdminsManage,
+}
+
+pub fn profile_has_capability(profile: &str, capability: AdminCapability) -> bool {
+    match profile {
+        ADMIN_PROFILE_OWNER => true,
+        ADMIN_PROFILE_OPERATOR => matches!(
+            capability,
+            AdminCapability::InventoryRead
+                | AdminCapability::AssetsManage
+                | AdminCapability::CredentialsManage
+                | AdminCapability::AccessManage
+                | AdminCapability::SessionsRead
+        ),
+        ADMIN_PROFILE_VIEWER => matches!(
+            capability,
+            AdminCapability::InventoryRead | AdminCapability::SessionsRead
+        ),
+        _ => false,
+    }
+}
 
 #[derive(Debug)]
 struct AdminSession {
     csrf_token: String,
     admin_id: String,
     admin_label: String,
+    access_profile: String,
+    must_change_password: bool,
     last_seen: Instant,
 }
 
@@ -37,6 +70,8 @@ pub struct AuthenticatedSession {
     pub csrf_token: String,
     pub admin_id: String,
     pub admin_label: String,
+    pub access_profile: String,
+    pub must_change_password: bool,
 }
 
 impl AdminSessions {
@@ -47,7 +82,13 @@ impl AdminSessions {
         }
     }
 
-    pub async fn create(&self, admin_id: &str, admin_label: &str) -> String {
+    pub async fn create(
+        &self,
+        admin_id: &str,
+        admin_label: &str,
+        access_profile: &str,
+        must_change_password: bool,
+    ) -> String {
         let token = random_token();
         let csrf_token = random_token();
         self.inner.lock().await.insert(
@@ -56,6 +97,8 @@ impl AdminSessions {
                 csrf_token,
                 admin_id: admin_id.to_string(),
                 admin_label: admin_label.to_string(),
+                access_profile: access_profile.to_string(),
+                must_change_password,
                 last_seen: Instant::now(),
             },
         );
@@ -64,6 +107,13 @@ impl AdminSessions {
 
     pub async fn remove(&self, token: &str) {
         self.inner.lock().await.remove(token);
+    }
+
+    pub async fn remove_admin(&self, admin_id: &str) {
+        self.inner
+            .lock()
+            .await
+            .retain(|_, session| session.admin_id != admin_id);
     }
 
     pub async fn authenticate(&self, token: &str) -> Option<AuthenticatedSession> {
@@ -77,6 +127,8 @@ impl AdminSessions {
             csrf_token: session.csrf_token.clone(),
             admin_id: session.admin_id.clone(),
             admin_label: session.admin_label.clone(),
+            access_profile: session.access_profile.clone(),
+            must_change_password: session.must_change_password,
         })
     }
 
@@ -150,7 +202,9 @@ mod tests {
     #[tokio::test]
     async fn sessions_expire_after_ttl() {
         let sessions = AdminSessions::with_ttl(Duration::from_millis(5));
-        let token = sessions.create("local-admin", "Local admin").await;
+        let token = sessions
+            .create("local-admin", "Local admin", ADMIN_PROFILE_OWNER, false)
+            .await;
 
         assert!(sessions.authenticate(&token).await.is_some());
         tokio::time::sleep(Duration::from_millis(15)).await;
@@ -160,13 +214,57 @@ mod tests {
     #[tokio::test]
     async fn csrf_token_must_match_authenticated_session() {
         let sessions = AdminSessions::default();
-        let token = sessions.create("local-admin", "Local admin").await;
+        let token = sessions
+            .create("local-admin", "Local admin", ADMIN_PROFILE_OWNER, false)
+            .await;
         let session = sessions.authenticate(&token).await.unwrap();
 
         assert_eq!(session.admin_id, "local-admin");
         assert_eq!(session.admin_label, "Local admin");
+        assert_eq!(session.access_profile, ADMIN_PROFILE_OWNER);
+        assert!(!session.must_change_password);
         assert!(sessions.validate_csrf(&token, &session.csrf_token).await);
         assert!(!sessions.validate_csrf(&token, "wrong").await);
+    }
+
+    #[tokio::test]
+    async fn disabling_an_admin_revokes_only_their_sessions() {
+        let sessions = AdminSessions::default();
+        let alice = sessions
+            .create("alice", "Alice", ADMIN_PROFILE_OPERATOR, true)
+            .await;
+        let bob = sessions
+            .create("bob", "Bob", ADMIN_PROFILE_VIEWER, false)
+            .await;
+
+        sessions.remove_admin("alice").await;
+
+        assert!(sessions.authenticate(&alice).await.is_none());
+        assert!(sessions.authenticate(&bob).await.is_some());
+    }
+
+    #[test]
+    fn fixed_profiles_map_to_capabilities_without_custom_policy() {
+        assert!(profile_has_capability(
+            ADMIN_PROFILE_OWNER,
+            AdminCapability::AdminsManage
+        ));
+        assert!(profile_has_capability(
+            ADMIN_PROFILE_OPERATOR,
+            AdminCapability::CredentialsManage
+        ));
+        assert!(!profile_has_capability(
+            ADMIN_PROFILE_OPERATOR,
+            AdminCapability::AdminsManage
+        ));
+        assert!(profile_has_capability(
+            ADMIN_PROFILE_VIEWER,
+            AdminCapability::SessionsRead
+        ));
+        assert!(!profile_has_capability(
+            ADMIN_PROFILE_VIEWER,
+            AdminCapability::AssetsManage
+        ));
     }
 
     #[test]

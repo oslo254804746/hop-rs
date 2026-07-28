@@ -257,8 +257,30 @@ pub struct AdminUser {
     pub display_name: String,
     pub auth_source: String,
     pub is_active: bool,
+    pub access_profile: String,
+    pub must_change_password: bool,
     pub created_at: Option<String>,
     pub last_login_at: Option<String>,
+}
+
+pub const ADMIN_PROFILE_OWNER: &str = "owner";
+pub const ADMIN_PROFILE_OPERATOR: &str = "operator";
+pub const ADMIN_PROFILE_VIEWER: &str = "viewer";
+
+pub fn is_valid_admin_profile(profile: &str) -> bool {
+    matches!(
+        profile,
+        ADMIN_PROFILE_OWNER | ADMIN_PROFILE_OPERATOR | ADMIN_PROFILE_VIEWER
+    )
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewAdminUser {
+    pub username: String,
+    pub display_name: String,
+    pub password_hash: String,
+    pub access_profile: String,
+    pub must_change_password: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

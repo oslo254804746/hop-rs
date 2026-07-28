@@ -8,11 +8,12 @@ use sqlx::{
 use crate::{
     errors::HopCoreError,
     models::{
-        new_id, normalize_asset_protocol, protocol_supports_managed_credentials,
-        validate_credential_material, validate_tcp_port, AdminUser, Asset, AssetAccessMode,
-        AssetHealth, AssetRow, AuditEvent, AuthorizedKey, AuthorizedKeyRow, Credential, KnownHost,
-        NewAsset, NewAuditEvent, NewAuthorizedKey, NewCredential, NewKnownHost, NewSession,
-        Session, Setting, ASSET_HEALTH_FAILED, ASSET_HEALTH_HEALTHY,
+        is_valid_admin_profile, new_id, normalize_asset_protocol,
+        protocol_supports_managed_credentials, validate_credential_material, validate_tcp_port,
+        AdminUser, Asset, AssetAccessMode, AssetHealth, AssetRow, AuditEvent, AuthorizedKey,
+        AuthorizedKeyRow, Credential, KnownHost, NewAdminUser, NewAsset, NewAuditEvent,
+        NewAuthorizedKey, NewCredential, NewKnownHost, NewSession, Session, Setting,
+        ADMIN_PROFILE_OWNER, ASSET_HEALTH_FAILED, ASSET_HEALTH_HEALTHY,
     },
     Result,
 };
@@ -81,6 +82,36 @@ impl HopDb {
         .bind(new_key.asset_access_mode.as_str())
         .execute(&self.pool)
         .await?;
+        self.get_authorized_key_by_id(&id)
+            .await?
+            .ok_or_else(|| HopCoreError::Database(sqlx::Error::RowNotFound))
+    }
+
+    pub async fn add_authorized_key_with_access(
+        &self,
+        new_key: NewAuthorizedKey,
+        mode: AssetAccessMode,
+        asset_ids: &[String],
+    ) -> Result<AuthorizedKey> {
+        let id = new_id();
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO authorized_keys
+                (id, name, public_key, fingerprint, is_active, asset_access_mode)
+            VALUES (?1, ?2, ?3, ?4, TRUE, ?5)
+            "#,
+        )
+        .bind(&id)
+        .bind(new_key.name)
+        .bind(new_key.public_key)
+        .bind(new_key.fingerprint)
+        .bind(mode.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        Self::validate_access_assignment(&mut transaction, &id, asset_ids).await?;
+        Self::replace_access_assignments(&mut transaction, &id, asset_ids).await?;
+        transaction.commit().await?;
         self.get_authorized_key_by_id(&id)
             .await?
             .ok_or_else(|| HopCoreError::Database(sqlx::Error::RowNotFound))
@@ -385,9 +416,10 @@ impl HopDb {
     pub async fn get_admin_user_by_username(&self, username: &str) -> Result<Option<AdminUser>> {
         sqlx::query_as::<_, AdminUser>(
             r#"
-            SELECT id, username, display_name, auth_source, is_active, created_at, last_login_at
+            SELECT id, username, display_name, auth_source, is_active, access_profile,
+                   must_change_password, created_at, last_login_at
             FROM admin_users
-            WHERE username = ?1
+            WHERE username = ?1 COLLATE NOCASE
             "#,
         )
         .bind(username)
@@ -399,7 +431,8 @@ impl HopDb {
     pub async fn get_admin_user_by_id(&self, id: &str) -> Result<Option<AdminUser>> {
         sqlx::query_as::<_, AdminUser>(
             r#"
-            SELECT id, username, display_name, auth_source, is_active, created_at, last_login_at
+            SELECT id, username, display_name, auth_source, is_active, access_profile,
+                   must_change_password, created_at, last_login_at
             FROM admin_users
             WHERE id = ?1
             "#,
@@ -413,7 +446,8 @@ impl HopDb {
     pub async fn list_admin_users(&self) -> Result<Vec<AdminUser>> {
         sqlx::query_as::<_, AdminUser>(
             r#"
-            SELECT id, username, display_name, auth_source, is_active, created_at, last_login_at
+            SELECT id, username, display_name, auth_source, is_active, access_profile,
+                   must_change_password, created_at, last_login_at
             FROM admin_users
             ORDER BY created_at ASC, username ASC
             "#,
@@ -421,6 +455,151 @@ impl HopDb {
         .fetch_all(&self.pool)
         .await
         .map_err(Into::into)
+    }
+
+    pub async fn count_active_admin_users(&self) -> Result<i64> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM admin_users WHERE is_active = TRUE")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn add_admin_user(&self, user: NewAdminUser) -> Result<AdminUser> {
+        let username = user.username.trim();
+        let display_name = user.display_name.trim();
+        if username.is_empty()
+            || !username
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+        {
+            return Err(HopCoreError::Validation(
+                "username must use letters, numbers, dot, dash, or underscore".to_string(),
+            ));
+        }
+        if display_name.is_empty() {
+            return Err(HopCoreError::Validation(
+                "display name is required".to_string(),
+            ));
+        }
+        if !is_valid_admin_profile(&user.access_profile) {
+            return Err(HopCoreError::Validation(format!(
+                "unsupported admin access profile: {}",
+                user.access_profile
+            )));
+        }
+        let id = new_id();
+        sqlx::query(
+            r#"
+            INSERT INTO admin_users (
+                id, username, display_name, auth_source, is_active,
+                password_hash, access_profile, must_change_password
+            )
+            VALUES (?1, ?2, ?3, 'local', TRUE, ?4, ?5, ?6)
+            "#,
+        )
+        .bind(&id)
+        .bind(username)
+        .bind(display_name)
+        .bind(user.password_hash)
+        .bind(user.access_profile)
+        .bind(user.must_change_password)
+        .execute(&self.pool)
+        .await?;
+        self.get_admin_user_by_id(&id)
+            .await?
+            .ok_or_else(|| HopCoreError::Database(sqlx::Error::RowNotFound))
+    }
+
+    pub async fn get_admin_password_hash(&self, id: &str) -> Result<Option<String>> {
+        sqlx::query_scalar("SELECT password_hash FROM admin_users WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map(|hash| hash.flatten())
+            .map_err(Into::into)
+    }
+
+    pub async fn set_admin_password_hash(
+        &self,
+        id: &str,
+        password_hash: &str,
+        must_change_password: bool,
+    ) -> Result<()> {
+        let result = sqlx::query(
+            r#"
+            UPDATE admin_users
+            SET password_hash = ?1, must_change_password = ?2
+            WHERE id = ?3
+            "#,
+        )
+        .bind(password_hash)
+        .bind(must_change_password)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(HopCoreError::Validation(format!(
+                "unknown admin user id: {id}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub async fn update_admin_user_access(
+        &self,
+        id: &str,
+        access_profile: &str,
+        is_active: bool,
+    ) -> Result<()> {
+        if !is_valid_admin_profile(access_profile) {
+            return Err(HopCoreError::Validation(format!(
+                "unsupported admin access profile: {access_profile}"
+            )));
+        }
+        let mut transaction = self.pool.begin().await?;
+        let current = sqlx::query_as::<_, AdminUser>(
+            r#"
+            SELECT id, username, display_name, auth_source, is_active, access_profile,
+                   must_change_password, created_at, last_login_at
+            FROM admin_users
+            WHERE id = ?1
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| HopCoreError::Validation(format!("unknown admin user id: {id}")))?;
+        if current.is_active
+            && current.access_profile == ADMIN_PROFILE_OWNER
+            && (!is_active || access_profile != ADMIN_PROFILE_OWNER)
+        {
+            let other_active_owners: i64 = sqlx::query_scalar(
+                r#"
+                SELECT COUNT(*)
+                FROM admin_users
+                WHERE is_active = TRUE
+                  AND access_profile = ?1
+                  AND id <> ?2
+                "#,
+            )
+            .bind(ADMIN_PROFILE_OWNER)
+            .bind(id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            if other_active_owners == 0 {
+                return Err(HopCoreError::Validation(
+                    "cannot remove the last full-control admin".to_string(),
+                ));
+            }
+        }
+        sqlx::query("UPDATE admin_users SET access_profile = ?1, is_active = ?2 WHERE id = ?3")
+            .bind(access_profile)
+            .bind(is_active)
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     pub async fn mark_admin_login(&self, id: &str) -> Result<()> {
@@ -1055,6 +1234,8 @@ mod tests {
         assert_eq!(admin.display_name, "Local admin");
         assert_eq!(admin.auth_source, "local");
         assert!(admin.is_active);
+        assert_eq!(admin.access_profile, ADMIN_PROFILE_OWNER);
+        assert!(!admin.must_change_password);
         assert!(admin.last_login_at.is_none());
 
         db.mark_admin_login(&admin.id).await.unwrap();
@@ -1065,6 +1246,82 @@ mod tests {
             .unwrap()
             .last_login_at
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn team_admins_preserve_last_owner_and_store_separate_password_hashes() {
+        let db = HopDb::in_memory().await.unwrap();
+        let operator = db
+            .add_admin_user(NewAdminUser {
+                username: "alice".to_string(),
+                display_name: "Alice".to_string(),
+                password_hash: "operator-hash".to_string(),
+                access_profile: "operator".to_string(),
+                must_change_password: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(db.count_active_admin_users().await.unwrap(), 2);
+        assert_eq!(
+            db.get_admin_password_hash(&operator.id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("operator-hash")
+        );
+        assert!(operator.must_change_password);
+        assert_eq!(
+            db.get_admin_user_by_username("ALICE")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            operator.id
+        );
+        let duplicate = db
+            .add_admin_user(NewAdminUser {
+                username: "Alice".to_string(),
+                display_name: "Duplicate Alice".to_string(),
+                password_hash: "duplicate-hash".to_string(),
+                access_profile: "viewer".to_string(),
+                must_change_password: true,
+            })
+            .await
+            .unwrap_err();
+        assert!(duplicate.to_string().contains("UNIQUE"));
+
+        let error = db
+            .update_admin_user_access("local-admin", "viewer", true)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("last full-control admin"));
+
+        let second_owner = db
+            .add_admin_user(NewAdminUser {
+                username: "backup-owner".to_string(),
+                display_name: "Backup owner".to_string(),
+                password_hash: "owner-hash".to_string(),
+                access_profile: ADMIN_PROFILE_OWNER.to_string(),
+                must_change_password: false,
+            })
+            .await
+            .unwrap();
+        db.update_admin_user_access("local-admin", "viewer", true)
+            .await
+            .unwrap();
+        db.update_admin_user_access(&second_owner.id, ADMIN_PROFILE_OWNER, false)
+            .await
+            .unwrap_err();
+        db.update_admin_user_access(&operator.id, "operator", false)
+            .await
+            .unwrap();
+        assert!(
+            !db.get_admin_user_by_id(&operator.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active
+        );
     }
 
     #[tokio::test]
@@ -1208,6 +1465,29 @@ mod tests {
         .execute(db.pool())
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn authorized_key_can_be_created_with_restricted_scope_atomically() {
+        let db = HopDb::in_memory().await.unwrap();
+        let asset = db
+            .add_asset(NewAsset::new("production", "10.0.0.10", 22))
+            .await
+            .unwrap();
+        let key = db
+            .add_authorized_key_with_access(
+                NewAuthorizedKey::new("Alice", "ssh-ed25519 AAAA", "SHA256:alice"),
+                AssetAccessMode::Restricted,
+                std::slice::from_ref(&asset.id),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(key.asset_access_mode, AssetAccessMode::Restricted);
+        assert_eq!(
+            db.list_asset_ids_for_key(&key.id).await.unwrap(),
+            vec![asset.id]
+        );
     }
 
     #[tokio::test]
