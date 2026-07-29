@@ -4799,7 +4799,7 @@ mod tests {
             gateway: DashboardGateway {
                 admin_bind: "127.0.0.1:8080".to_string(),
                 ssh_bind: "127.0.0.1:2222".to_string(),
-                version: "0.1.4".to_string(),
+                version: "0.1.5".to_string(),
                 started_at: "2026-07-28T10:00:00Z".to_string(),
                 uptime_seconds: 3_661,
                 admin_reachable: true,
