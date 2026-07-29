@@ -1,6 +1,6 @@
 # Release A：Admin Usability 实施计划
 
-状态：首个开发切片已完成（2026-07-28）
+状态：Release A 已在 v0.1.5 交付（2026-07-29）。本文件保留实现范围、验收条件和设计决策；面向管理员的当前行为以 [Admin Web 使用指南](../admin-guide.zh-CN.md) 和 [v0.1.5 发布说明](../releases/v0.1.5.zh-CN.md) 为准。
 
 范围：`Phase 0 Admin 基础壳` + `Phase 1 登录/资产高频体验` 的首个切片
 总路线图：[Hop Admin 改版总路线图](admin-redesign-roadmap.md)

@@ -1,6 +1,6 @@
 # Hop Admin 改版总路线图
 
-状态：Draft
+状态：v0.1.5 已交付 Release A 高频体验、审计与健康数据底座、真实数据 Dashboard，以及渐进式本地多人管理。本文仍包含后续路线图，不代表所有条目均已上线；已发布能力与限制见 [v0.1.5 发布说明](../releases/v0.1.5.zh-CN.md)。
 
 设计稿：[Hop Admin — Product & UX Direction](https://www.figma.com/design/N2bXdpZomgzmICU164L6AH)
 子方案：[轻量权限与多管理员方案](lightweight-access-control.md)

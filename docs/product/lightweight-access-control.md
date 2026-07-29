@@ -1,6 +1,6 @@
 # Hop 轻量权限与多管理员方案
 
-状态：Team-ready local 基础已实现（2026-07-28）；用户研究与高级身份能力待后续验证
+状态：v0.1.5 已交付本地渐进式多人登录、Owner/Operator/Viewer、独立密码、首次强制换密、最后 Owner 保护和会话撤销。本文同时保留尚未交付的用户研究、People 聚合、审计筛选/导出和高级身份安全方向；当前产品行为见 [Admin Web 使用指南](../admin-guide.zh-CN.md)。
 
 范围：Admin Web、多管理员、SSH 访问范围、后续 MFA / OIDC
 产品原则：RBAC 是内部实现，不是用户必须学习的产品概念。

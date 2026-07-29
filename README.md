@@ -33,7 +33,10 @@
 │  托管凭证          服务端代理认证目标主机             │
 │  通用 TCP 转发     RDP/VNC/数据库等标准 SSH 隧道      │
 │  SSH/SFTP          托管凭证透明连接目标主机           │
-│  Admin Web         轻量管理界面                       │
+│  运营 Dashboard    网关、资产健康、覆盖率与行动项     │
+│  审计日志          SSH 会话与管理操作分流记录          │
+│  渐进多人管理      单人保持简单，按需增加管理员       │
+│  Admin 高频操作    抽屉编辑、地址与指纹一键复制       │
 │  批量导入/导出     资产与凭证元数据迁移               │
 │  TOFU 主机密钥     首次连接自动信任                   │
 │  i18n 管理界面     多语言支持                         │
@@ -58,6 +61,12 @@ cp config.example.toml config.toml
 - 一次性管理员密码（输出到终端）
 
 默认端口：**SSH `0.0.0.0:2222`** | **Admin Web `127.0.0.1:8080`**
+
+Admin Web 默认不暴露到外网。远程管理建议使用 SSH 隧道：
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 root@hop-host
+```
 
 ## 首次初始化
 
@@ -125,6 +134,28 @@ hop-server key access set <key-id> --mode restricted  # 清空权限
 hop-server key access set <key-id> --mode all         # 包含未来资产
 ```
 
+## Admin Web
+
+v0.1.5 的 Admin Web 围绕日常运维任务组织：
+
+- **Dashboard**：真实显示 Admin/SSH/SQLite 状态、版本、运行时间、资产健康、近期活动、覆盖率和待处理事项。
+- **资产**：搜索、标签筛选、批量标签、目标地址复制，以及不离开列表上下文的抽屉编辑。
+- **凭据**：按认证方式显示必要字段；编辑时留空敏感字段会保留原加密值；仍被资产使用时禁止删除。
+- **People & SSH Access**：按 SSH Key 选择全部资产或受限资产。
+- **Known Hosts**：检查和复制指纹，通过显式确认重置信任。
+- **审计日志**：并列查看最近的 SSH 会话和管理操作，审计详情不记录密码、私钥或 passphrase。
+- **Settings**：修改自己的密码，并在需要时添加管理员。
+
+多人能力采用渐进式交互：只有一位有效管理员时仍是密码直达；添加第二位管理员后登录页才显示账号名。访问级别使用任务化的 Owner、Operator 和 Viewer，不提供复杂的 RBAC 策略编辑器。
+
+| 访问级别 | 能力 |
+|----------|------|
+| Owner | 完整管理，包括管理员和访问级别 |
+| Operator | 管理资产、凭据、SSH 访问和 Known Hosts；查看审计 |
+| Viewer | 只读查看 Dashboard、库存和审计 |
+
+v0.1.5 的审计页展示最近 100 条 SSH 会话和 100 条管理事件；筛选、分页、留存设置和审计导出尚未上线。完整说明见 [Admin Web 使用指南](docs/admin-guide.zh-CN.md)。
+
 ## 项目结构
 
 ```text
@@ -171,9 +202,12 @@ docker run -d --name hop \
 
 ## 部署
 
-完整部署指南（二进制、systemd、Docker、升级、备份、排障）：
+完整文档：
 
-**→ [docs/deployment.md](docs/deployment.md)**
+- **[部署、升级、备份与回滚](docs/deployment.md)**
+- **[Admin Web 使用指南](docs/admin-guide.zh-CN.md)**
+- **[v0.1.5 发布说明](docs/releases/v0.1.5.zh-CN.md)**
+- **[文档索引](docs/README.md)**
 
 ## 安全模型
 
@@ -187,15 +221,37 @@ docker run -d --name hop \
 
 > **`hop.secret` 是你的命根子。** 丢了它，所有已存储的凭证将无法恢复。务必备份。
 
+## 从 v0.1.4 升级
+
+v0.1.5 会在首次启动时自动迁移数据库，并保留现有资产、凭据、SSH Key、Known Hosts 和管理员密码。但迁移后的数据库不能直接交给 v0.1.4 使用。
+
+对于依赖 Hop 访问家庭或生产设备的部署：
+
+1. 先准备一条不经过 Hop 的备用管理路径。
+2. 停止服务后备份整个持久化数据目录和配置。
+3. 保留 v0.1.4 二进制或容器镜像。
+4. 启动 v0.1.5 后检查日志、Admin 登录和一条真实 SSH 路径。
+5. 回滚时同时恢复 v0.1.4 和升级前的数据备份，不能只切换旧镜像。
+
+具体命令见 [安全升级与回滚](docs/deployment.md#upgrade)。
+
 ## 备份
 
-三个文件，一次原子快照：
+停止 Hop 后对整个持久化目录做一致性快照，并同时保存配置。Docker 部署直接备份挂载的 `data/`；二进制部署备份 `/var/lib/hop` 和 `/etc/hop`。
+
+其中三个不可缺少的运行数据文件是：
 
 ```bash
 hop.db          # 所有数据：资产、密钥、会话、加密凭证
 hop.secret      # 主密钥 —— 丢失不可恢复
 hop_host_key    # SSH 主机身份
 ```
+
+只导出资产或凭据元数据不能替代完整备份。详见 [备份与恢复](docs/deployment.md#backup--restore)。
+
+## 版本记录
+
+参见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可证
 

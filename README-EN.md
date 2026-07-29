@@ -33,7 +33,10 @@ Most bastion/jump-server solutions are bloated Java/Python stacks with databases
 │  Managed Credentials  Server-side auth to targets       │
 │  Generic TCP Forward  RDP/VNC/database SSH tunnels      │
 │  SSH/SFTP             Managed access to SSH targets     │
-│  Admin Web            Lightweight management UI         │
+│  Operations Dashboard  Health, coverage, actions        │
+│  Audit Logs            SSH and admin event evidence     │
+│  Progressive Team      Simple alone, team when needed   │
+│  Fast Admin Tasks      Drawers and one-click copy       │
 │  Import/Export        Asset and credential metadata     │
 │  TOFU Host Keys       Auto-trust on first connect       │
 │  i18n Admin           Multi-language admin interface    │
@@ -58,6 +61,13 @@ First boot auto-generates:
 - One-time admin password (printed to stdout)
 
 Default ports: **SSH `0.0.0.0:2222`** | **Admin Web `127.0.0.1:8080`**
+
+Admin Web is not exposed publicly by default. Use an SSH tunnel for remote
+administration:
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 root@hop-host
+```
 
 ## First Setup
 
@@ -125,6 +135,28 @@ hop-server key access set <key-id> --mode restricted  # Clear access
 hop-server key access set <key-id> --mode all         # Include future assets
 ```
 
+## Admin Web
+
+The v0.1.5 Admin Web is organized around frequent operational tasks:
+
+- **Dashboard** shows live Admin/SSH/SQLite status, version, uptime, asset health, recent activity, coverage, and action items.
+- **Assets** supports search, tag filters, bulk tags, target-address copy, and drawer editing without losing list context.
+- **Credentials** shows only fields required by the authentication mode; blank secret fields preserve existing encrypted values; credentials in use cannot be deleted.
+- **People & SSH Access** assigns all or selected assets to each SSH key.
+- **Known Hosts** supports fingerprint review and copy with explicit confirmation before resetting trust.
+- **Audit Logs** combines recent SSH sessions and administrative actions without recording passwords, private keys, or passphrases.
+- **Settings** changes the current password and adds administrators only when a team needs them.
+
+Team access is progressive: one active administrator keeps the password-only login. The account field appears only after a second active administrator is added. Owner, Operator, and Viewer describe tasks without exposing a policy editor.
+
+| Access level | Capabilities |
+|--------------|--------------|
+| Owner | Full control, including administrators and access levels |
+| Operator | Manage assets, credentials, SSH access, and Known Hosts; read audit evidence |
+| Viewer | Read-only Dashboard, inventory, and audit evidence |
+
+v0.1.5 shows the latest 100 SSH sessions and 100 admin events. Audit filtering, pagination, retention settings, and export are not yet available. See the [Admin Web guide](docs/admin-guide.md).
+
 ## Architecture
 
 ```text
@@ -171,9 +203,12 @@ Initial admin password: `docker logs hop`
 
 ## Deployment
 
-Full deployment guide (binary, systemd, Docker, upgrades, backup, troubleshooting):
+Documentation:
 
-**→ [docs/deployment.md](docs/deployment.md)**
+- **[Deployment, upgrades, backup, and rollback](docs/deployment.md)**
+- **[Admin Web guide](docs/admin-guide.md)**
+- **[v0.1.5 release notes](docs/releases/v0.1.5.md)**
+- **[Documentation index](docs/README.md)**
 
 ## Security Model
 
@@ -187,15 +222,44 @@ Full deployment guide (binary, systemd, Docker, upgrades, backup, troubleshootin
 
 > **`hop.secret` is your crown jewel.** Lose it and all stored credentials become unrecoverable. Back it up.
 
+## Upgrade from v0.1.4
+
+v0.1.5 migrates the database on first startup while preserving existing
+assets, credentials, SSH keys, Known Hosts, and the admin password. A migrated
+database cannot be opened directly by v0.1.4.
+
+For a home or production environment that depends on Hop:
+
+1. Arrange an alternate management path that does not depend on Hop.
+2. Stop Hop, then back up the complete persistent data directory and config.
+3. Keep the v0.1.4 binary or container image.
+4. Start v0.1.5 and verify logs, Admin login, and one real SSH path.
+5. To roll back, restore both v0.1.4 and the pre-upgrade data backup; changing
+   only the image tag is not enough.
+
+See the [safe upgrade and rollback runbook](docs/deployment.md#upgrade).
+
 ## Backup
 
-Three files, one atomic snapshot:
+Stop Hop before taking a consistent snapshot of the entire persistent data
+directory, and save the configuration with it. For Docker, back up the mounted
+`data/` directory. For a binary deployment, back up `/var/lib/hop` and
+`/etc/hop`.
+
+The three critical runtime files are:
 
 ```bash
 hop.db          # Everything: assets, keys, sessions, encrypted creds
 hop.secret      # Master key — unrecoverable if lost
 hop_host_key    # SSH host identity
 ```
+
+Asset or credential metadata exports do not replace a full backup. See
+[Backup & Restore](docs/deployment.md#backup--restore).
+
+## Release history
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
