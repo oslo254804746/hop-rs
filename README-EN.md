@@ -93,6 +93,10 @@ ssh -p 2222 hop-host
 # Direct connect — asset name as SSH username
 ssh -p 2222 web-prod-01@hop-host
 
+# Remote command — target stdout, stderr, stdin, and exit status pass through
+ssh -p 2222 web-prod-01@hop-host 'uname -a'
+printf 'input' | ssh -p 2222 web-prod-01@hop-host cat
+
 # SFTP — reuse the SSH asset and its managed credential
 sftp -P 2222 web-prod-01@hop-host
 scp -P 2222 ./file web-prod-01@hop-host:/tmp/file
@@ -109,14 +113,14 @@ ssh -p 2222 -N -T -L 127.0.0.1:15900:vnc-prod.hop:5900 hop-host
 ssh -p 2222 -N -T -L 127.0.0.1:13306:mysql-prod.hop:3306 hop-host
 ```
 
-Interactive TUI, direct connect, and SFTP use Hop-managed credentials to reach SSH targets. ProxyJump and local forwarding are transparent, asset-allowlisted TCP relays. RDP, VNC, MySQL, PostgreSQL, and Redis are presets for ports and client guidance; the core does not parse those application protocols. Generic forwarding supports TCP only, not UDP or dynamic multi-port protocols.
+Interactive TUI, direct connect (including remote commands), and SFTP use Hop-managed credentials to reach SSH targets. Remote commands do not enter the TUI and are accepted only when the SSH username has selected an asset; command contents are not written to the session audit. ProxyJump and local forwarding are transparent, asset-allowlisted TCP relays. RDP, VNC, MySQL, PostgreSQL, and Redis are presets for ports and client guidance; the core does not parse those application protocols. Generic forwarding supports TCP only, not UDP or dynamic multi-port protocols.
 
 Each active Hop SSH key has its own asset access mode:
 
 - `all`: access every current and future asset. New keys and keys migrated from earlier releases default to this mode, so upgrades do not revoke existing access.
 - `restricted`: access only explicitly assigned assets. An empty assignment allows authentication to Hop but exposes and reaches no assets.
 
-The entry key controls which assets may be reached; the credential attached to an asset controls how Hop authenticates to that target. TUI, direct SSH, SFTP, ProxyJump, and local TCP forwarding all enforce the same policy by stable key and asset IDs. Assign assets from the Admin Web key edit page or use the CLI:
+The entry key controls which assets may be reached; the credential attached to an asset controls how Hop authenticates to that target. TUI, direct SSH, remote commands, SFTP, ProxyJump, and local TCP forwarding all enforce the same policy by stable key and asset IDs. Assign assets from the Admin Web key edit page or use the CLI:
 
 ```bash
 hop-server key access show <key-id>

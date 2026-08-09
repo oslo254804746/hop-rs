@@ -93,6 +93,10 @@ ssh -p 2222 hop-host
 # 直连模式 —— 资产名作为 SSH 用户名
 ssh -p 2222 web-prod-01@hop-host
 
+# 远程命令 —— stdout、stderr、stdin 和退出码均由目标原样返回
+ssh -p 2222 web-prod-01@hop-host 'uname -a'
+printf 'input' | ssh -p 2222 web-prod-01@hop-host cat
+
 # SFTP —— 使用同一 SSH 资产及其托管凭证
 sftp -P 2222 web-prod-01@hop-host
 scp -P 2222 ./file web-prod-01@hop-host:/tmp/file
@@ -109,14 +113,14 @@ ssh -p 2222 -N -T -L 127.0.0.1:15900:vnc-prod.hop:5900 hop-host
 ssh -p 2222 -N -T -L 127.0.0.1:13306:mysql-prod.hop:3306 hop-host
 ```
 
-交互式 TUI、直连模式和 SFTP 使用 Hop 托管凭证连接 SSH 目标。ProxyJump 与本地端口转发是受资产白名单约束的透明 TCP 中继，RDP、VNC、MySQL、PostgreSQL、Redis 只是端口和客户端提示预设，核心不解析应用协议。通用转发仅支持 TCP，不自动处理 UDP 或动态多端口协议。
+交互式 TUI、直连模式（包括远程命令）和 SFTP 使用 Hop 托管凭证连接 SSH 目标。远程命令不会进入 TUI，只能对已由 SSH 用户名选定的资产执行；命令内容不会写入会话审计。ProxyJump 与本地端口转发是受资产白名单约束的透明 TCP 中继，RDP、VNC、MySQL、PostgreSQL、Redis 只是端口和客户端提示预设，核心不解析应用协议。通用转发仅支持 TCP，不自动处理 UDP 或动态多端口协议。
 
 每把启用的 Hop SSH Key 都有独立的资产访问模式：
 
 - `all`：可访问当前及未来新增的全部资产。新建密钥和升级前已有密钥默认使用此模式，升级不会收回现有权限。
 - `restricted`：只能访问明确分配给该密钥的资产；空分配表示可以认证进入 Hop，但不能发现或连接任何资产。
 
-入口密钥只决定“可以访问哪些资产”，资产绑定的托管凭据决定 Hop“如何认证到目标”。TUI、直连 SSH、SFTP、ProxyJump 和本地 TCP 转发使用同一套按 key ID 校验的授权规则。可在 Admin Web 的密钥编辑页搜索并勾选资产，也可使用 CLI：
+入口密钥只决定“可以访问哪些资产”，资产绑定的托管凭据决定 Hop“如何认证到目标”。TUI、直连 SSH、远程命令、SFTP、ProxyJump 和本地 TCP 转发使用同一套按 key ID 校验的授权规则。可在 Admin Web 的密钥编辑页搜索并勾选资产，也可使用 CLI：
 
 ```bash
 hop-server key access show <key-id>

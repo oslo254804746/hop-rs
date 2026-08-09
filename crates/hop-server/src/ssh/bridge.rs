@@ -33,6 +33,7 @@ mod tests {
     fn managed_session_mode_distinguishes_user_visible_connects() {
         assert_eq!(managed_session_mode(ManagedSessionMode::Tui), "tui-connect");
         assert_eq!(managed_session_mode(ManagedSessionMode::Direct), "direct");
+        assert_eq!(managed_session_mode(ManagedSessionMode::Exec), "exec");
         assert_eq!(managed_session_mode(ManagedSessionMode::Sftp), "sftp");
     }
 }
@@ -47,6 +48,8 @@ pub struct ManagedBridgeOptions {
     pub channel_id: ChannelId,
     pub handle: Handle,
     pub pty: PtySize,
+    pub pty_requested: bool,
+    pub command: Option<Vec<u8>>,
     pub session_mode: ManagedSessionMode,
     pub return_to_tui: Option<(SharedChannels, TuiResources)>,
     pub connect_timeout: std::time::Duration,
@@ -56,6 +59,7 @@ pub struct ManagedBridgeOptions {
 pub enum ManagedSessionMode {
     Tui,
     Direct,
+    Exec,
     Sftp,
 }
 
@@ -73,6 +77,7 @@ fn managed_session_mode(mode: ManagedSessionMode) -> &'static str {
     match mode {
         ManagedSessionMode::Tui => "tui-connect",
         ManagedSessionMode::Direct => "direct",
+        ManagedSessionMode::Exec => "exec",
         ManagedSessionMode::Sftp => "sftp",
     }
 }
@@ -105,6 +110,7 @@ async fn run_managed_bridge(
     }
 
     let mut terminated = false;
+    let mut exit_reported = false;
     let result = async {
         if !options
             .db
@@ -114,7 +120,8 @@ async fn run_managed_bridge(
             anyhow::bail!(AUTHORIZATION_DENIED);
         }
         let is_sftp = options.session_mode == ManagedSessionMode::Sftp;
-        if !is_sftp {
+        let is_exec = options.session_mode == ManagedSessionMode::Exec;
+        if !is_sftp && !is_exec {
             let _ = options
                 .handle
                 .data(options.channel_id, b"\r\n\x1b[2J\x1b[HConnecting to target...\r\n".to_vec())
@@ -130,6 +137,27 @@ async fn run_managed_bridge(
                     options.db.clone(),
                     options.master_key.clone(),
                     &options.asset,
+                    options.connect_timeout,
+                ) => target?
+            }
+        } else if is_exec {
+            let Some(command) = options.command.take() else {
+                anyhow::bail!("managed exec session is missing its command");
+            };
+            let pty = options
+                .pty_requested
+                .then_some((options.pty.width as u32, options.pty.height as u32));
+            tokio::select! {
+                Some(()) = terminate.recv() => {
+                    terminated = true;
+                    return Ok(());
+                }
+                target = client::connect_asset_exec(
+                    options.db.clone(),
+                    options.master_key.clone(),
+                    &options.asset,
+                    command,
+                    pty,
                     options.connect_timeout,
                 ) => target?
             }
@@ -154,13 +182,21 @@ async fn run_managed_bridge(
             tokio::select! {
                 Some(()) = terminate.recv() => {
                     terminated = true;
-                    let _ = options
-                        .handle
-                        .data(
-                            options.channel_id,
-                            format!("\r\n{TERMINATED_BY_ADMIN}\r\n").into_bytes(),
-                        )
-                        .await;
+                    let message = format!("{TERMINATED_BY_ADMIN}\n").into_bytes();
+                    if is_exec {
+                        let _ = options
+                            .handle
+                            .extended_data(options.channel_id, 1, message)
+                            .await;
+                    } else {
+                        let _ = options
+                            .handle
+                            .data(
+                                options.channel_id,
+                                format!("\r\n{TERMINATED_BY_ADMIN}\r\n").into_bytes(),
+                            )
+                            .await;
+                    }
                     break;
                 }
                 Some(input) = inbound.recv() => {
@@ -169,7 +205,7 @@ async fn run_managed_bridge(
                         BridgeInput::Eof => target.channel.eof().await?,
                     }
                 }
-                Some(size) = resize.recv(), if !is_sftp => {
+                Some(size) = resize.recv(), if !is_sftp && (!is_exec || options.pty_requested) => {
                     target.channel.window_change(size.width as u32, size.height as u32, 0, 0).await?;
                 }
                 msg = target.channel.wait() => {
@@ -183,10 +219,31 @@ async fn run_managed_bridge(
                         Some(ChannelMsg::ExitStatus { exit_status }) => {
                             if !should_return_to_tui {
                                 let _ = options.handle.exit_status_request(options.channel_id, exit_status).await;
+                                exit_reported = true;
                             }
-                            break;
                         }
-                        Some(ChannelMsg::Eof | ChannelMsg::Close) | None => break,
+                        Some(ChannelMsg::ExitSignal {
+                            signal_name,
+                            core_dumped,
+                            error_message,
+                            lang_tag,
+                        }) => {
+                            if !should_return_to_tui {
+                                let _ = options
+                                    .handle
+                                    .exit_signal_request(
+                                        options.channel_id,
+                                        signal_name,
+                                        core_dumped,
+                                        error_message,
+                                        lang_tag,
+                                    )
+                                    .await;
+                                exit_reported = true;
+                            }
+                        }
+                        Some(ChannelMsg::Eof) => {}
+                        Some(ChannelMsg::Close) | None => break,
                         _ => {}
                     }
                 }
@@ -198,6 +255,9 @@ async fn run_managed_bridge(
             "target closed"
         };
         target.session.disconnect(russh::Disconnect::ByApplication, reason, "en").await.ok();
+        if is_exec && !exit_reported && !terminated {
+            anyhow::bail!("target closed without reporting an exit status");
+        }
         Ok::<(), anyhow::Error>(())
     }
     .await;
@@ -305,6 +365,21 @@ async fn run_managed_bridge(
                     .handle
                     .exit_status_request(options.channel_id, 1)
                     .await;
+            } else if options.session_mode == ManagedSessionMode::Exec {
+                if !exit_reported {
+                    let _ = options
+                        .handle
+                        .extended_data(
+                            options.channel_id,
+                            1,
+                            format!("hop: target connection failed: {err}\n").into_bytes(),
+                        )
+                        .await;
+                    let _ = options
+                        .handle
+                        .exit_status_request(options.channel_id, 255)
+                        .await;
+                }
             } else {
                 let _ = options
                     .handle

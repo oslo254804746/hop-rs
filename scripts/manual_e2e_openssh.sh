@@ -74,8 +74,14 @@ Manual checks:
 
   ssh -p 2222 127.0.0.1
   ssh -tt -p 2222 e2e-target@127.0.0.1
+  ssh -p 2222 e2e-target@127.0.0.1 'printf ok'
+  ssh -p 2222 e2e-target@127.0.0.1 'exit 42'; test \$? -eq 42
+  printf input | ssh -p 2222 e2e-target@127.0.0.1 cat
+  ssh -p 2222 e2e-target@127.0.0.1 'printf error >&2'
+  ssh -tt -p 2222 e2e-target@127.0.0.1 'tty'
   ssh -J 127.0.0.1:2222 e2e-target.hop
 
 ProxyJump requires your local SSH client to have credentials for the target.
-Managed TUI and direct asset login use the Hop-stored credential seeded above.
+Managed TUI, direct asset login, remote commands, and SFTP use the Hop-stored
+credential seeded above.
 EOF
