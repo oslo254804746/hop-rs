@@ -91,12 +91,27 @@ async fn wait_for_request_success(
     timeout: Duration,
     request: &str,
 ) -> Result<()> {
-    match tokio::time::timeout(timeout, channel.wait()).await {
-        Ok(Some(ChannelMsg::Success)) => Ok(()),
-        Ok(Some(ChannelMsg::Failure)) => bail!("target rejected {request} request"),
-        Ok(Some(other)) => bail!("unexpected target response to {request} request: {other:?}"),
-        Ok(None) => bail!("target closed channel while starting {request}"),
+    match tokio::time::timeout(timeout, async {
+        loop {
+            if request_reply_received(channel.wait().await, request)? {
+                return Ok(());
+            }
+        }
+    })
+    .await
+    {
+        Ok(result) => result,
         Err(_) => bail!("target {request} request timed out"),
+    }
+}
+
+fn request_reply_received(message: Option<ChannelMsg>, request: &str) -> Result<bool> {
+    match message {
+        Some(ChannelMsg::Success) => Ok(true),
+        Some(ChannelMsg::Failure) => bail!("target rejected {request} request"),
+        Some(ChannelMsg::WindowAdjusted { .. }) => Ok(false),
+        Some(other) => bail!("unexpected target response to {request} request: {other:?}"),
+        None => bail!("target closed channel while starting {request}"),
     }
 }
 
@@ -197,4 +212,37 @@ fn decrypt_field(
     let envelope = envelope.with_context(|| format!("credential missing {field}"))?;
     let clear = decrypt_envelope(master_key, &format!("{}:{field}", credential.id), envelope)?;
     String::from_utf8(clear).context("credential secret is not valid UTF-8")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_reply_ignores_informational_window_adjustments() {
+        assert!(!request_reply_received(
+            Some(ChannelMsg::WindowAdjusted {
+                new_size: 2_097_152,
+            }),
+            "exec",
+        )
+        .unwrap());
+        assert!(request_reply_received(Some(ChannelMsg::Success), "exec").unwrap());
+    }
+
+    #[test]
+    fn request_reply_preserves_rejection_and_close_errors() {
+        assert_eq!(
+            request_reply_received(Some(ChannelMsg::Failure), "exec")
+                .unwrap_err()
+                .to_string(),
+            "target rejected exec request"
+        );
+        assert_eq!(
+            request_reply_received(None, "exec")
+                .unwrap_err()
+                .to_string(),
+            "target closed channel while starting exec"
+        );
+    }
 }
