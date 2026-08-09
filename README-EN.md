@@ -211,7 +211,7 @@ Documentation:
 
 - **[Deployment, upgrades, backup, and rollback](docs/deployment.md)**
 - **[Admin Web guide](docs/admin-guide.md)**
-- **[v0.1.5 release notes](docs/releases/v0.1.5.md)**
+- **[v0.1.6 release notes](docs/releases/v0.1.6.md)**
 - **[Documentation index](docs/README.md)**
 
 ## Security Model
@@ -228,16 +228,17 @@ Documentation:
 
 ## Upgrade from v0.1.4
 
-v0.1.5 migrates the database on first startup while preserving existing
-assets, credentials, SSH keys, Known Hosts, and the admin password. A migrated
-database cannot be opened directly by v0.1.4.
+v0.1.6 applies all pending database migrations on first startup while
+preserving existing assets, credentials, SSH keys, Known Hosts, and the admin
+password. Upgrading from v0.1.5 adds no new database migration. After a direct
+upgrade from v0.1.4, the migrated database cannot be opened by v0.1.4.
 
 For a home or production environment that depends on Hop:
 
 1. Arrange an alternate management path that does not depend on Hop.
 2. Stop Hop, then back up the complete persistent data directory and config.
 3. Keep the v0.1.4 binary or container image.
-4. Start v0.1.5 and verify logs, Admin login, and one real SSH path.
+4. Start v0.1.6 and verify logs, Admin login, and one real SSH path.
 5. To roll back, restore both v0.1.4 and the pre-upgrade data backup; changing
    only the image tag is not enough.
 

@@ -4,6 +4,31 @@ All notable user-visible changes to Hop are recorded here.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-08-09
+
+### Added
+
+- Managed SSH remote-command execution with stdin, stdout, stderr, exit status,
+  exit signal, and optional PTY forwarding.
+- Live SSH session controls in Admin Web for terminating one connection or all
+  connections registered by the gateway.
+- Administrative audit events for session termination actions.
+
+### Changed
+
+- Remote commands use the managed target credential path and are recorded as
+  `exec` sessions without displaying the interactive Hop banner.
+- Managed SSH and direct TCP connection outcomes continue to update asset
+  health while supporting administrator-initiated termination.
+
+### Compatibility
+
+- No database migration or configuration change is required from v0.1.5.
+- Existing interactive shell, SFTP, ProxyJump, and generic TCP flows remain
+  supported.
+
+See the [full v0.1.6 release notes](docs/releases/v0.1.6.md).
+
 ## [0.1.5] - 2026-07-29
 
 ### Added
@@ -36,6 +61,7 @@ All notable user-visible changes to Hop are recorded here.
 
 See the [full v0.1.5 release notes](docs/releases/v0.1.5.md).
 
-[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/oslo254804746/hop-rs/releases/tag/v0.1.6
 [0.1.5]: https://github.com/oslo254804746/hop-rs/releases/tag/v0.1.5
 

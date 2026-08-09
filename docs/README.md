@@ -12,6 +12,9 @@ Start with the guide that matches the job you are doing:
 
 ## Releases
 
+- v0.1.6 release notes — [简体中文](releases/v0.1.6.zh-CN.md) |
+  [English](releases/v0.1.6.md). Covers managed remote commands, live session
+  termination, compatibility, and upgrade guidance.
 - v0.1.5 release notes — [简体中文](releases/v0.1.5.zh-CN.md) |
   [English](releases/v0.1.5.md). Covers Admin redesign, operational data, team
   access, compatibility, known limitations, and the safe upgrade path.

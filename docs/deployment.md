@@ -282,7 +282,7 @@ not a valid rollback.
 Download and verify both release artifacts before stopping the service:
 
 ```bash
-HOP_VERSION=v0.1.5
+HOP_VERSION=v0.1.6
 BACKUP_DIR="$PWD/hop-backup-before-${HOP_VERSION}-$(date +%Y%m%d%H%M%S)"
 mkdir -m 0700 "$BACKUP_DIR"
 
@@ -336,7 +336,7 @@ sudo journalctl -u hop -n 50 --no-pager
 Pull first, then stop the container before archiving the bind-mounted data:
 
 ```bash
-HOP_VERSION=v0.1.5
+HOP_VERSION=v0.1.6
 BACKUP_DIR="$PWD/hop-backup-before-${HOP_VERSION}-$(date +%Y%m%d%H%M%S)"
 mkdir -m 0700 "$BACKUP_DIR"
 
@@ -349,7 +349,7 @@ docker image inspect ghcr.io/oslo254804746/hop-rs:v0.1.4 \
 docker rm hop
 
 # Re-run the original docker run command with only the image tag changed:
-# ghcr.io/oslo254804746/hop-rs:v0.1.5
+# ghcr.io/oslo254804746/hop-rs:v0.1.6
 
 docker logs --tail 100 hop
 docker exec hop hop-server --config /data/config.toml asset list
