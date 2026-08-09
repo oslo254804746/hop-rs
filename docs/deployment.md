@@ -203,6 +203,10 @@ sftp -P 2222 web-prod-01@hop-host # Managed SFTP subsystem
 ssh -J hop-host:2222 web-prod-01.hop # ProxyJump TCP relay
 ```
 
+The SSH authentication banner is sent before the client selects shell, exec,
+or subsystem mode. It therefore appears on stderr for remote commands and file
+transfer too. Set `ssh.banner = ""` for automation that requires clean stderr.
+
 Each active Hop SSH key uses one of two asset access modes. `all` includes every
 current and future asset. `restricted` includes only explicitly assigned asset
 IDs; an empty assignment grants no asset access. Existing keys migrate to `all`,
@@ -282,7 +286,7 @@ not a valid rollback.
 Download and verify both release artifacts before stopping the service:
 
 ```bash
-HOP_VERSION=v0.1.6
+HOP_VERSION=v0.1.7
 BACKUP_DIR="$PWD/hop-backup-before-${HOP_VERSION}-$(date +%Y%m%d%H%M%S)"
 mkdir -m 0700 "$BACKUP_DIR"
 
@@ -336,7 +340,7 @@ sudo journalctl -u hop -n 50 --no-pager
 Pull first, then stop the container before archiving the bind-mounted data:
 
 ```bash
-HOP_VERSION=v0.1.6
+HOP_VERSION=v0.1.7
 BACKUP_DIR="$PWD/hop-backup-before-${HOP_VERSION}-$(date +%Y%m%d%H%M%S)"
 mkdir -m 0700 "$BACKUP_DIR"
 
@@ -349,7 +353,7 @@ docker image inspect ghcr.io/oslo254804746/hop-rs:v0.1.4 \
 docker rm hop
 
 # Re-run the original docker run command with only the image tag changed:
-# ghcr.io/oslo254804746/hop-rs:v0.1.6
+# ghcr.io/oslo254804746/hop-rs:v0.1.7
 
 docker logs --tail 100 hop
 docker exec hop hop-server --config /data/config.toml asset list

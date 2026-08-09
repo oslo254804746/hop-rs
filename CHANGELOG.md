@@ -4,6 +4,24 @@ All notable user-visible changes to Hop are recorded here.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-08-09
+
+### Fixed
+
+- Managed PTY, remote-command, and SFTP setup now ignores informational SSH
+  channel-window adjustments while waiting for the target's request reply.
+- Remote commands now work with OpenSSH targets that increase their channel
+  window immediately after opening a session.
+
+### Compatibility
+
+- No database migration or configuration change is required from v0.1.6.
+- Configured SSH authentication banners still appear on stderr before the
+  client selects interactive shell, exec, or subsystem mode. Set
+  `ssh.banner = ""` when automation requires clean stderr.
+
+See the [full v0.1.7 release notes](docs/releases/v0.1.7.md).
+
 ## [0.1.6] - 2026-08-09
 
 ### Added
@@ -61,7 +79,8 @@ See the [full v0.1.6 release notes](docs/releases/v0.1.6.md).
 
 See the [full v0.1.5 release notes](docs/releases/v0.1.5.md).
 
-[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/oslo254804746/hop-rs/releases/tag/v0.1.7
 [0.1.6]: https://github.com/oslo254804746/hop-rs/releases/tag/v0.1.6
 [0.1.5]: https://github.com/oslo254804746/hop-rs/releases/tag/v0.1.5
 

@@ -125,6 +125,11 @@ ssh -p 2222 -N -T -L 127.0.0.1:13306:mysql-prod.hop:3306 hop-host
 
 Interactive TUI, direct connect (including remote commands), and SFTP use Hop-managed credentials to reach SSH targets. Remote commands do not enter the TUI and are accepted only when the SSH username has selected an asset; command contents are not written to the session audit. ProxyJump and local forwarding are transparent, asset-allowlisted TCP relays. RDP, VNC, MySQL, PostgreSQL, and Redis are presets for ports and client guidance; the core does not parse those application protocols. Generic forwarding supports TCP only, not UDP or dynamic multi-port protocols.
 
+An SSH authentication banner is displayed before the client selects an
+interactive shell, remote command, or subsystem, so a configured banner is
+written to stderr for every connection. Set `ssh.banner = ""` when automation
+requires clean stderr.
+
 Each active Hop SSH key has its own asset access mode:
 
 - `all`: access every current and future asset. New keys and keys migrated from earlier releases default to this mode, so upgrades do not revoke existing access.
@@ -211,7 +216,7 @@ Documentation:
 
 - **[Deployment, upgrades, backup, and rollback](docs/deployment.md)**
 - **[Admin Web guide](docs/admin-guide.md)**
-- **[v0.1.6 release notes](docs/releases/v0.1.6.md)**
+- **[v0.1.7 release notes](docs/releases/v0.1.7.md)**
 - **[Documentation index](docs/README.md)**
 
 ## Security Model
@@ -228,9 +233,9 @@ Documentation:
 
 ## Upgrade from v0.1.4
 
-v0.1.6 applies all pending database migrations on first startup while
+v0.1.7 applies all pending database migrations on first startup while
 preserving existing assets, credentials, SSH keys, Known Hosts, and the admin
-password. Upgrading from v0.1.5 adds no new database migration. After a direct
+password. Upgrading from v0.1.6 adds no new database migration. After a direct
 upgrade from v0.1.4, the migrated database cannot be opened by v0.1.4.
 
 For a home or production environment that depends on Hop:
@@ -238,7 +243,7 @@ For a home or production environment that depends on Hop:
 1. Arrange an alternate management path that does not depend on Hop.
 2. Stop Hop, then back up the complete persistent data directory and config.
 3. Keep the v0.1.4 binary or container image.
-4. Start v0.1.6 and verify logs, Admin login, and one real SSH path.
+4. Start v0.1.7 and verify logs, Admin login, and one real SSH path.
 5. To roll back, restore both v0.1.4 and the pre-upgrade data backup; changing
    only the image tag is not enough.
 
