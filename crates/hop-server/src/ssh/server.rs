@@ -7,7 +7,10 @@ use russh::{
     server::{self, Msg, Server as _, Session},
     Channel, ChannelId, Pty,
 };
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc, Mutex},
+};
 use tracing::{error, info, warn};
 
 use crate::tui::{TuiAction, TuiResources};
@@ -17,6 +20,7 @@ use super::{
         self, BridgeControl, BridgeInput, ManagedBridgeOptions, ManagedSessionMode, SharedChannels,
     },
     host_key, proxy,
+    session_registry::{ActiveSessionRegistry, TERMINATED_BY_ADMIN},
 };
 
 #[derive(Debug, Clone)]
@@ -63,6 +67,10 @@ impl ActiveTuiSession {
         Self { id }
     }
 
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
     pub(crate) async fn finish(self, db: &HopDb, status: &str, error: Option<&str>) -> Result<()> {
         db.finish_session(&self.id, status, error).await?;
         Ok(())
@@ -74,6 +82,7 @@ pub struct HopSshServer {
     db: HopDb,
     config: HopConfig,
     master_key: Arc<MasterKey>,
+    active_sessions: ActiveSessionRegistry,
 }
 
 pub async fn serve_ssh(
@@ -81,6 +90,7 @@ pub async fn serve_ssh(
     config: HopConfig,
     db: HopDb,
     master_key: Arc<MasterKey>,
+    active_sessions: ActiveSessionRegistry,
 ) -> Result<()> {
     let host_key =
         host_key::load_or_generate(&config.ssh.host_key_file, &config.ssh.host_key_type)?;
@@ -97,6 +107,7 @@ pub async fn serve_ssh(
         db,
         config,
         master_key,
+        active_sessions,
     };
     let listener = TcpListener::bind(bind).await?;
     info!(%bind, "ssh server listening");
@@ -121,6 +132,7 @@ impl server::Server for HopSshServer {
             db: self.db.clone(),
             config: self.config.clone(),
             master_key: self.master_key.clone(),
+            active_sessions: self.active_sessions.clone(),
             auth: None,
             direct_asset: None,
             client_ip: peer_addr.map(|addr| addr.to_string()),
@@ -142,6 +154,7 @@ pub struct HopSshHandler {
     db: HopDb,
     config: HopConfig,
     master_key: Arc<MasterKey>,
+    active_sessions: ActiveSessionRegistry,
     auth: Option<AuthInfo>,
     direct_asset: Option<Asset>,
     client_ip: Option<String>,
@@ -191,6 +204,7 @@ impl HopSshHandler {
         asset: Asset,
         tui: Option<TuiResources>,
         mode: ManagedSessionMode,
+        command: Option<Vec<u8>>,
     ) -> Result<()> {
         let auth = self.auth_info().context("missing authenticated key")?;
         if !self
@@ -213,12 +227,15 @@ impl HopSshHandler {
         let options = ManagedBridgeOptions {
             db: self.db.clone(),
             master_key: self.master_key.clone(),
+            active_sessions: self.active_sessions.clone(),
             auth,
             client_ip: self.client_ip.clone(),
             asset,
             channel_id,
             handle,
             pty: self.pty_size(channel_id),
+            pty_requested: self.ptys.contains_key(&channel_id),
+            command,
             session_mode: mode,
             return_to_tui: tui.map(|tui| (self.channels.clone(), tui)),
             connect_timeout: self.config.connect_timeout(),
@@ -236,6 +253,7 @@ fn managed_session_mode_name(mode: ManagedSessionMode) -> &'static str {
     match mode {
         ManagedSessionMode::Tui => "tui-connect",
         ManagedSessionMode::Direct => "direct",
+        ManagedSessionMode::Exec => "exec",
         ManagedSessionMode::Sftp => "sftp",
     }
 }
@@ -284,6 +302,51 @@ pub(crate) async fn start_tui_session(
         })
         .await?;
     Ok(ActiveTuiSession::new(session.id))
+}
+
+fn spawn_tui_termination_watcher(
+    db: HopDb,
+    active_sessions: ActiveSessionRegistry,
+    session_id: String,
+    channels: SharedChannels,
+    channel_id: ChannelId,
+    handle: russh::server::Handle,
+    mut terminate: mpsc::UnboundedReceiver<()>,
+) {
+    tokio::spawn(async move {
+        let Some(()) = terminate.recv().await else {
+            return;
+        };
+
+        let terminated = {
+            let mut channels = channels.lock().await;
+            match channels.remove(&channel_id) {
+                Some(ChannelState::Tui { mut tui, audit }) => {
+                    let mut output = tui.leave_screen().unwrap_or_default();
+                    output.extend_from_slice(format!("\r\n{TERMINATED_BY_ADMIN}\r\n").as_bytes());
+                    Some((audit, output))
+                }
+                Some(state) => {
+                    channels.insert(channel_id, state);
+                    None
+                }
+                None => None,
+            }
+        };
+
+        if let Some((audit, output)) = terminated {
+            if !output.is_empty() {
+                let _ = handle.data(channel_id, output).await;
+            }
+            let _ = audit
+                .finish(&db, "terminated", Some(TERMINATED_BY_ADMIN))
+                .await;
+            let _ = handle.exit_status_request(channel_id, 255).await;
+            let _ = handle.eof(channel_id).await;
+            let _ = handle.close(channel_id).await;
+        }
+        active_sessions.unregister(&session_id).await;
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -414,9 +477,12 @@ impl server::Handler for HopSshHandler {
         };
 
         let db = self.db.clone();
+        let active_sessions = self.active_sessions.clone();
         let client_ip = self.client_ip.clone();
         tokio::spawn(async move {
-            if let Err(err) = proxy::bridge_direct_tcpip(channel, db, auth, asset, client_ip).await
+            if let Err(err) =
+                proxy::bridge_direct_tcpip(channel, db, active_sessions, auth, asset, client_ip)
+                    .await
             {
                 warn!(?err, "proxy bridge failed");
             }
@@ -459,6 +525,7 @@ impl server::Handler for HopSshHandler {
                 asset,
                 None,
                 ManagedSessionMode::Direct,
+                None,
             )
             .await?;
             return Ok(());
@@ -469,6 +536,8 @@ impl server::Handler for HopSshHandler {
         let mut tui = TuiResources::new(size.width, size.height, assets)?;
         send_tui_output(session, channel, tui.enter_screen()?)?;
         let audit = self.start_tui_session().await?;
+        let session_id = audit.id().to_string();
+        let (terminate_tx, terminate_rx) = mpsc::unbounded_channel();
         self.channels.lock().await.insert(
             channel,
             ChannelState::Tui {
@@ -476,23 +545,46 @@ impl server::Handler for HopSshHandler {
                 audit,
             },
         );
+        spawn_tui_termination_watcher(
+            self.db.clone(),
+            self.active_sessions.clone(),
+            session_id.clone(),
+            self.channels.clone(),
+            channel,
+            session.handle(),
+            terminate_rx,
+        );
+        self.active_sessions
+            .register(session_id, terminate_tx)
+            .await;
         Ok(())
     }
 
     async fn exec_request(
         &mut self,
         channel: ChannelId,
-        _data: &[u8],
+        data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        session.channel_success(channel)?;
-        session.data(
+        let Some(asset) = self.direct_asset.clone() else {
+            session.channel_failure(channel)?;
+            return Ok(());
+        };
+        if !accepts_managed_ssh_asset(Some(&asset)) {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+
+        self.start_managed(
             channel,
-            unsupported_exec_command_message().as_bytes().to_vec(),
-        )?;
-        session.exit_status_request(channel, 127)?;
-        session.eof(channel)?;
-        session.close(channel)?;
+            session.handle(),
+            asset,
+            None,
+            ManagedSessionMode::Exec,
+            Some(data.to_vec()),
+        )
+        .await?;
+        session.channel_success(channel)?;
         Ok(())
     }
 
@@ -518,6 +610,7 @@ impl server::Handler for HopSshHandler {
             asset,
             None,
             ManagedSessionMode::Sftp,
+            None,
         )
         .await?;
         Ok(())
@@ -577,7 +670,9 @@ impl server::Handler for HopSshHandler {
         }
         send_tui_output(session, channel, output)?;
         if let Some((audit, status, error)) = finish_tui {
+            let session_id = audit.id().to_string();
             let _ = audit.finish(&self.db, status, error.as_deref()).await;
+            self.active_sessions.unregister(&session_id).await;
         }
         if close {
             session.exit_status_request(channel, 0)?;
@@ -591,6 +686,7 @@ impl server::Handler for HopSshHandler {
                 asset,
                 Some(tui),
                 ManagedSessionMode::Tui,
+                None,
             )
             .await?;
         }
@@ -621,7 +717,9 @@ impl server::Handler for HopSshHandler {
             }
         }
         if let Some(audit) = finish_tui {
+            let session_id = audit.id().to_string();
             let _ = audit.finish(&self.db, "ok", None).await;
+            self.active_sessions.unregister(&session_id).await;
         }
         Ok(())
     }
@@ -636,7 +734,9 @@ impl server::Handler for HopSshHandler {
             if let Ok(output) = tui.leave_screen() {
                 let _ = send_tui_output(session, channel, output);
             }
+            let session_id = audit.id().to_string();
             let _ = audit.finish(&self.db, "ok", None).await;
+            self.active_sessions.unregister(&session_id).await;
         }
         Ok(())
     }
@@ -672,10 +772,13 @@ impl server::Handler for HopSshHandler {
 }
 
 fn accepts_sftp_request(name: &str, asset: Option<&Asset>) -> bool {
-    name == "sftp"
-        && asset.is_some_and(|asset| {
-            asset.protocol == hop_core::ASSET_PROTOCOL_SSH && asset.credential_id.is_some()
-        })
+    name == "sftp" && accepts_managed_ssh_asset(asset)
+}
+
+fn accepts_managed_ssh_asset(asset: Option<&Asset>) -> bool {
+    asset.is_some_and(|asset| {
+        asset.protocol == hop_core::ASSET_PROTOCOL_SSH && asset.credential_id.is_some()
+    })
 }
 
 fn send_tui_output(session: &mut Session, channel: ChannelId, output: Vec<u8>) -> Result<()> {
@@ -701,10 +804,6 @@ fn authentication_banner(config: &HopConfig) -> Option<String> {
     }
 }
 
-fn unsupported_exec_command_message() -> &'static str {
-    "Hop does not support SSH remote commands. Open an interactive TUI session or connect directly with <asset>@host.\n"
-}
-
 fn is_client_disconnect(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<io::Error>()
@@ -722,8 +821,16 @@ fn is_client_disconnect(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use hop_core::{
-        AssetAccessMode, AuthType, NewAsset, NewAuthorizedKey, NewCredential, NewSession,
+        encrypt_envelope, AssetAccessMode, AuthType, NewAsset, NewAuthorizedKey, NewCredential,
+        NewSession,
     };
+    use russh::{
+        client::Msg as ClientMsg,
+        keys::{key::safe_rng, Algorithm, PrivateKeyWithHashAlg},
+        server::Msg as ServerMsg,
+        ChannelMsg,
+    };
+    use std::sync::Mutex as StdMutex;
 
     use super::*;
 
@@ -732,12 +839,302 @@ mod tests {
             db,
             config: HopConfig::default(),
             master_key: Arc::new(MasterKey::from_bytes([0; 32])),
+            active_sessions: ActiveSessionRegistry::default(),
             auth: None,
             direct_asset: None,
             client_ip: None,
             channels: Arc::new(Mutex::new(HashMap::new())),
             ptys: HashMap::new(),
         }
+    }
+
+    #[derive(Clone, Default)]
+    struct ExecTargetServer {
+        commands: Arc<StdMutex<Vec<Vec<u8>>>>,
+        ptys: Arc<StdMutex<Vec<(u32, u32)>>>,
+    }
+
+    impl server::Server for ExecTargetServer {
+        type Handler = Self;
+
+        fn new_client(&mut self, _peer_addr: Option<SocketAddr>) -> Self::Handler {
+            self.clone()
+        }
+    }
+
+    impl server::Handler for ExecTargetServer {
+        type Error = russh::Error;
+
+        async fn auth_password(
+            &mut self,
+            user: &str,
+            password: &str,
+        ) -> Result<server::Auth, Self::Error> {
+            if user == "target-user" && password == "target-password" {
+                Ok(server::Auth::Accept)
+            } else {
+                Ok(server::Auth::reject())
+            }
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            _channel: Channel<ServerMsg>,
+            _session: &mut Session,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+
+        async fn pty_request(
+            &mut self,
+            channel: ChannelId,
+            _term: &str,
+            col_width: u32,
+            row_height: u32,
+            _pix_width: u32,
+            _pix_height: u32,
+            _modes: &[(Pty, u32)],
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            self.ptys.lock().unwrap().push((col_width, row_height));
+            session.channel_success(channel)?;
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: ChannelId,
+            data: &[u8],
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            self.commands.lock().unwrap().push(data.to_vec());
+            session.channel_success(channel)?;
+            Ok(())
+        }
+
+        async fn data(
+            &mut self,
+            channel: ChannelId,
+            data: &[u8],
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            session.data(channel, data.to_vec())?;
+            Ok(())
+        }
+
+        async fn channel_eof(
+            &mut self,
+            channel: ChannelId,
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            session.extended_data(channel, 1, b"target stderr\n".to_vec())?;
+            session.exit_status_request(channel, 42)?;
+            session.data(channel, b"after status\n".to_vec())?;
+            session.eof(channel)?;
+            session.close(channel)?;
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct AcceptAnyServerKey;
+
+    impl russh::client::Handler for AcceptAnyServerKey {
+        type Error = russh::Error;
+
+        async fn check_server_key(
+            &mut self,
+            _server_public_key: &PublicKey,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+    }
+
+    async fn wait_for_channel_success(channel: &mut Channel<ClientMsg>) {
+        let message = tokio::time::timeout(Duration::from_secs(5), channel.wait())
+            .await
+            .expect("SSH channel request timed out");
+        assert!(matches!(message, Some(ChannelMsg::Success)));
+    }
+
+    async fn run_exec_channel(
+        session: &russh::client::Handle<AcceptAnyServerKey>,
+        command: &[u8],
+        pty: Option<(u32, u32)>,
+        stdin: &[u8],
+    ) -> (Vec<u8>, Vec<u8>, Option<u32>) {
+        let mut channel = session.channel_open_session().await.unwrap();
+        if let Some((width, height)) = pty {
+            channel
+                .request_pty(true, "xterm-256color", width, height, 0, 0, &[])
+                .await
+                .unwrap();
+            wait_for_channel_success(&mut channel).await;
+        }
+        channel.exec(true, command.to_vec()).await.unwrap();
+        wait_for_channel_success(&mut channel).await;
+        if !stdin.is_empty() {
+            channel.data(stdin).await.unwrap();
+        }
+        channel.eof().await.unwrap();
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut exit_status = None;
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(5), channel.wait())
+                .await
+                .expect("SSH exec response timed out");
+            match message {
+                Some(ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
+                Some(ChannelMsg::ExtendedData { data, ext: 1 }) => stderr.extend_from_slice(&data),
+                Some(ChannelMsg::ExitStatus {
+                    exit_status: status,
+                }) => exit_status = Some(status),
+                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => break,
+                _ => {}
+            }
+        }
+        (stdout, stderr, exit_status)
+    }
+
+    #[tokio::test]
+    async fn managed_exec_forwards_streams_exit_status_and_optional_pty() {
+        let mut target = ExecTargetServer::default();
+        let target_state = target.clone();
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        let target_config = Arc::new(server::Config {
+            auth_rejection_time: Duration::ZERO,
+            auth_rejection_time_initial: Some(Duration::ZERO),
+            keys: vec![
+                russh::keys::PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap(),
+            ],
+            ..Default::default()
+        });
+        let target_task =
+            tokio::spawn(
+                async move { target.run_on_socket(target_config, &target_listener).await },
+            );
+
+        let db = HopDb::in_memory().await.unwrap();
+        let master_key = Arc::new(MasterKey::from_bytes([7; 32]));
+        let credential_id = "exec-target-credential";
+        let credential = db
+            .add_credential(NewCredential {
+                id: Some(credential_id.to_string()),
+                name: "exec target".to_string(),
+                username: "target-user".to_string(),
+                auth_type: AuthType::Password,
+                password_enc: Some(
+                    encrypt_envelope(
+                        &master_key,
+                        &format!("{credential_id}:password"),
+                        b"target-password",
+                    )
+                    .unwrap(),
+                ),
+                private_key_enc: None,
+                passphrase_enc: None,
+            })
+            .await
+            .unwrap();
+        let mut asset = NewAsset::new(
+            "exec-target",
+            target_addr.ip().to_string(),
+            i64::from(target_addr.port()),
+        );
+        asset.credential_id = Some(credential.id);
+        db.add_asset(asset).await.unwrap();
+
+        let client_key =
+            russh::keys::PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap();
+        let client_public_key = client_key.public_key();
+        db.add_authorized_key(NewAuthorizedKey::new(
+            "exec client",
+            client_public_key.to_openssh().unwrap(),
+            key_fingerprint(client_public_key),
+        ))
+        .await
+        .unwrap();
+
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hop_addr = probe.local_addr().unwrap();
+        drop(probe);
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = HopConfig::default();
+        config.server.ssh_bind = hop_addr.to_string();
+        config.ssh.host_key_file = temp.path().join("hop-host-key");
+        config.ssh.banner = String::new();
+        config.ssh.keepalive_interval = 0;
+        config.ssh.connect_timeout = 5;
+        let hop_task = tokio::spawn(serve_ssh(
+            hop_addr,
+            config,
+            db.clone(),
+            master_key,
+            ActiveSessionRegistry::default(),
+        ));
+
+        let mut hop_client = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match russh::client::connect(
+                    Arc::new(russh::client::Config::default()),
+                    hop_addr,
+                    AcceptAnyServerKey,
+                )
+                .await
+                {
+                    Ok(client) => break Some(client),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .expect("Hop SSH server did not start")
+        .expect("Hop SSH client was not created");
+        let hash_alg = hop_client
+            .best_supported_rsa_hash()
+            .await
+            .unwrap()
+            .flatten();
+        let auth = hop_client
+            .authenticate_publickey(
+                "exec-target",
+                PrivateKeyWithHashAlg::new(Arc::new(client_key), hash_alg),
+            )
+            .await
+            .unwrap();
+        assert!(auth.success());
+
+        let (stdout, stderr, exit_status) =
+            run_exec_channel(&hop_client, b"cat", None, b"stdin payload\n").await;
+        assert_eq!(stdout, b"stdin payload\nafter status\n");
+        assert_eq!(stderr, b"target stderr\n");
+        assert_eq!(exit_status, Some(42));
+        assert!(target_state.ptys.lock().unwrap().is_empty());
+
+        let (_, _, exit_status) =
+            run_exec_channel(&hop_client, b"tty-check", Some((123, 45)), b"").await;
+        assert_eq!(exit_status, Some(42));
+        assert_eq!(&*target_state.ptys.lock().unwrap(), &[(123, 45)]);
+        assert_eq!(
+            &*target_state.commands.lock().unwrap(),
+            &[b"cat".to_vec(), b"tty-check".to_vec()]
+        );
+
+        let sessions = db.list_sessions(10).await.unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions
+            .iter()
+            .all(|session| session.mode == "exec" && session.status == "ok"));
+
+        hop_client
+            .disconnect(russh::Disconnect::ByApplication, "test complete", "en")
+            .await
+            .ok();
+        hop_task.abort();
+        target_task.abort();
     }
 
     #[tokio::test]
@@ -795,14 +1192,6 @@ mod tests {
         config.ssh.banner = String::new();
 
         assert!(authentication_banner(&config).is_none());
-    }
-
-    #[test]
-    fn unsupported_exec_message_points_to_supported_ssh_paths() {
-        assert_eq!(
-            unsupported_exec_command_message(),
-            "Hop does not support SSH remote commands. Open an interactive TUI session or connect directly with <asset>@host.\n"
-        );
     }
 
     #[test]

@@ -3752,7 +3752,14 @@ fn known_host_script() -> &'static str {
     "#
 }
 
-pub fn sessions(t: &L10n, items: &[Session], admin_events: &[AuditEvent]) -> Markup {
+pub fn sessions(
+    t: &L10n,
+    items: &[Session],
+    admin_events: &[AuditEvent],
+    active_session_ids: &[String],
+    csrf_token: &str,
+    can_terminate: bool,
+) -> Markup {
     layout(
         t.sessions_title,
         "sessions",
@@ -3765,9 +3772,16 @@ pub fn sessions(t: &L10n, items: &[Session], admin_events: &[AuditEvent]) -> Mar
                         p { (t.sessions_intro) }
                     }
                     div.console-actions {
+                        span.status-chip.good { (active_session_ids.len()) " " (t.sessions_active_heading) }
                         span.status-chip.danger { (items.iter().filter(|session| session.status == "failed").count()) " " (t.sessions_failed_suffix) }
                         span.status-chip.neutral { (admin_events.len()) " " (t.sessions_admin_recorded_suffix) }
                         span.status-chip.good { (items.len()) " " (t.sessions_recorded_suffix) }
+                        @if can_terminate && !active_session_ids.is_empty() {
+                            form method="post" action="/sessions/terminate-all" {
+                                (csrf_field(csrf_token))
+                                button.danger type="submit" { (t.sessions_terminate_all) }
+                            }
+                        }
                         a.ghost-button href="/sessions" { (t.sessions_live_tail) }
                     }
                 }
@@ -3842,12 +3856,12 @@ pub fn sessions(t: &L10n, items: &[Session], admin_events: &[AuditEvent]) -> Mar
                 }
                 div.audit-grid {
                     section.panel {
-                        div.panel-header {
-                            div {
-                                h2 { (t.sessions_recent_heading) }
-                                p { (t.sessions_recent_intro) }
+                            div.panel-header {
+                                div {
+                                    h2 { (t.sessions_recent_heading) }
+                                    p { (t.sessions_recent_intro) " " (t.sessions_active_intro) }
+                                }
                             }
-                        }
                         div.table-wrap {
                             table.data-table {
                                 thead {
@@ -3858,13 +3872,15 @@ pub fn sessions(t: &L10n, items: &[Session], admin_events: &[AuditEvent]) -> Mar
                                         th { (t.mode_column) }
                                         th { (t.error_column) }
                                         th { (t.field_status) }
+                                        th { (t.sessions_action_column) }
                                     }
                                 }
                                 tbody {
                                     @if items.is_empty() {
-                                        tr.empty-row { td colspan="6" { (t.no_sessions) } }
+                                        tr.empty-row { td colspan="7" { (t.no_sessions) } }
                                     }
                                     @for session in items {
+                                        @let is_active = active_session_ids.iter().any(|id| id == &session.id);
                                         tr {
                                             td.mono { (session.started_at.as_deref().unwrap_or("-")) }
                                             td {
@@ -3893,12 +3909,24 @@ pub fn sessions(t: &L10n, items: &[Session], admin_events: &[AuditEvent]) -> Mar
                                                 }
                                             }
                                             td {
-                                                @if session.status == "failed" {
+                                                @if is_active {
+                                                    span.status-pill { (t.sessions_active_heading) }
+                                                } @else if session.status == "failed" {
                                                     span.status-pill.danger { (session.status) }
                                                 } @else if session.status == "ok" {
                                                     span.status-pill { (session.status) }
                                                 } @else {
                                                     span.status-pill.neutral { (session.status) }
+                                                }
+                                            }
+                                            td.table-action {
+                                                @if can_terminate && is_active {
+                                                    form method="post" action=(format!("/sessions/{}/terminate", session.id)) {
+                                                        (csrf_field(csrf_token))
+                                                        button.danger type="submit" { (t.sessions_terminate) }
+                                                    }
+                                                } @else {
+                                                    span.subtle { "-" }
                                                 }
                                             }
                                         }
@@ -4504,7 +4532,8 @@ mod tests {
             source_ip: Some("127.0.0.1".to_string()),
             details_json: Some(r#"{"protocol":"ssh"}"#.to_string()),
         }];
-        let rendered = sessions(&EN, &session_items, &admin_events).into_string();
+        let rendered =
+            sessions(&EN, &session_items, &admin_events, &[], "csrf-123", false).into_string();
 
         assert!(rendered.contains(r#"class="audit-page""#));
         assert!(rendered.contains("Audit Logs"));
@@ -4518,6 +4547,38 @@ mod tests {
         assert!(!rendered.contains("Replay: latest SSH trace"));
         assert!(!rendered.contains("sudo systemctl reload postgres"));
         assert!(!rendered.contains("Policy Feed"));
+    }
+
+    #[test]
+    fn sessions_page_exposes_controls_for_registered_live_sessions() {
+        let session_items = vec![Session {
+            id: "session-live".to_string(),
+            key_finger: "SHA256:test".to_string(),
+            key_name: Some("alice".to_string()),
+            mode: "exec".to_string(),
+            asset_name: Some("prod-api-01".to_string()),
+            target_host: Some("10.42.1.12".to_string()),
+            target_port: Some(22),
+            client_ip: Some("10.42.0.18".to_string()),
+            status: "started".to_string(),
+            error: None,
+            started_at: Some("2026-06-17T14:39:12Z".to_string()),
+            ended_at: None,
+        }];
+        let rendered = sessions(
+            &EN,
+            &session_items,
+            &[],
+            &["session-live".to_string()],
+            "csrf-123",
+            true,
+        )
+        .into_string();
+
+        assert!(rendered.contains(r#"action="/sessions/terminate-all""#));
+        assert!(rendered.contains(r#"action="/sessions/session-live/terminate""#));
+        assert!(rendered.contains(r#"name="csrf_token" value="csrf-123""#));
+        assert!(rendered.contains(EN.sessions_terminate));
     }
 
     #[test]

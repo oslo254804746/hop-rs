@@ -28,6 +28,10 @@ use tokio::{
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{info, warn};
 
+use crate::ssh::session_registry::{
+    ActiveSessionRegistry, TerminateSessionResult, TERMINATED_BY_ADMIN,
+};
+
 use super::{
     auth::{
         clear_cookie, cookie_token, profile_has_capability, require_login, session_cookie,
@@ -43,6 +47,7 @@ use super::{
 pub struct AdminState {
     pub db: HopDb,
     pub master_key: Arc<MasterKey>,
+    pub active_sessions: ActiveSessionRegistry,
     pub sessions: AdminSessions,
     pub ssh_port: u16,
     pub ssh_bind: SocketAddr,
@@ -57,11 +62,13 @@ pub async fn serve_admin(
     ssh_bind: SocketAddr,
     db: HopDb,
     master_key: Arc<MasterKey>,
+    active_sessions: ActiveSessionRegistry,
     cookie_secure: bool,
 ) -> Result<()> {
     let state = AdminState {
         db,
         master_key,
+        active_sessions,
         sessions: AdminSessions::default(),
         ssh_port: ssh_bind.port(),
         ssh_bind,
@@ -123,6 +130,8 @@ fn admin_router_with_static_dir(state: AdminState, static_dir: impl Into<PathBuf
             post(delete_known_host),
         )
         .route("/sessions", get(sessions))
+        .route("/sessions/terminate-all", post(terminate_all_sessions))
+        .route("/sessions/{id}/terminate", post(terminate_session))
         .route("/import", get(import_page).post(import_data))
         .route("/settings", get(settings).post(update_settings))
         .route("/settings/admins", post(create_admin_user))
@@ -2214,7 +2223,145 @@ async fn sessions(State(state): State<AdminState>, headers: HeaderMap) -> Respon
         Ok(events) => events,
         Err(err) => return admin_db_error("list admin audit events", err),
     };
-    Html(html::sessions(t, &sessions, &admin_events).into_string()).into_response()
+    let active_session_ids = state.active_sessions.active_ids().await;
+    Html(
+        html::sessions(
+            t,
+            &sessions,
+            &admin_events,
+            &active_session_ids,
+            &session.csrf_token,
+            profile_has_capability(&session.access_profile, AdminCapability::AccessManage),
+        )
+        .into_string(),
+    )
+    .into_response()
+}
+
+async fn terminate_session(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    peer: OptionalPeer,
+    Form(form): Form<CsrfForm>,
+) -> Response {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AccessManage) {
+        return resp;
+    }
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
+        return resp;
+    }
+
+    match state.active_sessions.terminate(&id).await {
+        TerminateSessionResult::Signaled => {
+            if let Err(err) = state
+                .db
+                .finish_session(&id, "terminated", Some(TERMINATED_BY_ADMIN))
+                .await
+            {
+                record_audit(
+                    &state,
+                    Some(&session),
+                    source_ip(peer.as_ref()),
+                    "session.terminate",
+                    "session",
+                    Some(&id),
+                    None,
+                    "failure",
+                    Some(serde_json::json!({"reason": "database"})),
+                )
+                .await;
+                return admin_db_error("terminate session", err);
+            }
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "session.terminate",
+                "session",
+                Some(&id),
+                None,
+                "success",
+                None,
+            )
+            .await;
+            Redirect::to("/sessions").into_response()
+        }
+        TerminateSessionResult::NotFound => {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "session.terminate",
+                "session",
+                Some(&id),
+                None,
+                "failure",
+                Some(serde_json::json!({"reason": "not_found"})),
+            )
+            .await;
+            (StatusCode::NOT_FOUND, "active session not found").into_response()
+        }
+    }
+}
+
+async fn terminate_all_sessions(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+    peer: OptionalPeer,
+    Form(form): Form<CsrfForm>,
+) -> Response {
+    let Ok(session) = guard(&headers, &state).await else {
+        return Redirect::to("/login").into_response();
+    };
+    if let Some(resp) = capability_guard(&headers, &session, AdminCapability::AccessManage) {
+        return resp;
+    }
+    if let Some(resp) = csrf_guard(&state, &session, &form.csrf_token).await {
+        return resp;
+    }
+
+    let session_ids = state.active_sessions.terminate_all().await;
+    for session_id in &session_ids {
+        if let Err(err) = state
+            .db
+            .finish_session(session_id, "terminated", Some(TERMINATED_BY_ADMIN))
+            .await
+        {
+            record_audit(
+                &state,
+                Some(&session),
+                source_ip(peer.as_ref()),
+                "session.terminate_all",
+                "session",
+                None,
+                None,
+                "failure",
+                Some(serde_json::json!({
+                    "reason": "database",
+                    "signaled": session_ids.len()
+                })),
+            )
+            .await;
+            return admin_db_error("terminate sessions", err);
+        }
+    }
+    record_audit(
+        &state,
+        Some(&session),
+        source_ip(peer.as_ref()),
+        "session.terminate_all",
+        "session",
+        None,
+        None,
+        "success",
+        Some(serde_json::json!({"signaled": session_ids.len()})),
+    )
+    .await;
+    Redirect::to("/sessions").into_response()
 }
 
 #[derive(Deserialize)]
@@ -2617,6 +2764,7 @@ mod tests {
         AdminState {
             db: HopDb::in_memory().await.unwrap(),
             master_key: Arc::new(MasterKey::from_bytes([0; 32])),
+            active_sessions: ActiveSessionRegistry::default(),
             sessions: AdminSessions::default(),
             ssh_port: 2222,
             ssh_bind: "127.0.0.1:2222".parse().unwrap(),
@@ -2993,6 +3141,75 @@ mod tests {
         assert_eq!(asset.preset.as_deref(), Some("rdp"));
         assert_eq!(asset.tags, vec!["windows", "rdp"]);
         assert!(asset.credential_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn terminate_session_route_signals_registry_and_records_audit() {
+        let state = test_admin_state().await;
+        let ssh_session = state
+            .db
+            .start_session(hop_core::NewSession {
+                key_finger: "SHA256:alice".to_string(),
+                key_name: Some("alice".to_string()),
+                mode: "exec".to_string(),
+                asset_name: Some("prod-api-01".to_string()),
+                target_host: Some("10.42.1.12".to_string()),
+                target_port: Some(22),
+                client_ip: Some("10.42.0.18".to_string()),
+            })
+            .await
+            .unwrap();
+        let (terminate_tx, mut terminate_rx) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .active_sessions
+            .register(ssh_session.id.clone(), terminate_tx)
+            .await;
+        let token = state
+            .sessions
+            .create(
+                "local-admin",
+                "Local admin",
+                hop_core::ADMIN_PROFILE_OWNER,
+                false,
+            )
+            .await;
+        let admin_session = state.sessions.authenticate(&token).await.unwrap();
+        let cookie = session_cookie(&token, false);
+        let app = admin_router_with_static_dir(state.clone(), tempfile::tempdir().unwrap().path());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{}/terminate", ssh_session.id))
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "csrf_token={}",
+                        admin_session.csrf_token
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(terminate_rx.recv().await, Some(()));
+        let finished = state
+            .db
+            .get_session(&ssh_session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(finished.status, "terminated");
+        assert_eq!(finished.error.as_deref(), Some(TERMINATED_BY_ADMIN));
+        assert!(finished.ended_at.is_some());
+        let events = state.db.list_audit_events(10).await.unwrap();
+        assert!(events.iter().any(|event| {
+            event.action == "session.terminate"
+                && event.target_id.as_deref() == Some(ssh_session.id.as_str())
+                && event.result == "success"
+        }));
     }
 
     #[test]

@@ -52,6 +52,27 @@ pub async fn connect_asset_shell(
     Ok(ManagedTarget { session, channel })
 }
 
+pub async fn connect_asset_exec(
+    db: HopDb,
+    master_key: Arc<MasterKey>,
+    asset: &Asset,
+    command: Vec<u8>,
+    pty: Option<(u32, u32)>,
+    timeout: Duration,
+) -> Result<ManagedTarget> {
+    let session = connect_authenticated_asset(db, master_key, asset, timeout).await?;
+    let mut channel = session.channel_open_session().await?;
+    if let Some((width, height)) = pty {
+        channel
+            .request_pty(true, "xterm-256color", width, height, 0, 0, &[])
+            .await?;
+        wait_for_request_success(&mut channel, timeout, "pty").await?;
+    }
+    channel.exec(true, command).await?;
+    wait_for_request_success(&mut channel, timeout, "exec").await?;
+    Ok(ManagedTarget { session, channel })
+}
+
 pub async fn connect_asset_sftp(
     db: HopDb,
     master_key: Arc<MasterKey>,
@@ -61,12 +82,21 @@ pub async fn connect_asset_sftp(
     let session = connect_authenticated_asset(db, master_key, asset, timeout).await?;
     let mut channel = session.channel_open_session().await?;
     channel.request_subsystem(true, "sftp").await?;
+    wait_for_request_success(&mut channel, timeout, "sftp subsystem").await?;
+    Ok(ManagedTarget { session, channel })
+}
+
+async fn wait_for_request_success(
+    channel: &mut Channel<client::Msg>,
+    timeout: Duration,
+    request: &str,
+) -> Result<()> {
     match tokio::time::timeout(timeout, channel.wait()).await {
-        Ok(Some(ChannelMsg::Success)) => Ok(ManagedTarget { session, channel }),
-        Ok(Some(ChannelMsg::Failure)) => bail!("target rejected sftp subsystem"),
-        Ok(Some(other)) => bail!("unexpected target response to sftp request: {other:?}"),
-        Ok(None) => bail!("target closed channel while starting sftp subsystem"),
-        Err(_) => bail!("target sftp subsystem request timed out"),
+        Ok(Some(ChannelMsg::Success)) => Ok(()),
+        Ok(Some(ChannelMsg::Failure)) => bail!("target rejected {request} request"),
+        Ok(Some(other)) => bail!("unexpected target response to {request} request: {other:?}"),
+        Ok(None) => bail!("target closed channel while starting {request}"),
+        Err(_) => bail!("target {request} request timed out"),
     }
 }
 

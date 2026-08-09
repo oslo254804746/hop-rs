@@ -198,6 +198,7 @@ Verify SSH after adding data:
 ```bash
 ssh -p 2222 hop-host             # TUI
 ssh -p 2222 web-prod-01@hop-host # Direct connect with managed credential
+ssh -p 2222 web-prod-01@hop-host 'uname -a' # Managed remote command
 sftp -P 2222 web-prod-01@hop-host # Managed SFTP subsystem
 ssh -J hop-host:2222 web-prod-01.hop # ProxyJump TCP relay
 ```
@@ -219,7 +220,7 @@ hop-server key access set <key-id> --mode all        # Include future assets
 
 Entry-key authorization and target credentials are separate. The key grants
 access to an asset; the asset's credential authenticates managed SSH and SFTP
-connections to the target. TUI, direct SSH, SFTP, ProxyJump, and generic
+connections to the target. TUI, direct SSH, remote commands, SFTP, ProxyJump, and generic
 `direct-tcpip` forwarding enforce the same per-key policy. RDP, VNC, MySQL,
 PostgreSQL, Redis, and Generic TCP presets only provide port defaults and
 examples.
