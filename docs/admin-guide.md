@@ -124,6 +124,8 @@ An outdated base returns `409 revision_conflict`. Validation and apply errors us
 
 Disabling a key, narrowing an allowlist, changing a credential, or deleting an asset affects new connections. Existing SSH streams are not implicitly killed. Use the explicit termination endpoint when an active session must be interrupted immediately.
 
-## Panel boundary
+## Panel availability and boundary
 
-An external panel or optional LuCI package may consume `/api/v1`; it must not read/write SQLite directly or duplicate assets, credentials, and Access Keys in UCI. The core does not serve panel assets and does not depend on any frontend repository.
+v0.2.0 does not currently ship an official graphical interface for Catalog resources. `hop-rs` removed the old Admin Web, while the current `luci-app-hop` page covers only the OpenWrt service shell, core download, and logging; it does not call the Control API. Use the local CLI, manifests, or `/api/v1` to manage assets, credentials, Access Keys, and allowlists today.
+
+The planned standalone panel and LuCI resource views must both consume `/api/v1`. They must not read/write SQLite directly or duplicate assets, credentials, and Access Keys in UCI. The core does not serve panel assets and does not depend on a frontend repository. See the [v0.2 management-panel delivery contract](product/management-panel-v0.2.md) for the agreed scope and security boundary.

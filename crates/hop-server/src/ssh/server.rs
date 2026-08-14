@@ -20,7 +20,7 @@ use super::{
         self, BridgeControl, BridgeInput, ManagedBridgeOptions, ManagedSessionMode, SharedChannels,
     },
     host_key, proxy,
-    session_registry::{ActiveSessionRegistry, TERMINATED_BY_ADMIN},
+    session_registry::{ActiveSessionRegistry, TERMINATED_BY_MANAGEMENT},
 };
 
 #[derive(Debug, Clone)]
@@ -335,7 +335,9 @@ fn spawn_tui_termination_watcher(
             match channels.remove(&channel_id) {
                 Some(ChannelState::Tui { mut tui, audit }) => {
                     let mut output = tui.leave_screen().unwrap_or_default();
-                    output.extend_from_slice(format!("\r\n{TERMINATED_BY_ADMIN}\r\n").as_bytes());
+                    output.extend_from_slice(
+                        format!("\r\n{TERMINATED_BY_MANAGEMENT}\r\n").as_bytes(),
+                    );
                     Some((audit, output))
                 }
                 Some(state) => {
@@ -351,7 +353,7 @@ fn spawn_tui_termination_watcher(
                 let _ = handle.data(channel_id, output).await;
             }
             let _ = audit
-                .finish(&db, "terminated", Some(TERMINATED_BY_ADMIN))
+                .finish(&db, "terminated", Some(TERMINATED_BY_MANAGEMENT))
                 .await;
             let _ = handle.exit_status_request(channel_id, 255).await;
             let _ = handle.eof(channel_id).await;

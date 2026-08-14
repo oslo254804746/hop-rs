@@ -2,10 +2,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::{mpsc, Mutex};
 
-pub(crate) const TERMINATED_BY_ADMIN: &str = "terminated by administrator";
+pub(crate) const TERMINATED_BY_MANAGEMENT: &str = "terminated by management request";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum TerminateSessionResult {
     Signaled,
     NotFound,
@@ -37,14 +36,6 @@ impl ActiveSessionRegistry {
         self.inner.lock().await.remove(session_id);
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn active_ids(&self) -> Vec<String> {
-        let mut ids = self.inner.lock().await.keys().cloned().collect::<Vec<_>>();
-        ids.sort();
-        ids
-    }
-
-    #[allow(dead_code)]
     pub(crate) async fn terminate(&self, session_id: &str) -> TerminateSessionResult {
         let terminate = {
             let sessions = self.inner.lock().await;
@@ -59,26 +50,6 @@ impl ActiveSessionRegistry {
             self.unregister(session_id).await;
             TerminateSessionResult::NotFound
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn terminate_all(&self) -> Vec<String> {
-        let sessions = {
-            let sessions = self.inner.lock().await;
-            sessions
-                .iter()
-                .map(|(id, terminate)| (id.clone(), terminate.clone()))
-                .collect::<Vec<_>>()
-        };
-        let mut signaled = Vec::new();
-        for (id, terminate) in sessions {
-            if terminate.send(()).is_ok() {
-                signaled.push(id);
-            } else {
-                self.unregister(&id).await;
-            }
-        }
-        signaled
     }
 }
 

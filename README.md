@@ -11,8 +11,12 @@ Hop v0.2 是一个面向个人开发者、Homelab 和单一管理信任域小团
 - Key 未声明 `assets` 时访问全部当前及未来资产；`assets: []` 表示认证成功但不能发现或访问资产；非空数组是严格白名单。
 - YAML/TOML、CLI 和可选 Control API 都写入同一个 Catalog。
 - HTTP Control API 默认关闭；核心不包含 Admin Web、管理员账号、Cookie、CSRF、角色或 RBAC。
-- OpenWrt 是一等发行目标：轻量 LuCI/procd 包按架构下载经 SHA256 校验的静态核心，不在 IPK/APK 内编译或内置 Rust 后端。
+- OpenWrt 是一等发行目标：轻量 LuCI/procd 包按架构下载经 SHA256 校验的静态核心，不在 IPK/APK 内编译或内置 Rust 后端；当前 LuCI 页面只管理服务外壳，不管理 Catalog 资源。
 - 资产类型只有 `ssh` 和 `tcp`。SSH 由 Hop 管理协议与凭据，RDP、数据库等服务使用通用 TCP 转发。
+
+## 管理面板现状
+
+v0.2.0 当前没有可管理资产、凭据、Access Key、白名单和会话的官方图形面板。通用 Hop 面板与 `luci-app-hop` 资源页面已经被确认为 v0.2 的独立交付物；在它们发布前，请使用 CLI、资源 manifest 或 Control API。面板不会恢复旧 Admin Web 的管理员账号和角色模型，详细边界见 [v0.2 管理面板交付边界](docs/product/management-panel-v0.2.md)。
 
 ## 快速开始
 
@@ -165,6 +169,7 @@ cargo test --workspace --locked
 - [Control API 与本地管理](docs/admin-guide.zh-CN.md)
 - [声明式 Apply 规范](docs/product/declarative-apply-spec.md)
 - [Access Key 与资产白名单](docs/product/lightweight-access-control.md)
+- [v0.2 管理面板交付边界](docs/product/management-panel-v0.2.md)
 - [OpenWrt 打包与资源测量](docs/openwrt.md)
 - [v0.2 产品方向](docs/product/product-direction-v0.2.md)
 - [文档索引](docs/README.md)

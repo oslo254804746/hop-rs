@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, Mutex};
 use super::{
     client,
     server::{start_tui_session, AuthInfo, ChannelState, PtySize, AUTHORIZATION_DENIED},
-    session_registry::{ActiveSessionRegistry, TERMINATED_BY_ADMIN},
+    session_registry::{ActiveSessionRegistry, TERMINATED_BY_MANAGEMENT},
 };
 use crate::tui::TuiResources;
 
@@ -213,7 +213,7 @@ async fn run_managed_bridge(
             tokio::select! {
                 Some(()) = terminate.recv() => {
                     terminated = true;
-                    let message = format!("{TERMINATED_BY_ADMIN}\n").into_bytes();
+                    let message = format!("{TERMINATED_BY_MANAGEMENT}\n").into_bytes();
                     if is_exec {
                         let _ = options
                             .handle
@@ -224,7 +224,7 @@ async fn run_managed_bridge(
                             .handle
                             .data(
                                 options.channel_id,
-                                format!("\r\n{TERMINATED_BY_ADMIN}\r\n").into_bytes(),
+                                format!("\r\n{TERMINATED_BY_MANAGEMENT}\r\n").into_bytes(),
                             )
                             .await;
                     }
@@ -281,7 +281,7 @@ async fn run_managed_bridge(
             }
         }
         let reason = if terminated {
-            TERMINATED_BY_ADMIN
+            TERMINATED_BY_MANAGEMENT
         } else {
             "target closed"
         };
@@ -299,7 +299,7 @@ async fn run_managed_bridge(
             _ if terminated => {
                 options
                     .db
-                    .finish_session(&session_id, "terminated", Some(TERMINATED_BY_ADMIN))
+                    .finish_session(&session_id, "terminated", Some(TERMINATED_BY_MANAGEMENT))
                     .await
             }
             Ok(_) => options.db.finish_session(&session_id, "ok", None).await,

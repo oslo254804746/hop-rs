@@ -207,7 +207,7 @@ For a clean rebuild, keep the source manifests and secret files, choose an empty
 
 ## OpenWrt
 
-The separate `luci-app-hop` repository provides an architecture-independent LuCI/procd control package. It does not compile or embed Rust. On the first enabled start it downloads the matching static `hop-server` release archive, verifies it against `SHA256SUMS`, self-checks it, and installs it atomically. UCI does not own Catalog resources. See [OpenWrt distribution and footprint](openwrt.md).
+The separate `luci-app-hop` repository provides an architecture-independent LuCI/procd service package. It does not compile or embed Rust. On the first enabled start it downloads the matching static `hop-server` release archive, verifies it against `SHA256SUMS`, self-checks it, and installs it atomically. Its current LuCI page manages only the service shell and core download; use manifests or the Hop CLI for Catalog resources until the planned resource panel is delivered. UCI does not own Catalog resources. See [OpenWrt distribution and footprint](openwrt.md) and the [v0.2 management-panel contract](product/management-panel-v0.2.md).
 
 ## Troubleshooting
 

@@ -8,6 +8,7 @@
 
 - [声明式资源 Apply 与 SQLite 事实源规范](declarative-apply-spec.md)
 - [Access Key 与资产白名单方案](lightweight-access-control.md)
+- [管理面板交付边界](management-panel-v0.2.md)
 - [SSH 与 TCP 代理](../proxying.zh-CN.md)
 - [配置参考](../configuration.zh-CN.md)
 - [部署指南](../deployment.zh-CN.md)
@@ -142,11 +143,14 @@ SQLite 是嵌入式实现细节，不引入外部服务，也不违背简单部�
 
 ### 6.2 管理面板
 
-- 核心发行默认不包含完整 Admin Web。
-- 面板拆分为独立项目和独立发布物。
-- 可存在多个社区或官方面板，共同使用稳定 Control API。
-- OpenWrt LuCI 插件是轻量服务与核心下载入口，不改变核心配置模型。
-- 可以保留可选静态 UI 托管能力，但不得让 UI 成为核心运行前提。
+- 核心不包含完整 Admin Web，也不托管面板静态资源。
+- v0.2 必须提供一个独立发布的官方通用面板，通过稳定 Control API 管理 Hop。
+- `luci-app-hop` 必须在现有服务与核心下载页之外提供 Catalog 资源管理入口。
+- 通用面板和 LuCI 使用同一信息架构与 API 语义，不各自发明资源模型。
+- LuCI 通过受 ACL 保护的 rpcd 后端访问 loopback API，不能把管理 Token 暴露给浏览器。
+- 面板不可用时，CLI、manifest 和全部核心连接能力必须保持完整。
+
+完整交付、安全和首版范围见 [管理面板交付边界](management-panel-v0.2.md)。v0.2.0 当前只交付了 Control API 与 `luci-app-hop` 服务外壳，尚未交付可管理 Catalog 资源的图形面板。
 
 ## 7. OpenWrt 分发
 
@@ -192,10 +196,12 @@ OpenWrt 是 v0.2 的一等发行目标，而不是发布后手工打包：
 
 ### P2：分发体验
 
-1. Linux x86_64/aarch64 静态核心 Release。
-2. OpenWrt 轻量 LuCI/procd 控制包与校验下载器。
-3. Docker 发行。
-4. 安装、备份、重建和故障恢复文档。
+1. 独立通用面板发布物。
+2. `luci-app-hop` Catalog 资源管理入口。
+3. Linux x86_64/aarch64 静态核心 Release。
+4. OpenWrt 轻量 LuCI/procd 控制包与校验下载器。
+5. Docker 发行。
+6. 安装、备份、重建和故障恢复文档。
 
 ## 10. 产品完成标准
 
@@ -207,6 +213,7 @@ OpenWrt 是 v0.2 的一等发行目标，而不是发布后手工打包：
 - Key 默认访问全部资产，限制范围是可选操作。
 - 资产清单修改可以安全 validate、diff、apply，失败不影响上一份有效数据。
 - 不启用 Control API 和面板时，全部核心连接能力仍可使用。
+- 选择图形管理时，Linux/Docker 和 OpenWrt 用户都有官方、可安装的面板入口。
 - OpenWrt 安装不要求 Docker、Node.js 或外部数据库。
 - 文档首先解释连接与部署，不以 Dashboard 或团队治理作为主卖点。
 
@@ -222,7 +229,7 @@ OpenWrt 是 v0.2 的一等发行目标，而不是发布后手工打包：
 - `/api/v1` Control API 默认关闭；启用时使用单一等权 Bearer Token。
 - Control API 已覆盖资源、本地 CRUD、会话终止、source/status、validate、diff、apply 与 reload，secret 响应只暴露状态。
 - inventory source 在启动时调用统一 Apply engine；watcher 等待 scope 稳定后重扫，失败保留上一代有效 Catalog，且默认不 prune。
-- OpenWrt `all` 架构 LuCI/procd/UCI 包、校验下载器，以及 x86_64/aarch64 静态核心 Release 契约。
+- OpenWrt `all` 架构 LuCI/procd/UCI 服务外壳、校验下载器，以及 x86_64/aarch64 静态核心 Release 契约。
 - OpenWrt 24.10.4 IPK 与 25.12.5 APK 已由各自官方 SDK 完成云端实际打包验证。
 - x86_64/aarch64 musl 核心已完成云端静态构建、ELF/运行自检、归档、统一 `SHA256SUMS` 与完整候选包验证。
 - v0.2 schema 上的隔离 OpenSSH E2E 已覆盖远程命令流与退出码、PTY、SCP、SFTP、ProxyJump、Host Key 首次记录与变更拒绝，以及凭据密文。
@@ -230,3 +237,8 @@ OpenWrt 是 v0.2 的一等发行目标，而不是发布后手工打包：
 后续真实硬件复测：
 
 - 在真实 x86_64 与 aarch64 OpenWrt 设备上复测 RSS；获得设备前，以隔离的 x86_64 GNU/Linux 基线持续观察资源趋势。该复测不改变已经验证的首批静态核心与轻量控制包边界。
+
+尚未交付：
+
+- 独立通用管理面板。
+- `luci-app-hop` 的资产、凭据、Access Key、白名单、会话和声明式配置管理页面。

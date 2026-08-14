@@ -252,7 +252,7 @@ ssh -p 2222 nas@hop.example.com 'uname -a'
 
 ## OpenWrt
 
-OpenWrt 使用独立的 `luci-app-hop` 软件包。软件包提供 LuCI 页面、procd 服务和按架构下载核心的工具，不在路由器上编译 Rust。
+OpenWrt 使用独立的 `luci-app-hop` 软件包。当前软件包提供 LuCI 服务设置页、procd 服务和按架构下载核心的工具，不在路由器上编译 Rust；它还不是资产、凭据或 Access Key 管理面板。
 
 安装 `.ipk` 或 `.apk` 后，在 LuCI 的 `Services -> Hop` 中启用服务。命令行写法：
 
@@ -265,6 +265,8 @@ logread -e hop
 ```
 
 第一次启用时，软件包会下载与路由器架构匹配的 Hop 核心并校验 SHA256。详细设置和资源清单示例见 [`luci-app-hop` 配置文档](https://github.com/oslo254804746/luci-app-hop/blob/dev/docs/configuration.zh-CN.md)。
+
+在 LuCI 资源面板交付前，OpenWrt 上的 Catalog 资源请通过 manifest 或 Hop CLI 管理。面板交付边界见 [v0.2 管理面板交付边界](product/management-panel-v0.2.md)。
 
 ## Control API
 

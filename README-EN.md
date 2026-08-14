@@ -11,8 +11,12 @@ Hop v0.2 is a lightweight SSH jump server for individual developers, homelabs, a
 - An omitted `assets` field grants a key all current and future assets; `assets: []` authenticates but discovers and reaches none; a non-empty list is a strict allowlist.
 - YAML/TOML, the local CLI, and the optional Control API all write through the same Catalog.
 - The HTTP Control API is disabled by default. Core contains no Admin Web, administrator accounts, cookies, CSRF, roles, or RBAC.
-- OpenWrt is a first-class distribution target: a lightweight LuCI/procd package downloads the verified static core for the router architecture instead of compiling or embedding Rust in the IPK/APK.
+- OpenWrt is a first-class distribution target: a lightweight LuCI/procd package downloads the verified static core for the router architecture instead of compiling or embedding Rust in the IPK/APK. Its current LuCI page manages the service shell, not Catalog resources.
 - Asset types are limited to `ssh` and `tcp`. Hop manages SSH protocol and credentials; RDP and database services use generic TCP forwarding.
+
+## Management-panel status
+
+v0.2.0 does not currently ship an official graphical interface for assets, credentials, Access Keys, allowlists, or sessions. A standalone Hop panel and `luci-app-hop` resource views are now explicit v0.2 deliverables; use the CLI, resource manifests, or Control API until they are released. The panel will not restore the old Admin Web account and role model. See the [v0.2 management-panel delivery contract](docs/product/management-panel-v0.2.md).
 
 ## Quick start
 
@@ -145,6 +149,7 @@ The isolated OpenSSH E2E covers exec streams and exit status, PTY, SCP, SFTP, Pr
 - [Control API and local management](docs/admin-guide.md)
 - [Declarative Apply specification](docs/product/declarative-apply-spec.md)
 - [Access Key allowlists](docs/product/lightweight-access-control.md)
+- [v0.2 management-panel delivery contract](docs/product/management-panel-v0.2.md)
 - [OpenWrt packaging and measurements](docs/openwrt.md)
 - [v0.2 product direction](docs/product/product-direction-v0.2.md)
 - [Documentation index](docs/README.md)

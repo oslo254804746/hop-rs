@@ -28,7 +28,6 @@ pub enum CatalogErrorCode {
     ManagedBySource,
     RevisionConflict,
     SourceScanIncomplete,
-    LegacyDatabaseUnsupported,
     ApplyFailed,
 }
 

@@ -18,7 +18,7 @@ use tokio::{
 
 use super::{
     server::{audit_denied_attempt, AuthInfo, AUTHORIZATION_DENIED},
-    session_registry::{ActiveSessionRegistry, TERMINATED_BY_ADMIN},
+    session_registry::{ActiveSessionRegistry, TERMINATED_BY_MANAGEMENT},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -257,7 +257,7 @@ pub async fn bridge_direct_tcpip(
     active_sessions.unregister(&session.id).await;
     match &result {
         _ if terminated => {
-            db.finish_session(&session.id, "terminated", Some(TERMINATED_BY_ADMIN))
+            db.finish_session(&session.id, "terminated", Some(TERMINATED_BY_MANAGEMENT))
                 .await?
         }
         Ok(_) => db.finish_session(&session.id, "ok", None).await?,

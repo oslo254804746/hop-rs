@@ -19,9 +19,9 @@ pub enum HopCoreError {
     Database(#[from] sqlx::Error),
 
     #[error(
-        "legacy_database_unsupported: database at {path} is not a Hop v0.2 database; back it up and delete it, or choose a new database path"
+        "unsupported_database_schema: database at {path} is not a Hop v0.2 catalog; back it up and choose an empty database path"
     )]
-    LegacyDatabaseUnsupported { path: PathBuf },
+    UnsupportedDatabaseSchema { path: PathBuf },
 
     #[error("crypto error: {0}")]
     Crypto(String),

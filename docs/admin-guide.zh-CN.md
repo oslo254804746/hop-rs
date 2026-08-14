@@ -112,6 +112,8 @@ Apply 必须携带 `/api/v1/catalog/revision` 返回的 revision。过期值返�
 
 禁用 Key、收紧白名单、修改凭据或删除资产会影响新连接，默认不终止已有 SSH stream。需要紧急阻断时调用显式 terminate 接口。
 
-## 外部面板边界
+## 面板现状与边界
 
-独立面板或可选 LuCI 可以调用 `/api/v1`，但不得直接读写 SQLite，也不得在 UCI 中重复资产、凭据或 Access Key。核心不托管面板静态资源，也不依赖前端仓库。
+v0.2.0 当前没有可管理 Catalog 资源的官方图形面板。`hop-rs` 已删除旧 Admin Web；`luci-app-hop` 当前只提供服务启停、核心下载和日志等 OpenWrt 外壳设置，不调用 Control API。需要管理资产、凭据、Access Key 或白名单时，当前请使用本机 CLI、manifest 或 `/api/v1`。
+
+后续通用面板和 LuCI 资源页面都必须调用 `/api/v1`，不得直接读写 SQLite，也不得在 UCI 中重复资产、凭据或 Access Key。核心不托管面板静态资源，也不依赖前端仓库。已确认的交付与安全边界见 [v0.2 管理面板交付边界](product/management-panel-v0.2.md)。

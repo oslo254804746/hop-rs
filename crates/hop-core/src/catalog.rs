@@ -263,7 +263,7 @@ async fn preflight(path: &Path) -> Result<DatabaseState> {
     .await?;
     if !has_marker {
         pool.close().await;
-        return Err(legacy_database_error(path));
+        return Err(unsupported_database_error(path));
     }
     let version = sqlx::query_scalar::<_, String>(
         "SELECT schema_version FROM hop_schema WHERE singleton_id = 1",
@@ -273,7 +273,7 @@ async fn preflight(path: &Path) -> Result<DatabaseState> {
     pool.close().await;
     match version.as_deref() {
         Some(SCHEMA_VERSION) => Ok(DatabaseState::V0_2),
-        _ => Err(legacy_database_error(path)),
+        _ => Err(unsupported_database_error(path)),
     }
 }
 
@@ -295,12 +295,12 @@ async fn verify_schema(pool: &SqlitePool, path: &Path) -> Result<()> {
     if version.as_deref() == Some(SCHEMA_VERSION) {
         Ok(())
     } else {
-        Err(legacy_database_error(path))
+        Err(unsupported_database_error(path))
     }
 }
 
-fn legacy_database_error(path: &Path) -> HopCoreError {
-    HopCoreError::LegacyDatabaseUnsupported {
+fn unsupported_database_error(path: &Path) -> HopCoreError {
+    HopCoreError::UnsupportedDatabaseSchema {
         path: PathBuf::from(path),
     }
 }
@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_a_v0_1_database_without_modifying_bytes_or_mtime() {
+    async fn rejects_an_unrecognized_database_without_modifying_bytes_or_mtime() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("hop.db");
         let url = format!("sqlite://{}?mode=rwc", path.display());
@@ -393,7 +393,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            HopCoreError::LegacyDatabaseUnsupported {
+            HopCoreError::UnsupportedDatabaseSchema {
                 path: ref error_path
             }
                 if error_path == &path
