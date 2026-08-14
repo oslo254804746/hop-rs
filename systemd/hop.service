@@ -8,11 +8,10 @@ Type=simple
 User=hop
 Group=hop
 WorkingDirectory=/var/lib/hop
-ExecStart=/usr/local/bin/hop-server serve --config /etc/hop/config.toml
+ExecStart=/usr/local/bin/hop-server --config /etc/hop/config.toml serve
 Restart=on-failure
 RestartSec=2
 Environment=RUST_LOG=info
-Environment=HOP_ADMIN_STATIC_DIR=/usr/share/hop/admin-web
 
 NoNewPrivileges=true
 PrivateTmp=true

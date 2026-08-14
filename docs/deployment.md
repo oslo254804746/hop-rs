@@ -1,446 +1,237 @@
-# Deployment
+# Hop v0.2 deployment and recovery
 
-Production deployment guide for Hop. Covers binary, systemd, Docker, upgrades, backup, and troubleshooting.
+This guide describes the v0.2 clean-break runtime. It does not apply to the v0.1 Admin Web or database.
 
-> **Target platform:** Linux (amd64). Build on Windows/macOS for dev; deploy on Linux, WSL, or Docker.
+## Runtime files
 
----
+Keep these files together under a service-owned directory such as `/var/lib/hop`:
 
-## Ports & Data Files
+| File | Purpose | Backup |
+|---|---|---|
+| `hop.db` | v0.2 Catalog and runtime state | Required |
+| `hop.secret` | Master Key used to encrypt credentials | Required; losing it makes stored credentials unusable |
+| `hop_host_key` | SSH gateway identity | Required to avoid client host-key changes |
+| `config.toml` or `config.yaml` | Startup-only settings | Required |
+| API token file | Optional Control API credential | Required only when API is enabled |
+| manifest, public-key, and secret files | Declarative source material | Required when used |
 
-| File | Purpose | Loss impact |
-|------|---------|-------------|
-| `hop.db` | Assets, keys, sessions, encrypted credentials | Data loss |
-| `hop.secret` | ChaCha20-Poly1305 master key | **All credentials unrecoverable** |
-| `hop_host_key` | Ed25519 SSH host identity | Client host-key warnings |
-| `config.toml` | Listener, path, cookie, timeout, and proxy settings | Service may start with unsafe or incorrect defaults |
+The startup file owns listeners, paths, timeouts, watcher policy, and runtime settings. SQLite is the only runtime truth for credentials, assets, Access Keys, and allowlists. Manifests, the local CLI, and the API only submit Catalog changes.
 
-Default network:
+## Linux binary
+
+Build from source:
+
+```bash
+cargo build --release --locked -p hop-server
+sudo install -m 0755 target/release/hop-server /usr/local/bin/hop-server
+sudo install -d -o hop -g hop -m 0700 /var/lib/hop
+sudo install -d -o root -g hop -m 0750 /etc/hop
+sudo install -m 0640 -o root -g hop config.example.toml /etc/hop/config.toml
+```
+
+Use absolute paths in `/etc/hop/config.toml`:
 
 ```toml
 [server]
-ssh_bind   = "0.0.0.0:2222"
-admin_bind = "127.0.0.1:8080"   # Loopback only — see "Admin Web Access"
+ssh_listen = "0.0.0.0:2222"
+
+[database]
+path = "/var/lib/hop/hop.db"
+
+[api]
+enabled = false
+listen = "127.0.0.1:8083"
+token_file = "/var/lib/hop/control-api.token"
+cors_allowlist = []
+
+[ssh]
+host_key_file = "/var/lib/hop/hop_host_key"
+host_key_type = "ed25519"
+banner = "Welcome to Hop"
+keepalive_interval = 30
+connect_timeout = 10
+proxy_policy = "assets_only"
+
+[security]
+master_key_file = "/var/lib/hop/hop.secret"
+
+[inventory]
+sources = []
+
+[runtime]
+temp_dir = "/tmp/hop"
+log_level = "info"
+session_retention_days = 30
 ```
 
----
+Listener addresses and non-loopback API/CORS policy are validated before the
+Catalog is opened. On `serve`, Hop creates `runtime.temp_dir`, uses
+`runtime.log_level` unless `RUST_LOG` overrides it, and removes ended session
+records older than `session_retention_days`; setting the retention to `0`
+disables automatic cleanup. Cleanup runs at startup rather than through an idle
+write loop.
 
-## Binary + systemd
-
-### 1. Get the binary
-
-```bash
-# Download a release binary
-HOP_VERSION=vX.Y.Z
-curl -fL -o hop-server \
-  "https://github.com/oslo254804746/hop-rs/releases/download/${HOP_VERSION}/hop-server-linux-amd64"
-curl -fL -o hop-admin-web-static.tar.gz \
-  "https://github.com/oslo254804746/hop-rs/releases/download/${HOP_VERSION}/hop-admin-web-static.tar.gz"
-chmod 0755 hop-server
-
-# Or build from source
-cargo build --release -p hop-server
-cp target/release/hop-server ./hop-server
-(cd web/admin && npm ci && npm run build)
-tar -C web/admin/dist -czf hop-admin-web-static.tar.gz .
-```
-
-### 2. Install
-
-```bash
-sudo useradd --system --home-dir /var/lib/hop --shell /usr/sbin/nologin hop
-sudo install -d -o hop -g hop -m 0750 /var/lib/hop
-sudo install -d -m 0755 /etc/hop
-sudo install -d -m 0755 /usr/share/hop/admin-web
-
-sudo install -m 0755 hop-server /usr/local/bin/hop-server
-sudo install -m 0644 config.example.toml /etc/hop/config.toml
-sudo tar -C /usr/share/hop/admin-web -xzf hop-admin-web-static.tar.gz
-```
-
-### 3. Enable service
+The sample [systemd unit](../systemd/hop.service) runs the process as `hop`. Start it only after the paths and ownership are correct:
 
 ```bash
 sudo install -m 0644 systemd/hop.service /etc/systemd/system/hop.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now hop
+sudo journalctl -u hop -f
 ```
 
-First boot prints the admin password:
+First startup creates a new v0.2 database, Master Key, and SSH Host Key. It does not create an administrator password or an HTTP listener.
+
+## Initial resources with the local CLI
+
+Run CLI writes as the same service user so the database and key permissions remain consistent:
 
 ```bash
-sudo journalctl -u hop -n 50 --no-pager
+sudo -u hop /usr/local/bin/hop-server --config /etc/hop/config.toml key add \
+  --name laptop --public-key-file /etc/hop/laptop.pub
+
+printf '%s' 'target-password' | sudo -u hop \
+  /usr/local/bin/hop-server --config /etc/hop/config.toml credential add \
+  --name server-root --username root --auth-type password --password-stdin
+
+sudo -u hop /usr/local/bin/hop-server --config /etc/hop/config.toml \
+  credential list
+sudo -u hop /usr/local/bin/hop-server --config /etc/hop/config.toml \
+  asset add --name server --hostname 192.0.2.10 --port 22 \
+  --credential-id <credential-id>
 ```
 
-After signing in, change the admin password from Admin Web -> Settings. If it is forgotten, run `hop-server reset-admin` to generate a new random password.
+New local keys default to all assets. Restrict one key by internal asset IDs:
 
-Continue with "Initial Data Setup" before the first SSH verification.
+```bash
+hop-server --config /etc/hop/config.toml key access set <key-id> \
+  --mode restricted --asset-id <asset-id>
+hop-server --config /etc/hop/config.toml key access set <key-id> \
+  --mode restricted
+hop-server --config /etc/hop/config.toml key access set <key-id> --mode all
+```
 
----
+The second command creates an empty allowlist; the third restores all current and future assets. Changes affect new connections and do not terminate existing sessions.
+
+## Declarative source and watcher
+
+Validate and preview a complete source scope before applying it:
+
+```bash
+hop-server config validate -f '/etc/hop/resources.d/*.yaml' --offline --json
+hop-server --config /etc/hop/config.toml config diff \
+  -f '/etc/hop/resources.d/*.yaml' --source home --json
+hop-server --config /etc/hop/config.toml apply \
+  -f '/etc/hop/resources.d/*.yaml' --source home --base-revision <revision> --json
+```
+
+Quotes prevent the shell from expanding the glob so Hop can detect a temporarily empty or incomplete scope.
+
+Enable startup loading and stable-snapshot watching with:
+
+```toml
+[[inventory.sources]]
+id = "home"
+path = "/etc/hop/resources.d/*.yaml"
+watch = true
+prune = false
+```
+
+Every configured source is applied once at startup. A watched source is rescanned only after its path/size/mtime snapshot remains stable across two polling intervals. Failed scans and parses record a non-sensitive error in `config status` and retain the previous Catalog. `prune` is false unless explicitly enabled for that source.
+
+Local CRUD cannot edit a declarative resource. The API returns `409 managed_by_source`; the CLI returns the same ownership boundary as a validation error. Hop does not implement field-level or last-file-wins ownership.
+
+## Optional Control API
+
+Create a high-entropy token file before enabling the API:
+
+```bash
+umask 077
+openssl rand -hex 32 | sudo tee /var/lib/hop/control-api.token >/dev/null
+sudo chown hop:hop /var/lib/hop/control-api.token
+```
+
+Then set `api.enabled = true` and restart. Keep the default loopback listener behind a local agent or authenticated TLS reverse proxy. If `api.listen` is not loopback, Hop requires a non-empty `cors_allowlist`; CORS is not a replacement for TLS or network access control.
+
+```bash
+token=$(sudo cat /var/lib/hop/control-api.token)
+curl -H "Authorization: Bearer $token" http://127.0.0.1:8083/api/v1/status
+curl -H "Authorization: Bearer $token" http://127.0.0.1:8083/api/v1/config/status
+```
+
+The API uses one equal-privilege management token. It has no administrator accounts, login form, role, capability, Cookie, or CSRF protocol. Credential reads return secret status only.
 
 ## Docker
 
-### Linux: host network (recommended)
-
-Host network lets the container bind `127.0.0.1:8080` directly on the host — no exposure gymnastics needed.
+The image stores mutable files under `/data`; the bundled config keeps the API off:
 
 ```bash
-HOP_VERSION=vX.Y.Z
-docker run -d \
-  --name hop \
-  --restart unless-stopped \
-  --network host \
+docker build -t hop:0.2.0 .
+mkdir -p data
+docker run -d --name hop --restart unless-stopped \
+  -p 2222:2222 \
   -v "$PWD/data:/data" \
-  -e RUST_LOG=info \
-  ghcr.io/oslo254804746/hop-rs:${HOP_VERSION}
-```
+  hop:0.2.0
 
-### Docker Desktop (macOS/Windows): bridge network
-
-`--network host` on Docker Desktop doesn't give real host access. Use bridge with explicit loopback mapping:
-
-1. First run to generate config:
-   ```bash
-   mkdir -p data
-   HOP_VERSION=vX.Y.Z
-   docker run --rm -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:${HOP_VERSION} hop-server --help >/dev/null
-   ```
-
-2. Edit `data/config.toml`:
-   ```toml
-   [server]
-   admin_bind = "0.0.0.0:8080"
-   ```
-
-3. Start with loopback-only publish:
-   ```bash
-   HOP_VERSION=vX.Y.Z
-   docker run -d \
-     --name hop \
-     --restart unless-stopped \
-     -p 2222:2222 \
-     -p 127.0.0.1:8080:8080 \
-     -v "$PWD/data:/data" \
-     -e RUST_LOG=info \
-     ghcr.io/oslo254804746/hop-rs:${HOP_VERSION}
-   ```
-
-The security boundary is `-p 127.0.0.1:8080:8080` — never use `-p 8080:8080`.
-
-### Docker CLI management
-
-```bash
 docker exec hop hop-server --config /data/config.toml key list
-docker exec hop hop-server --config /data/config.toml asset list
-docker exec hop hop-server --config /data/config.toml credential list
-docker exec hop hop-server --config /data/config.toml reset-admin
-
-# stdin for secrets
-printf '%s' 'secret' | docker exec -i hop hop-server --config /data/config.toml \
-  credential add --name deploy --username deploy --auth-type password --password-stdin
 ```
 
-Use Admin Web -> Settings to change the password after the first login; keep `reset-admin` for password recovery.
+Do not publish port 8083 unless the API is intentionally enabled and protected. Docker is an optional distribution path, not a runtime dependency.
 
----
+## Backup
 
-## Admin Web Access
-
-Admin Web binds to `127.0.0.1:8080` by default. Remote access options:
+The simplest consistent backup stops writes, copies the complete trust material, and restarts:
 
 ```bash
-# SSH tunnel (recommended)
-ssh -N -L 8080:127.0.0.1:8080 root@hop-host
-# Then open http://127.0.0.1:8080 locally
-```
-
-If you change `admin_bind` to `0.0.0.0:8080`, the server logs a warning. Protect with firewall / VPN / trusted management network.
-
-For Dashboard, assets, credentials, SSH access, Known Hosts, audit evidence,
-and progressive team administration, see the [Admin Web guide](admin-guide.md).
-
----
-
-## Initial Data Setup
-
-Run this before the first SSH login. Hop entry auth and target auth are separate:
-
-Two types of auth data — don't confuse them:
-
-| Command | Controls | Used for |
-|---------|----------|----------|
-| `key add` | Who can SSH into Hop on `:2222` | Hop entry (pubkey whitelist) |
-| `credential add` | How Hop connects to targets | Managed connections (TUI/direct) |
-
-```bash
-hop-server --config /etc/hop/config.toml key add \
-  --name "alice laptop" \
-  --public-key-file ~/.ssh/id_ed25519.pub
-
-printf '%s' 'secret' | hop-server --config /etc/hop/config.toml credential add \
-  --name deploy-password \
-  --username deploy \
-  --auth-type password \
-  --password-stdin
-
-hop-server --config /etc/hop/config.toml asset add \
-  --name web-prod-01 \
-  --hostname 10.0.1.10 \
-  --port 22 \
-  --tags prod,web \
-  --credential-id <id>
-```
-
-`credential add` prints the credential ID for `--credential-id`. Assets without a credential are proxy-only: they can be reached through ProxyJump, but TUI and direct-connect mode require a managed credential.
-
-Verify SSH after adding data:
-
-```bash
-ssh -p 2222 hop-host             # TUI
-ssh -p 2222 web-prod-01@hop-host # Direct connect with managed credential
-ssh -p 2222 web-prod-01@hop-host 'uname -a' # Managed remote command
-sftp -P 2222 web-prod-01@hop-host # Managed SFTP subsystem
-ssh -J hop-host:2222 web-prod-01.hop # ProxyJump TCP relay
-```
-
-The SSH authentication banner is sent before the client selects shell, exec,
-or subsystem mode. It therefore appears on stderr for remote commands and file
-transfer too. Set `ssh.banner = ""` for automation that requires clean stderr.
-
-Each active Hop SSH key uses one of two asset access modes. `all` includes every
-current and future asset. `restricted` includes only explicitly assigned asset
-IDs; an empty assignment grants no asset access. Existing keys migrate to `all`,
-so an upgrade preserves their current behavior.
-
-Use Admin Web → Keys → Edit to choose a mode and filter/check assets, or use:
-
-```bash
-hop-server key access show <key-id>
-hop-server key access set <key-id> --mode restricted \
-  --asset-id <asset-id> --asset-id <asset-id>
-hop-server key access set <key-id> --mode restricted # Revoke all asset access
-hop-server key access set <key-id> --mode all        # Include future assets
-```
-
-Entry-key authorization and target credentials are separate. The key grants
-access to an asset; the asset's credential authenticates managed SSH and SFTP
-connections to the target. TUI, direct SSH, remote commands, SFTP, ProxyJump, and generic
-`direct-tcpip` forwarding enforce the same per-key policy. RDP, VNC, MySQL,
-PostgreSQL, Redis, and Generic TCP presets only provide port defaults and
-examples.
-
----
-
-## Bulk Import/Export
-
-```bash
-# Export assets to CSV
-hop-server export --kind assets --format csv --output assets.csv
-
-# Import with conflict handling
-hop-server import --file assets.csv --on-conflict skip|overwrite|error
-
-# Also works for credentials
-hop-server export --kind credentials --format json --output creds.json
-hop-server import --kind credentials --file creds.json
-```
-
-Credential import/export is metadata-only. It transfers `name`, `username`, and `auth_type`, but never exports passwords, private keys, or passphrases.
-Key-to-asset assignments are not part of these transfer formats. They are stored
-in `hop.db`, so the normal database backup includes them without an extra file.
-
----
-
-## Upgrade
-
-Hop applies pending SQLite migrations during startup. Treat an upgrade as a
-data migration, not only a binary or image replacement.
-
-If Hop is the only path to the machines behind it, do not perform a remote
-upgrade until you have an alternate management path such as a host-level SSH
-route, VPN, second jump host, or local console.
-
-Before every upgrade:
-
-1. Download or pull the new version before the maintenance window.
-2. Keep the previous binary or container image.
-3. Stop Hop before copying SQLite data.
-4. Back up the complete persistent data directory and configuration.
-5. Record `asset list`, `key list`, and `credential list` for comparison.
-6. After startup, verify Admin login and one real end-to-end SSH path.
-
-### v0.1.4 to v0.1.5 compatibility
-
-v0.1.5 adds migrations 005 and 006. They preserve existing assets,
-credentials, authorized SSH keys, key-to-asset assignments, Known Hosts,
-sessions, and the local admin password. The existing local administrator
-becomes an Owner and the one-admin login remains password-only.
-
-After v0.1.5 migrates `hop.db`, v0.1.4 rejects that database because it does
-not know migrations 005 and 006. A rollback must restore the pre-upgrade data
-backup as well as the v0.1.4 binary or image. Changing only the version tag is
-not a valid rollback.
-
-### Binary
-
-Download and verify both release artifacts before stopping the service:
-
-```bash
-HOP_VERSION=v0.1.7
-BACKUP_DIR="$PWD/hop-backup-before-${HOP_VERSION}-$(date +%Y%m%d%H%M%S)"
-mkdir -m 0700 "$BACKUP_DIR"
-
-curl -fLO \
-  "https://github.com/oslo254804746/hop-rs/releases/download/${HOP_VERSION}/hop-server-linux-amd64"
-curl -fLO \
-  "https://github.com/oslo254804746/hop-rs/releases/download/${HOP_VERSION}/hop-server-linux-amd64.sha256"
-curl -fLO \
-  "https://github.com/oslo254804746/hop-rs/releases/download/${HOP_VERSION}/hop-admin-web-static.tar.gz"
-curl -fLO \
-  "https://github.com/oslo254804746/hop-rs/releases/download/${HOP_VERSION}/hop-admin-web-static.tar.gz.sha256"
-
-sha256sum -c hop-server-linux-amd64.sha256
-sha256sum -c hop-admin-web-static.tar.gz.sha256
-
 sudo systemctl stop hop
-sudo tar -C /var/lib -czf "$BACKUP_DIR/hop-data.tgz" hop
-sudo tar -C /etc -czf "$BACKUP_DIR/hop-config.tgz" hop
-sudo tar -C /usr/share -czf "$BACKUP_DIR/hop-admin-web.tgz" hop/admin-web
-sudo cp -a /usr/local/bin/hop-server "$BACKUP_DIR/hop-server.previous"
-
-sudo install -m 0755 hop-server-linux-amd64 /usr/local/bin/hop-server
-sudo tar -C /usr/share/hop/admin-web -xzf hop-admin-web-static.tar.gz
+sudo install -d -m 0700 /srv/backups/hop-$(date +%F)
+sudo cp -a /var/lib/hop/hop.db /var/lib/hop/hop.secret \
+  /var/lib/hop/hop_host_key /srv/backups/hop-$(date +%F)/
+sudo cp -a /etc/hop /srv/backups/hop-$(date +%F)/etc-hop
 sudo systemctl start hop
-
-sudo journalctl -u hop -n 50 --no-pager
-sudo -u hop sh -c 'cd /var/lib/hop && /usr/local/bin/hop-server --config /etc/hop/config.toml asset list'
-sudo -u hop sh -c 'cd /var/lib/hop && /usr/local/bin/hop-server --config /etc/hop/config.toml key list'
-sudo -u hop sh -c 'cd /var/lib/hop && /usr/local/bin/hop-server --config /etc/hop/config.toml credential list'
 ```
 
-If verification fails, restore the stopped-service snapshot instead of opening
-the migrated database with the old binary:
+If the API token, manifest secrets, or public-key files live elsewhere, include them. Do not back up only `hop.db`: encrypted credentials require the matching Master Key.
+
+## Restore and rebuild
+
+For an exact restore, stop Hop and restore the database, Master Key, Host Key, startup config, and source files with their original service ownership. Start Hop and verify:
 
 ```bash
-FAILED_SUFFIX="$(date +%Y%m%d%H%M%S)"
-sudo systemctl stop hop
-sudo mv /var/lib/hop "/var/lib/hop.failed-${FAILED_SUFFIX}"
-sudo mv /etc/hop "/etc/hop.failed-${FAILED_SUFFIX}"
-sudo mv /usr/share/hop/admin-web "/usr/share/hop/admin-web.failed-${FAILED_SUFFIX}"
-sudo tar -C /var/lib -xzf "$BACKUP_DIR/hop-data.tgz"
-sudo tar -C /etc -xzf "$BACKUP_DIR/hop-config.tgz"
-sudo tar -C /usr/share -xzf "$BACKUP_DIR/hop-admin-web.tgz"
-sudo install -m 0755 "$BACKUP_DIR/hop-server.previous" /usr/local/bin/hop-server
-sudo systemctl start hop
-sudo journalctl -u hop -n 50 --no-pager
+sudo -u hop hop-server --config /etc/hop/config.toml config status --json
+sudo -u hop hop-server --config /etc/hop/config.toml asset list
+sudo -u hop hop-server --config /etc/hop/config.toml key list
 ```
 
-### Docker
+For a clean rebuild, keep the source manifests and secret files, choose an empty database path, then run `apply`. Runtime sessions, health, audit history, and TOFU Known Hosts are intentionally not reconstructed from manifests.
 
-Pull first, then stop the container before archiving the bind-mounted data:
+## v0.1 databases
 
-```bash
-HOP_VERSION=v0.1.7
-BACKUP_DIR="$PWD/hop-backup-before-${HOP_VERSION}-$(date +%Y%m%d%H%M%S)"
-mkdir -m 0700 "$BACKUP_DIR"
+Never point v0.2 at the only copy of a v0.1 database. Hop opens a non-empty existing file read-only for schema preflight and rejects anything without the exact `hop/v0.2` marker. It does not migrate, import, rename, drop, or alter the old file.
 
-docker pull "ghcr.io/oslo254804746/hop-rs:${HOP_VERSION}"
-docker inspect hop > "$BACKUP_DIR/hop-container.json"
-docker stop hop
-tar -C "$PWD" -czf "$BACKUP_DIR/hop-data.tgz" data
-docker image inspect ghcr.io/oslo254804746/hop-rs:v0.1.4 \
-  > "$BACKUP_DIR/hop-image-v0.1.4.json"
-docker rm hop
+Recovery choices are intentionally explicit:
 
-# Re-run the original docker run command with only the image tag changed:
-# ghcr.io/oslo254804746/hop-rs:v0.1.7
+1. stop the old process and back up its whole data directory;
+2. delete or move the old database and let v0.2 create a fresh Catalog; or
+3. set `database.path` to a new file and rebuild resources through v0.2 CLI/manifest/API inputs.
 
-docker logs --tail 100 hop
-docker exec hop hop-server --config /data/config.toml asset list
-docker exec hop hop-server --config /data/config.toml key list
-docker exec hop hop-server --config /data/config.toml credential list
-```
+There is no compatibility reader or automated old-data importer.
 
-To roll back:
+## OpenWrt
 
-```bash
-FAILED_SUFFIX="$(date +%Y%m%d%H%M%S)"
-docker stop hop
-docker rm hop
-mv data "data.failed-${FAILED_SUFFIX}"
-tar -C "$PWD" -xzf "$BACKUP_DIR/hop-data.tgz"
-
-# Re-run the original command with:
-# ghcr.io/oslo254804746/hop-rs:v0.1.4
-```
-
-For Docker Compose, keep the same sequence: pull the pinned image, stop the Hop
-service, back up the bind mount or named volume, change the pinned tag, then
-run `docker compose up -d`. Restore the pre-upgrade volume before selecting
-v0.1.4 during rollback.
-
----
-
-## Backup & Restore
-
-Stop Hop before copying `hop.db`; this avoids a snapshot split across the
-SQLite database, WAL, and shared-memory files. Back up the whole data directory
-instead of selecting only the three known filenames so future migrations and
-support files are included automatically.
-
-```bash
-# Binary deployment
-BACKUP_DIR="$PWD/hop-backup-$(date +%Y%m%d%H%M%S)"
-mkdir -m 0700 "$BACKUP_DIR"
-sudo systemctl stop hop
-sudo tar -C /var/lib -czf "$BACKUP_DIR/hop-data.tgz" hop
-sudo tar -C /etc -czf "$BACKUP_DIR/hop-config.tgz" hop
-sudo systemctl start hop
-
-# Docker
-BACKUP_DIR="$PWD/hop-backup-$(date +%Y%m%d%H%M%S)"
-mkdir -m 0700 "$BACKUP_DIR"
-docker stop hop
-tar -C "$PWD" -czf "$BACKUP_DIR/hop-data.tgz" data
-docker start hop
-```
-
-Restore in the reverse order: stop Hop, move the current data directory aside,
-extract the backup into its original parent directory, restore config when
-needed, and start Hop. Moving the failed directory aside preserves evidence and
-avoids mixing a restored database with stale WAL files.
-
----
+The separate `luci-app-hop` repository provides an architecture-independent LuCI/procd control package. It does not compile or embed Rust. On the first enabled start it downloads the matching static `hop-server` release archive, verifies it against `SHA256SUMS`, self-checks it, and installs it atomically. UCI does not own Catalog resources. See [OpenWrt distribution and footprint](openwrt.md).
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `Permission denied (publickey)` | User pubkey not in whitelist | `hop-server key add` then verify `key list` shows active |
-| Target auth failure | Wrong credential bound to asset | Check `credential list`, verify username/password/key |
-| Host key mismatch | Target host reinstalled | Admin Web → Known Hosts → delete stale target entry, then reconnect |
-| Admin Web unreachable remotely | Loopback binding (by design) | Use SSH tunnel or adjust `admin_bind` with protection |
-| Docker Desktop can't reach Admin | `--network host` doesn't work on Desktop | Use bridge, set `admin_bind = "0.0.0.0:8080"`, and publish `-p 127.0.0.1:8080:8080` |
-| `DB locked` | Another process holds SQLite | Check for duplicate `hop-server` instances |
-
----
-
-## systemd Unit Reference
-
-```ini
-[Service]
-Type=simple
-User=hop
-WorkingDirectory=/var/lib/hop
-ExecStart=/usr/local/bin/hop-server serve --config /etc/hop/config.toml
-Restart=on-failure
-Environment=RUST_LOG=info
-
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=true
-ReadWritePaths=/var/lib/hop
-```
-
-Full unit file: [`systemd/hop.service`](../systemd/hop.service)
+| Symptom | Check |
+|---|---|
+| `legacy_database_unsupported` | Back up the old database and use a fresh v0.2 path |
+| `Permission denied (publickey)` | The ingress public key fingerprint is active in `key list` |
+| Asset missing from TUI | Inspect `key access show <key-id>` and `config status` orphans |
+| Direct/exec/SFTP rejected | The key must reach the asset and an SSH asset must reference a credential |
+| Proxy target rejected | The target must resolve to an authorized Catalog asset by name or host/port |
+| `managed_by_source` | Modify the owning manifest source instead of local CRUD |
+| `revision_conflict` | Fetch the current revision, recompute diff, and retry intentionally |
+| Watcher did not delete | Default is orphan; use explicit absent or opt-in prune |
+| API port absent | Expected while `api.enabled = false` |
+| Database decrypt failures | Restore the Master Key paired with that database |

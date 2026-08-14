@@ -1,122 +1,117 @@
-# Admin Web 使用指南
+# Hop v0.2 Control API 与本地管理
 
-**简体中文** | [English](admin-guide.md)
+Hop v0.2 不包含 Admin Web、管理员账号或角色协议。一个实例属于一个管理信任域，管理入口是本机 CLI、声明式 Apply，以及一枚等权管理 Token 保护的可选 Control API。
 
-Hop Admin Web 面向个人跳板机和小型运维团队设计。只有一位管理员时，登录和设置保持简单；只有 Owner 主动添加第二位管理员后，才展开多人相关交互。
+## 启用 API
 
-部署、端口暴露、备份和恢复请使用唯一的 [Deployment Runbook](deployment.md)，避免中英文命令长期漂移。
+API 默认关闭，关闭时不会创建 HTTP listener。先创建高熵、权限受控的 Token 文件，再配置 loopback 地址并重启：
 
-## 安全打开 Admin Web
-
-Admin Web 默认监听 `127.0.0.1:8080`。管理远程 Hop 时建议保持默认配置并使用 SSH 隧道：
-
-```bash
-ssh -N -L 8080:127.0.0.1:8080 root@hop-host
+```toml
+[api]
+enabled = true
+listen = "127.0.0.1:8083"
+token_file = "/var/lib/hop/control-api.token"
+cors_allowlist = []
 ```
 
-然后打开 `http://127.0.0.1:8080`。
+所有请求必须携带：
 
-如果由反向代理终止 HTTPS，请设置 `security.admin_cookie_secure = true`。不要把 Admin 端口直接发布到不受信任的网络。
+```http
+Authorization: Bearer <token>
+```
 
-## 登录行为
+非 loopback 监听必须声明非空 `cors_allowlist`，并应由 TLS 与网络访问控制保护；CORS 本身不是安全边界。
 
-- 只有一位有效管理员时，登录页只要求密码。
-- 添加第二位有效管理员后，登录页才显示账号名。
-- 账号名匹配不区分大小写。
-- 新管理员使用至少 12 个字符的临时密码，首次登录后必须先更换密码才能修改配置。
-- Admin 会话空闲 30 分钟后失效；会话只保存在内存中，因此重启 Hop 会让管理员重新登录。
+## 接口
 
-从 v0.1.4 迁移的本地管理员保留原密码，并成为 Owner。
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/api/v1/status` | 健康、版本、Catalog revision |
+| GET | `/api/v1/catalog/revision` | 乐观并发 revision |
+| GET/POST | `/api/v1/assets` | 列出/创建本地资产 |
+| PUT/DELETE | `/api/v1/assets/{id}` | 更新/删除本地资产 |
+| GET/POST | `/api/v1/credentials` | 列出 secret 状态/创建本地凭据 |
+| PUT/DELETE | `/api/v1/credentials/{id}` | 更新/删除本地凭据 |
+| GET/POST | `/api/v1/access-keys` | 列出/创建本地 Access Key |
+| DELETE | `/api/v1/access-keys/{id}` | 吊销并删除本地 Key |
+| PUT | `/api/v1/access-keys/{id}/enabled` | 启用或禁用 Key |
+| PUT | `/api/v1/access-keys/{id}/access` | 替换 all/restricted 资产范围 |
+| GET | `/api/v1/sessions` | 最近会话 |
+| POST | `/api/v1/sessions/{id}/terminate` | 显式终止已登记的活动会话 |
+| GET | `/api/v1/config/sources` | source 成功/失败与 generation |
+| GET | `/api/v1/config/status` | source、orphan、schema 和 revision |
+| POST | `/api/v1/config/validate` | 校验 manifest 内容 |
+| POST | `/api/v1/config/diff` | 只读 diff |
+| POST | `/api/v1/config/apply` | 携带 base revision 的原子 apply |
+| POST | `/api/v1/config/reload` | 通过同一 Apply engine 重载启动配置中的 source |
 
-## Dashboard
+凭据响应不会返回明文、加密 envelope、私钥或密码，只返回 `configured`/`missing`。Access Key 响应不返回公钥正文，只返回名称、指纹、状态、模式和已分配资产 ID。
 
-Dashboard 使用真实运行态和数据库数据：
+## 本地 CRUD
 
-- **Gateway 状态**：检查 Admin/SSH 监听、SQLite、运行版本、启动时间和运行时长。
-- **近期 SSH 访问**：展示身份、目标、连接模式、结果和持续时间。
-- **近期管理变更**：来自独立的 `audit_events`。
-- **资产健康**：由真实 SSH 或 TCP 连接结果更新；新建或从未连接的资产保持 `unknown`。
-- **行动项**：提示失败或未知资产、缺少托管凭据、缺少有效 SSH 入口身份，以及 Dashboard 数据源失败。
-- **覆盖率**：同时给出托管凭据、受限访问和 Known Hosts 的数量与百分比。
+创建密码凭据：
 
-单个数据源失败时，只降级对应区块，不会让整个 Dashboard 失效。
+```json
+{
+  "name": "root",
+  "username": "root",
+  "auth_type": "password",
+  "password": "request-only-secret"
+}
+```
 
-## 资产
+`auth_type` 支持 `password`、`key` 和 `key_passphrase`。更新时省略 secret 会保留与认证类型兼容的现有值；切换认证类型必须提交新类型需要的材料。
 
-资产页是日常运维库存入口：
+创建资产：
 
-- 搜索名称、地址、描述、协议、预设和标签。
-- 按标签筛选，并对选中的多个资产批量应用标签。
-- 不打开编辑表单即可复制 `hostname:port`。
-- 在抽屉中编辑资产，同时保留当前列表、搜索和筛选上下文。
-- 为 SSH 资产绑定托管凭据。
-- 使用 RDP、VNC、MySQL、PostgreSQL、Redis 或 Generic TCP 预设获取端口默认值和客户端提示。
+```json
+{
+  "name": "server",
+  "protocol": "ssh",
+  "hostname": "192.0.2.10",
+  "port": 22,
+  "credential_id": "<credential-id>",
+  "tags": ["home"]
+}
+```
 
-预设不会让 Hop 变成应用层代理；通用转发仅支持 TCP。
+TCP 资产使用 `protocol: "tcp"`，不带凭据，可用 `rdp`、`vnc`、`mysql`、`postgres` 或 `redis` preset。
 
-## 凭据
+创建 Access Key：
 
-凭据描述 Hop 如何认证到 SSH 目标，供托管 TUI、直连 SSH 和 SFTP 使用：
+```json
+{
+  "name": "laptop",
+  "public_key": "ssh-ed25519 AAAA...",
+  "assets": []
+}
+```
 
-- 在抽屉中创建或编辑凭据。
-- 认证方式只显示对应的必要敏感字段。
-- 保存后的敏感值会加密，且不会重新回显到浏览器。
-- 编辑时将敏感字段留空，会保留现有加密值；只有轮换时才需要输入替代值。
-- 列表显示每个凭据被多少资产使用。
-- 仍被资产引用的凭据不能删除。
-- CSV/JSON 导出仅包含元数据，不包含密码、私钥或 passphrase。
+创建/更新 Key 范围时，省略 `assets` 表示全部资产，`[]` 表示不能访问任何资产，非空数组是内部资产 ID 的严格白名单。
 
-必须将 `hop.secret` 与 `hop.db` 一起备份。丢失 `hop.secret` 后，所有已保存凭据都无法恢复。
+普通 CRUD 只能修改 `local` 资源。修改声明式资源会返回 HTTP 409 和 `managed_by_source`；应修改拥有该资源的 manifest 后重新 apply。
 
-## People & SSH Access
+## Validate、diff 与 apply
 
-SSH 公钥决定谁能进入 Hop，以及该公钥可以访问哪些资产；它与目标凭据相互独立：
+API payload 传 manifest 内容，不接受服务器任意文件路径：
 
-- `all`：可访问当前和未来新增的全部资产。
-- `restricted`：只能访问明确选择的资产 ID。
-- 空的 `restricted` 分配允许认证进入 Hop，但不会显示或连接任何资产。
+```json
+{
+  "content": "api_version: hop/v1alpha1\nassets: {}\n",
+  "format": "yaml",
+  "source_id": "panel",
+  "base_revision": 12,
+  "prune": false,
+  "dry_run": false
+}
+```
 
-TUI、直连 SSH、SFTP、ProxyJump 和通用 `direct-tcpip` 转发都执行相同的按 Key 资产授权。
+Apply 必须携带 `/api/v1/catalog/revision` 返回的 revision。过期值返回 `409 revision_conflict`。错误使用稳定 code 与资源 path；失败只记录非敏感 source/审计摘要，不产生部分资源修改。Dry-run 不写 Catalog。
 
-## Known Hosts
+## 会话语义
 
-Known Hosts 保存目标 SSH 主机的 TOFU 信任：
+禁用 Key、收紧白名单、修改凭据或删除资产会影响新连接，默认不终止已有 SSH stream。需要紧急阻断时调用显式 terminate 接口。
 
-- 查看目标、密钥类型和指纹。
-- 复制指纹，在带外渠道进行比对。
-- 查看记录是否匹配现有资产。
-- 只有在目标确实重装或明确轮换主机密钥后才重置信任。
+## 外部面板边界
 
-重置会删除现有信任记录；下次连接会生成新的 TOFU 记录，因此应先验证新指纹。
-
-## 审计日志
-
-审计页合并两个证据流：
-
-- SSH 会话：身份、连接模式、目标、客户端地址、结果、开始/结束时间和错误上下文。
-- 管理事件：操作者、动作、对象、结果、来源地址和白名单化结构数据。
-
-密码、私钥、passphrase 和上传的敏感内容不会写入审计详情。
-
-v0.1.5 展示最近 100 条 SSH 会话和 100 条管理事件。查询筛选、分页、留存设置和审计导出仍在后续计划中，尚未属于 v0.1.5。
-
-## 不暴露重型 RBAC 的多人管理
-
-Hop 对用户只展示三个任务化访问级别：
-
-| 访问级别 | 可以完成的任务 |
-|----------|----------------|
-| Owner | 全部能力，包括管理员和访问级别管理 |
-| Operator | 查看库存与审计；管理资产、凭据、SSH 访问和 Known Hosts |
-| Viewer | 只读查看 Dashboard、库存和审计，不可修改配置 |
-
-只有 Owner 可以添加管理员或修改其访问级别与启用状态。Hop 不允许停用或降级最后一位有效 Owner。修改某位管理员的访问级别或启用状态后，该管理员的当前会话会立即失效。
-
-## v0.1.5 当前边界
-
-- 仅支持本地密码登录，尚无 OIDC 或外部身份源。
-- 只有三个固定访问级别，不提供自定义策略编辑器。
-- 尚无将一个人的多个 SSH Key 聚合到一起的 People 实体。
-- 尚无审计筛选、分页、导出和留存设置。
-- 资产健康由真实连接事件更新，不是持续后台监控系统。
-
+独立面板或可选 LuCI 可以调用 `/api/v1`，但不得直接读写 SQLite，也不得在 UCI 中重复资产、凭据或 Access Key。核心不托管面板静态资源，也不依赖前端仓库。

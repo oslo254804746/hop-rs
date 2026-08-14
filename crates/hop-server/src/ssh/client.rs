@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use hop_core::{
-    decrypt_envelope, validate_tcp_port, Asset, AuthType, Credential, HopDb, MasterKey,
+    decrypt_envelope, validate_tcp_port, Asset, AuthType, Catalog, Credential, MasterKey,
 };
 use russh::{
     client,
@@ -14,7 +14,7 @@ use super::tofu;
 
 #[derive(Clone)]
 pub(crate) struct TofuClient {
-    db: HopDb,
+    db: Catalog,
     hostname: String,
     port: i64,
 }
@@ -36,7 +36,7 @@ pub struct ManagedTarget {
 }
 
 pub async fn connect_asset_shell(
-    db: HopDb,
+    db: Catalog,
     master_key: Arc<MasterKey>,
     asset: &Asset,
     width: u32,
@@ -53,7 +53,7 @@ pub async fn connect_asset_shell(
 }
 
 pub async fn connect_asset_exec(
-    db: HopDb,
+    db: Catalog,
     master_key: Arc<MasterKey>,
     asset: &Asset,
     command: Vec<u8>,
@@ -74,7 +74,7 @@ pub async fn connect_asset_exec(
 }
 
 pub async fn connect_asset_sftp(
-    db: HopDb,
+    db: Catalog,
     master_key: Arc<MasterKey>,
     asset: &Asset,
     timeout: Duration,
@@ -116,7 +116,7 @@ fn request_reply_received(message: Option<ChannelMsg>, request: &str) -> Result<
 }
 
 async fn connect_authenticated_asset(
-    db: HopDb,
+    db: Catalog,
     master_key: Arc<MasterKey>,
     asset: &Asset,
     timeout: Duration,

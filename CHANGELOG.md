@@ -4,6 +4,28 @@ All notable user-visible changes to Hop are recorded here.
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced the v0.1 migration chain with a fresh `hop/v0.2` SQLite Catalog
+  baseline. Existing non-v0.2 databases are rejected read-only with explicit
+  backup/delete/new-path guidance.
+- Added strict YAML/TOML validate, diff, dry-run, atomic apply, revision
+  conflicts, source ownership, orphan status, and opt-in prune.
+- Unified TUI, direct SSH, exec, SCP/SFTP, ProxyJump, TCP forwarding, and TCP
+  presets on the same all/restricted Access Key boundary.
+- Added a default-off, loopback Control API with one management token, local
+  resource CRUD, session termination, and declarative operations.
+- Removed the built-in Admin Web, its Node/Docker/release-asset pipeline,
+  administrator accounts, cookies, CSRF, Owner/Operator/Viewer roles,
+  capability code, and `reset-admin`.
+- Added stable-snapshot inventory watching through the same Apply engine and
+  an OpenWrt core-package boundary with procd/UCI service integration.
+
+### Compatibility
+
+- v0.2 is intentionally incompatible with v0.1 data and provides no migration,
+  import, compatibility reader, or dual-version mode.
+
 ## [0.1.7] - 2026-08-09
 
 ### Fixed
@@ -83,4 +105,3 @@ See the [full v0.1.5 release notes](docs/releases/v0.1.5.md).
 [0.1.7]: https://github.com/oslo254804746/hop-rs/releases/tag/v0.1.7
 [0.1.6]: https://github.com/oslo254804746/hop-rs/releases/tag/v0.1.6
 [0.1.5]: https://github.com/oslo254804746/hop-rs/releases/tag/v0.1.5
-

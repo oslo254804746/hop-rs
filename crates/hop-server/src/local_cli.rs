@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf};
 
 use anyhow::{bail, Context, Result};
 use hop_core::{
-    encrypt_envelope, new_id, validate_credential_material, AssetAccessMode, AuthType, HopDb,
+    encrypt_envelope, new_id, validate_credential_material, AssetAccessMode, AuthType, Catalog,
     MasterKey, NewAsset, NewAuthorizedKey, NewCredential,
 };
 use russh::keys::{parse_public_key_base64, ssh_key::HashAlg, PublicKeyBase64};
@@ -22,7 +22,7 @@ pub fn parse_public_key_line(line: &str) -> Result<(String, String)> {
 }
 
 pub async fn add_key(
-    db: &HopDb,
+    db: &Catalog,
     name: String,
     public_key: Option<String>,
     public_key_file: Option<PathBuf>,
@@ -43,7 +43,7 @@ pub async fn add_key(
     Ok(())
 }
 
-pub async fn list_keys(db: &HopDb) -> Result<()> {
+pub async fn list_keys(db: &Catalog) -> Result<()> {
     for key in db.list_authorized_keys().await? {
         println!(
             "{}\t{}\t{}\t{}",
@@ -56,7 +56,7 @@ pub async fn list_keys(db: &HopDb) -> Result<()> {
     Ok(())
 }
 
-pub async fn set_key_active(db: &HopDb, id: &str, active: bool) -> Result<()> {
+pub async fn set_key_active(db: &Catalog, id: &str, active: bool) -> Result<()> {
     db.set_authorized_key_active(id, active).await?;
     println!(
         "key {id} {}",
@@ -65,12 +65,12 @@ pub async fn set_key_active(db: &HopDb, id: &str, active: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn show_key_access(db: &HopDb, id: &str) -> Result<()> {
+pub async fn show_key_access(db: &Catalog, id: &str) -> Result<()> {
     print!("{}", format_key_access(db, id).await?);
     Ok(())
 }
 
-async fn format_key_access(db: &HopDb, id: &str) -> Result<String> {
+async fn format_key_access(db: &Catalog, id: &str) -> Result<String> {
     let key = db
         .get_authorized_key_by_id(id)
         .await?
@@ -97,7 +97,7 @@ async fn format_key_access(db: &HopDb, id: &str) -> Result<String> {
 }
 
 pub async fn set_key_access(
-    db: &HopDb,
+    db: &Catalog,
     id: &str,
     mode: AssetAccessMode,
     asset_ids: Vec<String>,
@@ -115,7 +115,7 @@ pub async fn set_key_access(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn add_credential(
-    db: &HopDb,
+    db: &Catalog,
     master_key: &MasterKey,
     name: String,
     username: String,
@@ -179,7 +179,7 @@ pub async fn add_credential(
     Ok(())
 }
 
-pub async fn list_credentials(db: &HopDb) -> Result<()> {
+pub async fn list_credentials(db: &Catalog) -> Result<()> {
     for credential in db.list_credentials().await? {
         println!(
             "{}\t{}\t{}\t{}",
@@ -189,13 +189,13 @@ pub async fn list_credentials(db: &HopDb) -> Result<()> {
     Ok(())
 }
 
-pub async fn delete_credential(db: &HopDb, id: &str) -> Result<()> {
+pub async fn delete_credential(db: &Catalog, id: &str) -> Result<()> {
     db.delete_credential(id).await?;
     println!("deleted credential {id}");
     Ok(())
 }
 
-pub async fn add_asset(db: &HopDb, asset: NewAsset) -> Result<()> {
+pub async fn add_asset(db: &Catalog, asset: NewAsset) -> Result<()> {
     let asset = db.add_asset(asset).await?;
     let kind = asset.preset.as_deref().unwrap_or(&asset.protocol);
     println!(
@@ -205,7 +205,7 @@ pub async fn add_asset(db: &HopDb, asset: NewAsset) -> Result<()> {
     Ok(())
 }
 
-pub async fn list_assets(db: &HopDb) -> Result<()> {
+pub async fn list_assets(db: &Catalog) -> Result<()> {
     for asset in db.list_assets().await? {
         let kind = asset.preset.as_deref().unwrap_or(&asset.protocol);
         println!(
@@ -222,7 +222,7 @@ pub async fn list_assets(db: &HopDb) -> Result<()> {
     Ok(())
 }
 
-pub async fn delete_asset(db: &HopDb, id: &str) -> Result<()> {
+pub async fn delete_asset(db: &Catalog, id: &str) -> Result<()> {
     db.delete_asset(id).await?;
     println!("deleted asset {id}");
     Ok(())
@@ -243,7 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn key_access_format_lists_mode_and_assignments() {
-        let db = HopDb::in_memory().await.unwrap();
+        let db = Catalog::in_memory().await.unwrap();
         let key = db
             .add_authorized_key(NewAuthorizedKey::new(
                 "laptop",
@@ -272,7 +272,7 @@ mod tests {
 
     #[tokio::test]
     async fn key_access_rejects_assets_in_all_mode_without_changes() {
-        let db = HopDb::in_memory().await.unwrap();
+        let db = Catalog::in_memory().await.unwrap();
         let key = db
             .add_authorized_key(NewAuthorizedKey::new(
                 "laptop",

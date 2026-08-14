@@ -44,15 +44,7 @@ impl Drop for MasterKey {
 
 pub fn load_or_create_master_key(path: &Path) -> Result<MasterKey> {
     if path.exists() {
-        check_secret_permissions(path)?;
-        let raw = fs::read_to_string(path)?;
-        let decoded = STANDARD
-            .decode(raw.trim())
-            .map_err(|err| HopCoreError::Crypto(format!("invalid secret key base64: {err}")))?;
-        let bytes: [u8; KEY_LEN] = decoded
-            .try_into()
-            .map_err(|_| HopCoreError::Crypto("secret key must decode to 32 bytes".to_string()))?;
-        return Ok(MasterKey::from_bytes(bytes));
+        return load_master_key(path);
     }
 
     if let Some(parent) = path.parent() {
@@ -65,6 +57,18 @@ pub fn load_or_create_master_key(path: &Path) -> Result<MasterKey> {
     fs::write(path, STANDARD.encode(key.expose()))?;
     set_secret_permissions(path)?;
     Ok(key)
+}
+
+pub fn load_master_key(path: &Path) -> Result<MasterKey> {
+    check_secret_permissions(path)?;
+    let raw = fs::read_to_string(path)?;
+    let decoded = STANDARD
+        .decode(raw.trim())
+        .map_err(|err| HopCoreError::Crypto(format!("invalid secret key base64: {err}")))?;
+    let bytes: [u8; KEY_LEN] = decoded
+        .try_into()
+        .map_err(|_| HopCoreError::Crypto("secret key must decode to 32 bytes".to_string()))?;
+    Ok(MasterKey::from_bytes(bytes))
 }
 
 #[cfg(unix)]

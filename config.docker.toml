@@ -1,8 +1,11 @@
 [server]
-ssh_bind = "0.0.0.0:2222"
-# Prefer 127.0.0.1 for Admin Web. On Docker Desktop, use 0.0.0.0 here
-# only with a host-local port mapping such as -p 127.0.0.1:8080:8080.
-admin_bind = "127.0.0.1:8080"
+ssh_listen = "0.0.0.0:2222"
+
+[api]
+enabled = false
+listen = "127.0.0.1:8083"
+token_file = "/data/hop-api.token"
+cors_allowlist = []
 
 [database]
 path = "/data/hop.db"
@@ -16,7 +19,12 @@ connect_timeout = 10
 proxy_policy = "assets_only"
 
 [security]
-secret_key_file = "/data/hop.secret"
+master_key_file = "/data/hop.secret"
+
+[inventory]
+sources = []
 
 [runtime]
 temp_dir = "/tmp/hop"
+log_level = "info"
+session_retention_days = 30

@@ -1,5 +1,9 @@
-mod admin;
+mod control_api;
+mod inventory;
+mod local_cli;
+mod manifest_io;
 mod ssh;
+mod transfer;
 mod tui;
 
 use std::{
@@ -12,12 +16,14 @@ use std::{
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use hop_core::{
-    load_or_create_master_key, AssetAccessMode, AuthType, HopConfig, HopDb, MasterKey, NewAsset,
-    ASSET_PRESET_RDP, ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
+    load_master_key, load_or_create_master_key, ApplyOptions, AssetAccessMode, AuthType, Catalog,
+    CatalogError, HopConfig, MasterKey, NewAsset, ASSET_PRESET_RDP, ASSET_PROTOCOL_SSH,
+    ASSET_PROTOCOL_TCP,
 };
+use serde::Serialize;
 use tracing::{info, warn};
 
-use crate::admin::transfer::{ConflictPolicy, TransferFormat, TransferKind};
+use crate::transfer::{ConflictPolicy, TransferFormat, TransferKind};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -36,7 +42,24 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Serve,
-    ResetAdmin,
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    Apply {
+        #[arg(short = 'f', long = "file", required = true)]
+        files: Vec<PathBuf>,
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        prune: bool,
+        #[arg(long)]
+        base_revision: Option<i64>,
+        #[arg(long)]
+        json: bool,
+    },
     Key {
         #[command(subcommand)]
         command: KeyCommand,
@@ -66,6 +89,32 @@ enum Command {
         format: Option<TransferFormatArg>,
         #[arg(long, value_enum, default_value = "skip")]
         on_conflict: ConflictPolicyArg,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    Validate {
+        #[arg(short = 'f', long = "file", required = true)]
+        files: Vec<PathBuf>,
+        #[arg(long)]
+        offline: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Diff {
+        #[arg(short = 'f', long = "file", required = true)]
+        files: Vec<PathBuf>,
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        prune: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Status {
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -221,15 +270,15 @@ enum AssetProtocolArg {
 }
 
 impl AssetProtocolArg {
-    fn as_str(&self) -> &'static str {
+    fn parts(&self) -> (&'static str, Option<&'static str>) {
         match self {
-            Self::Ssh => ASSET_PROTOCOL_SSH,
-            Self::Rdp => ASSET_PRESET_RDP,
-            Self::Tcp => ASSET_PROTOCOL_TCP,
-            Self::Vnc => "vnc",
-            Self::Mysql => "mysql",
-            Self::Postgres => "postgres",
-            Self::Redis => "redis",
+            Self::Ssh => (ASSET_PROTOCOL_SSH, None),
+            Self::Tcp => (ASSET_PROTOCOL_TCP, None),
+            Self::Rdp => (ASSET_PROTOCOL_TCP, Some(ASSET_PRESET_RDP)),
+            Self::Vnc => (ASSET_PROTOCOL_TCP, Some("vnc")),
+            Self::Mysql => (ASSET_PROTOCOL_TCP, Some("mysql")),
+            Self::Postgres => (ASSET_PROTOCOL_TCP, Some("postgres")),
+            Self::Redis => (ASSET_PROTOCOL_TCP, Some("redis")),
         }
     }
 }
@@ -260,18 +309,41 @@ enum AssetCommand {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
     let cli = Cli::parse();
+    let configured_log_level = cli
+        .config
+        .as_deref()
+        .and_then(|path| HopConfig::load(Some(path)).ok())
+        .map(|config| config.runtime.log_level)
+        .unwrap_or_else(|| HopConfig::default().runtime.log_level);
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .or_else(|_| tracing_subscriber::EnvFilter::try_new(configured_log_level))
+        .context("invalid runtime.log_level")?;
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => serve(cli.config).await,
-        Command::ResetAdmin => {
-            let (db, _, _) = open_runtime(cli.config).await?;
-            let password = admin::bootstrap::reset_admin_password(&db).await?;
-            println!("New Hop admin password: {password}");
-            Ok(())
+        Command::Config { command } => run_config_command(cli.config, command).await,
+        Command::Apply {
+            files,
+            source,
+            dry_run,
+            prune,
+            base_revision,
+            json,
+        } => {
+            run_apply_command(
+                cli.config,
+                files,
+                source,
+                ApplyOptions {
+                    base_revision,
+                    prune,
+                    dry_run,
+                },
+                json,
+            )
+            .await
         }
         Command::Key { command } => {
             let (db, _, _) = open_runtime(cli.config).await?;
@@ -280,23 +352,17 @@ async fn main() -> Result<()> {
                     name,
                     public_key,
                     public_key_file,
-                } => admin::local_cli::add_key(&db, name, public_key, public_key_file).await,
-                KeyCommand::List => admin::local_cli::list_keys(&db).await,
-                KeyCommand::Deactivate { id } => {
-                    admin::local_cli::set_key_active(&db, &id, false).await
-                }
-                KeyCommand::Activate { id } => {
-                    admin::local_cli::set_key_active(&db, &id, true).await
-                }
+                } => local_cli::add_key(&db, name, public_key, public_key_file).await,
+                KeyCommand::List => local_cli::list_keys(&db).await,
+                KeyCommand::Deactivate { id } => local_cli::set_key_active(&db, &id, false).await,
+                KeyCommand::Activate { id } => local_cli::set_key_active(&db, &id, true).await,
                 KeyCommand::Access { command } => match command {
-                    KeyAccessCommand::Show { id } => {
-                        admin::local_cli::show_key_access(&db, &id).await
-                    }
+                    KeyAccessCommand::Show { id } => local_cli::show_key_access(&db, &id).await,
                     KeyAccessCommand::Set {
                         id,
                         mode,
                         asset_ids,
-                    } => admin::local_cli::set_key_access(&db, &id, mode.into(), asset_ids).await,
+                    } => local_cli::set_key_access(&db, &id, mode.into(), asset_ids).await,
                 },
             }
         }
@@ -313,7 +379,7 @@ async fn main() -> Result<()> {
                     passphrase,
                 } => {
                     let password = read_stdin_secret_arg(password, password_stdin)?;
-                    admin::local_cli::add_credential(
+                    local_cli::add_credential(
                         &db,
                         &master_key,
                         name,
@@ -325,10 +391,8 @@ async fn main() -> Result<()> {
                     )
                     .await
                 }
-                CredentialCommand::List => admin::local_cli::list_credentials(&db).await,
-                CredentialCommand::Delete { id } => {
-                    admin::local_cli::delete_credential(&db, &id).await
-                }
+                CredentialCommand::List => local_cli::list_credentials(&db).await,
+                CredentialCommand::Delete { id } => local_cli::delete_credential(&db, &id).await,
             }
         }
         Command::Asset { command } => {
@@ -343,12 +407,13 @@ async fn main() -> Result<()> {
                     tags,
                     credential_id,
                 } => {
-                    admin::local_cli::add_asset(
+                    let (protocol, preset) = protocol.parts();
+                    local_cli::add_asset(
                         &db,
                         NewAsset {
                             name,
-                            protocol: protocol.as_str().to_string(),
-                            preset: None,
+                            protocol: protocol.to_string(),
+                            preset: preset.map(str::to_string),
                             hostname,
                             port,
                             description,
@@ -358,8 +423,8 @@ async fn main() -> Result<()> {
                     )
                     .await
                 }
-                AssetCommand::List => admin::local_cli::list_assets(&db).await,
-                AssetCommand::Delete { id } => admin::local_cli::delete_asset(&db, &id).await,
+                AssetCommand::List => local_cli::list_assets(&db).await,
+                AssetCommand::Delete { id } => local_cli::delete_asset(&db, &id).await,
             }
         }
         Command::Export {
@@ -389,8 +454,170 @@ async fn main() -> Result<()> {
     }
 }
 
+async fn run_config_command(config_path: Option<PathBuf>, command: ConfigCommand) -> Result<()> {
+    match command {
+        ConfigCommand::Validate {
+            files,
+            offline,
+            json,
+        } => {
+            let manifest = match manifest_io::load_manifest_scope(&files) {
+                Ok(manifest) => manifest,
+                Err(error) => return finish_catalog_result::<ValidationOutput>(Err(error), json),
+            };
+            let result = if offline {
+                manifest.validate_offline()
+            } else {
+                let catalog = open_catalog_db_read_only(config_path).await?;
+                catalog.validate_manifest(&manifest).await
+            };
+            finish_catalog_result(
+                result.map(|()| ValidationOutput {
+                    valid: true,
+                    offline,
+                }),
+                json,
+            )
+        }
+        ConfigCommand::Diff {
+            files,
+            source,
+            prune,
+            json,
+        } => {
+            let manifest = match manifest_io::load_manifest_scope(&files) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    return finish_catalog_result::<hop_core::ApplySummary>(Err(error), json)
+                }
+            };
+            let (catalog, master_key) = open_catalog_read_only(config_path).await?;
+            let result = catalog.diff(&manifest, &source, &master_key, prune).await;
+            finish_catalog_result(result, json)
+        }
+        ConfigCommand::Status { json } => {
+            let catalog = open_catalog_db_read_only(config_path).await?;
+            finish_catalog_result(catalog.status().await, json)
+        }
+    }
+}
+
+async fn run_apply_command(
+    config_path: Option<PathBuf>,
+    files: Vec<PathBuf>,
+    source: String,
+    options: ApplyOptions,
+    json: bool,
+) -> Result<()> {
+    let manifest = match manifest_io::load_manifest_scope(&files) {
+        Ok(manifest) => manifest,
+        Err(error) => return finish_catalog_result::<hop_core::ApplySummary>(Err(error), json),
+    };
+    let (catalog, master_key) = if options.dry_run {
+        open_catalog_read_only(config_path).await?
+    } else {
+        open_catalog(config_path).await?
+    };
+    let result = catalog
+        .apply(&manifest, &source, &master_key, options)
+        .await;
+    if !options.dry_run {
+        if let Err(error) = &result {
+            let _ = catalog.record_apply_failure(&source, "cli", error).await;
+        }
+    }
+    finish_catalog_result(result, json)
+}
+
+#[derive(Debug, Serialize)]
+struct ValidationOutput {
+    valid: bool,
+    offline: bool,
+}
+
+fn finish_catalog_result<T>(result: std::result::Result<T, CatalogError>, json: bool) -> Result<()>
+where
+    T: Serialize + std::fmt::Debug,
+{
+    match result {
+        Ok(output) => {
+            if json {
+                println!("{}", serde_json::to_string(&output)?);
+            } else {
+                print_human_catalog_output(&output)?;
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if json {
+                eprintln!("{}", serde_json::to_string(&error)?);
+            }
+            Err(error.into())
+        }
+    }
+}
+
+fn print_human_catalog_output<T>(output: &T) -> Result<()>
+where
+    T: Serialize + std::fmt::Debug,
+{
+    let value = serde_json::to_value(output)?;
+    if let Some(valid) = value.get("valid").and_then(serde_json::Value::as_bool) {
+        println!("manifest {}", if valid { "valid" } else { "invalid" });
+    } else if let (Some(base), Some(next)) = (
+        value
+            .get("base_revision")
+            .and_then(serde_json::Value::as_i64),
+        value
+            .get("new_revision")
+            .and_then(serde_json::Value::as_i64),
+    ) {
+        println!("catalog revision {base} -> {next}");
+        for field in ["created", "updated", "deleted", "orphaned", "unchanged"] {
+            let count = value
+                .get(field)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            println!("{field}={count}");
+        }
+    } else {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    }
+    Ok(())
+}
+
+async fn open_catalog(config_path: Option<PathBuf>) -> Result<(Catalog, Arc<MasterKey>)> {
+    let config = load_config(config_path)?;
+    let catalog = Catalog::connect(&config.database.path).await?;
+    let master_key = Arc::new(load_or_create_master_key(&config.security.master_key_file)?);
+    Ok((catalog, master_key))
+}
+
+async fn open_catalog_db_read_only(config_path: Option<PathBuf>) -> Result<Catalog> {
+    let config = load_config(config_path)?;
+    Catalog::connect_read_only(&config.database.path)
+        .await
+        .map_err(Into::into)
+}
+
+async fn open_catalog_read_only(config_path: Option<PathBuf>) -> Result<(Catalog, Arc<MasterKey>)> {
+    let config = load_config(config_path)?;
+    let catalog = Catalog::connect_read_only(&config.database.path).await?;
+    let master_key = Arc::new(load_master_key(&config.security.master_key_file)?);
+    Ok((catalog, master_key))
+}
+
+fn load_config(config_path: Option<PathBuf>) -> Result<HopConfig> {
+    let config = match config_path {
+        Some(path) => HopConfig::load(Some(&path))
+            .with_context(|| format!("load config {}", path.display()))?,
+        None => HopConfig::load(None)?,
+    };
+    Ok(config)
+}
+
 async fn export_data(
-    db: &HopDb,
+    db: &Catalog,
     kind: TransferKind,
     format: TransferFormat,
     output: Option<PathBuf>,
@@ -398,11 +625,11 @@ async fn export_data(
     let payload = match kind {
         TransferKind::Assets => {
             let assets = db.list_assets().await?;
-            admin::transfer::export_assets(&assets, format)?
+            transfer::export_assets(&assets, format)?
         }
         TransferKind::Credentials => {
             let credentials = db.list_credentials().await?;
-            admin::transfer::export_credentials(&credentials, format)?
+            transfer::export_credentials(&credentials, format)?
         }
     };
 
@@ -416,7 +643,7 @@ async fn export_data(
 }
 
 async fn import_data(
-    db: &HopDb,
+    db: &Catalog,
     kind: TransferKind,
     file: PathBuf,
     format: Option<TransferFormat>,
@@ -427,11 +654,9 @@ async fn import_data(
         .context("cannot infer import format from file extension; pass --format")?;
     let payload = fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
     let summary = match kind {
-        TransferKind::Assets => {
-            admin::transfer::import_assets(db, &payload, format, on_conflict).await?
-        }
+        TransferKind::Assets => transfer::import_assets(db, &payload, format, on_conflict).await?,
         TransferKind::Credentials => {
-            admin::transfer::import_credentials(db, &payload, format, on_conflict).await?
+            transfer::import_credentials(db, &payload, format, on_conflict).await?
         }
     };
     println!(
@@ -476,101 +701,238 @@ fn normalize_stdin_secret(value: &str) -> String {
 
 async fn serve(config_path: Option<PathBuf>) -> Result<()> {
     let (db, config, master_key) = open_runtime(config_path).await?;
-    if let Some(password) = admin::bootstrap::ensure_admin_password(&db).await? {
-        println!("Initial Hop admin password: {password}");
-        println!("Open http://{} to finish setup.", config.server.admin_bind);
-    }
     let ssh_bind = config.ssh_bind_addr()?;
-    let admin_bind = config.admin_bind_addr()?;
-    if let Some(message) = admin_bind_exposure_warning(&config)? {
-        warn!("{message}");
+    if config.api.enabled {
+        config.api_bind_addr()?;
     }
-    if config.security.admin_cookie_secure {
-        info!("admin session cookies will use the Secure attribute");
-    } else if !admin_bind.ip().is_loopback() {
-        warn!(
-            "admin session cookies are not marked Secure; set security.admin_cookie_secure = true \
-             when serving Admin Web through HTTPS"
-        );
+    fs::create_dir_all(&config.runtime.temp_dir).with_context(|| {
+        format!(
+            "create runtime temp directory {}",
+            config.runtime.temp_dir.display()
+        )
+    })?;
+    let pruned = db
+        .prune_finished_sessions(config.runtime.session_retention_days)
+        .await
+        .context("apply runtime session retention")?;
+    if pruned > 0 {
+        info!(pruned, "removed expired finished sessions");
+    } else if config.runtime.session_retention_days == 0 {
+        warn!("automatic finished-session retention is disabled");
     }
+    inventory::apply_startup_sources(&db, &master_key, &config.inventory.sources).await;
     let active_sessions = ssh::session_registry::ActiveSessionRegistry::default();
-    let admin = admin::routes::serve_admin(
-        admin_bind,
-        ssh_bind,
-        db.clone(),
-        master_key.clone(),
-        active_sessions.clone(),
-        config.security.admin_cookie_secure,
-    );
-    let ssh = ssh::server::serve_ssh(ssh_bind, config, db, master_key, active_sessions);
-    info!("starting hop-server");
-    tokio::try_join!(admin, ssh)?;
-    Ok(())
+    info!("starting hop-server SSH listener on {ssh_bind}");
+    if config.api.enabled {
+        let api_bind = config.api_bind_addr()?;
+        if !api_bind.ip().is_loopback() && config.api.cors_allowlist.is_empty() {
+            bail!("api.cors_allowlist must be explicit when api.listen is not loopback");
+        }
+        let token = control_api::load_token(&config.api.token_file)?;
+        let api_state = control_api::ControlApiState::new(
+            db.clone(),
+            master_key.clone(),
+            &token,
+            config.inventory.sources.clone(),
+            active_sessions.clone(),
+        )?;
+        info!("starting Hop Control API on {api_bind}");
+        let cors_allowlist = config.api.cors_allowlist.clone();
+        let api = control_api::serve(api_bind, api_state, &cors_allowlist);
+        let watcher = inventory::watch_sources(
+            db.clone(),
+            master_key.clone(),
+            config.inventory.sources.clone(),
+        );
+        let ssh = ssh::server::serve_ssh(ssh_bind, config, db, master_key, active_sessions);
+        tokio::try_join!(api, ssh, watcher)?;
+        Ok(())
+    } else {
+        info!("Control API disabled; no HTTP listener will be created");
+        let watcher = inventory::watch_sources(
+            db.clone(),
+            master_key.clone(),
+            config.inventory.sources.clone(),
+        );
+        let ssh = ssh::server::serve_ssh(ssh_bind, config, db, master_key, active_sessions);
+        tokio::try_join!(ssh, watcher)?;
+        Ok(())
+    }
 }
 
-async fn open_runtime(config_path: Option<PathBuf>) -> Result<(HopDb, HopConfig, Arc<MasterKey>)> {
+async fn open_runtime(
+    config_path: Option<PathBuf>,
+) -> Result<(Catalog, HopConfig, Arc<MasterKey>)> {
     let config = match config_path {
         Some(path) => HopConfig::load(Some(&path))
             .with_context(|| format!("load config {}", path.display()))?,
         None => HopConfig::load(None)?,
     };
-    validate_admin_bind(&config)?;
-    let db = HopDb::connect(&config.database.path).await?;
-    let master_key = Arc::new(load_or_create_master_key(&config.security.secret_key_file)?);
+    let db = Catalog::connect(&config.database.path).await?;
+    let master_key = Arc::new(load_or_create_master_key(&config.security.master_key_file)?);
     Ok((db, config, master_key))
-}
-
-fn validate_admin_bind(config: &HopConfig) -> Result<()> {
-    config.admin_bind_addr()?;
-    Ok(())
-}
-
-fn admin_bind_exposure_warning(config: &HopConfig) -> Result<Option<String>> {
-    let admin_bind = config.admin_bind_addr()?;
-    if admin_bind.ip().is_loopback() {
-        return Ok(None);
-    }
-    Ok(Some(format!(
-        "Admin Web is listening on {admin_bind}; protect it with a firewall, VPN, \
-         host-local port mapping, or trusted management network"
-    )))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn admin_bind_accepts_loopback() {
-        let mut config = HopConfig::default();
-        assert!(validate_admin_bind(&config).is_ok());
+    const PUBLIC_KEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ test";
 
-        config.server.admin_bind = "[::1]:8080".to_string();
-        assert!(validate_admin_bind(&config).is_ok());
+    #[test]
+    fn config_and_apply_commands_parse_v0_2_contract() {
+        let validate = Cli::try_parse_from([
+            "hop-server",
+            "config",
+            "validate",
+            "-f",
+            "resources.yaml",
+            "--offline",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            validate.command,
+            Some(Command::Config {
+                command: ConfigCommand::Validate {
+                    offline: true,
+                    json: true,
+                    ..
+                }
+            })
+        ));
+
+        let apply = Cli::try_parse_from([
+            "hop-server",
+            "apply",
+            "-f",
+            "resources.toml",
+            "--source",
+            "home",
+            "--dry-run",
+            "--prune",
+            "--base-revision",
+            "4",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            apply.command,
+            Some(Command::Apply {
+                dry_run: true,
+                prune: true,
+                base_revision: Some(4),
+                json: true,
+                ..
+            })
+        ));
     }
 
-    #[test]
-    fn admin_bind_allows_non_loopback_when_configured() {
-        let mut config = HopConfig::default();
-        config.server.admin_bind = "0.0.0.0:8080".to_string();
-        assert!(validate_admin_bind(&config).is_ok());
+    #[tokio::test]
+    async fn apply_command_initializes_and_updates_the_v0_2_catalog() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("hop.db");
+        let master_key = directory.path().join("hop.secret");
+        let password = directory.path().join("password");
+        let public_key = directory.path().join("id.pub");
+        let manifest = directory.path().join("resources.yaml");
+        let config = directory.path().join("config.toml");
+        fs::write(&password, "test-password").unwrap();
+        fs::write(&public_key, PUBLIC_KEY).unwrap();
+        fs::write(
+            &manifest,
+            format!(
+                r#"api_version: hop/v1alpha1
+credentials:
+  root:
+    type: password
+    username: root
+    password:
+      file: {}
+assets:
+  server:
+    type: ssh
+    host: 192.0.2.10
+    port: 22
+    credential: root
+access:
+  laptop:
+    public_key:
+      file: {}
+"#,
+                password.display(),
+                public_key.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &config,
+            format!(
+                "[database]\npath = {:?}\n\n[security]\nmaster_key_file = {:?}\n",
+                database, master_key
+            ),
+        )
+        .unwrap();
 
-        config.server.admin_bind = "[::]:8080".to_string();
-        assert!(validate_admin_bind(&config).is_ok());
+        run_apply_command(
+            Some(config),
+            vec![manifest],
+            "home".to_string(),
+            ApplyOptions::default(),
+            false,
+        )
+        .await
+        .unwrap();
 
-        config.server.admin_bind = "192.168.1.10:8080".to_string();
-        assert!(validate_admin_bind(&config).is_ok());
+        let catalog = Catalog::connect(&database).await.unwrap();
+        assert_eq!(catalog.revision().await.unwrap(), 1);
+        assert_eq!(catalog.list_assets().await.unwrap().len(), 1);
+        assert_eq!(catalog.list_authorized_keys().await.unwrap().len(), 1);
     }
 
-    #[test]
-    fn non_loopback_admin_bind_gets_warning() {
-        let mut config = HopConfig::default();
-        assert!(admin_bind_exposure_warning(&config).unwrap().is_none());
+    #[tokio::test]
+    async fn disabled_api_creates_no_http_listener_and_enabled_api_binds() {
+        let directory = tempfile::tempdir().unwrap();
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_address = occupied.local_addr().unwrap();
+        let config_path = directory.path().join("config.toml");
+        let database = directory.path().join("hop.db");
+        let master_key = directory.path().join("hop.secret");
+        let host_key = directory.path().join("host_key");
+        let token = directory.path().join("api.token");
+        let write_config = |enabled: bool| {
+            fs::write(
+                &config_path,
+                format!(
+                    "[server]\nssh_listen = '127.0.0.1:0'\n\n[database]\npath = {:?}\n\n[api]\nenabled = {enabled}\nlisten = '{api_address}'\ntoken_file = {:?}\n\n[ssh]\nhost_key_file = {:?}\n\n[security]\nmaster_key_file = {:?}\n",
+                    database, token, host_key, master_key
+                ),
+            )
+            .unwrap();
+        };
 
-        config.server.admin_bind = "0.0.0.0:8080".to_string();
-        let warning = admin_bind_exposure_warning(&config).unwrap().unwrap();
-        assert!(warning.contains("0.0.0.0:8080"));
-        assert!(warning.contains("firewall"));
+        write_config(false);
+        let disabled = tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            serve(Some(config_path.clone())),
+        )
+        .await;
+        assert!(
+            disabled.is_err(),
+            "disabled API must not try the occupied HTTP port"
+        );
+
+        fs::write(&token, "management-token\n").unwrap();
+        write_config(true);
+        let enabled =
+            tokio::time::timeout(std::time::Duration::from_secs(2), serve(Some(config_path)))
+                .await
+                .expect("enabled API bind failure should return promptly");
+        assert!(
+            enabled.is_err(),
+            "enabled API must try the occupied HTTP port"
+        );
     }
 
     #[test]
@@ -667,7 +1029,10 @@ mod tests {
             panic!("expected asset add");
         };
 
-        assert_eq!(protocol.as_str(), ASSET_PRESET_RDP);
+        assert_eq!(
+            protocol.parts(),
+            (ASSET_PROTOCOL_TCP, Some(ASSET_PRESET_RDP))
+        );
         assert_eq!(port, 3389);
     }
 
@@ -706,14 +1071,14 @@ mod tests {
 
     #[tokio::test]
     async fn import_data_returns_error_when_summary_has_errors() {
-        let db = HopDb::in_memory().await.unwrap();
+        let db = Catalog::in_memory().await.unwrap();
         db.add_asset(hop_core::NewAsset::new("web", "10.0.0.1", 22))
             .await
             .unwrap();
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             file.path(),
-            "name,hostname,port,description,tags,credential_id\nweb,10.0.0.2,22,,,\n",
+            "name,hostname,port,description,tags,credential_id,protocol,preset\nweb,10.0.0.2,22,,,,ssh,\n",
         )
         .unwrap();
 

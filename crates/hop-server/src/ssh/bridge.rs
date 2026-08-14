@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
-use hop_core::{Asset, HopDb, MasterKey, NewSession};
+use hop_core::{Asset, Catalog, MasterKey, NewSession};
 use russh::{server::Handle, ChannelId, ChannelMsg};
 use tokio::sync::{mpsc, Mutex};
 
@@ -39,7 +39,7 @@ mod tests {
 }
 
 pub struct ManagedBridgeOptions {
-    pub db: HopDb,
+    pub db: Catalog,
     pub master_key: Arc<MasterKey>,
     pub active_sessions: ActiveSessionRegistry,
     pub auth: AuthInfo,

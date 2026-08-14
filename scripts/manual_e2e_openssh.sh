@@ -10,7 +10,7 @@ Set these variables before running:
   HOP_TARGET_USER       target SSH username
   HOP_TARGET_PASSWORD   target SSH password for managed connection
 
-This script starts Hop on localhost ports 2222/8080, seeds one key,
+This script starts Hop on localhost port 2222, seeds one key,
 one password credential, and one asset, then prints manual SSH checks.
 USAGE
   exit 2
@@ -22,8 +22,7 @@ mkdir -p "$RUN_DIR"
 
 cat > "$RUN_DIR/config.toml" <<EOF
 [server]
-ssh_bind = "127.0.0.1:2222"
-admin_bind = "127.0.0.1:8080"
+ssh_listen = "127.0.0.1:2222"
 
 [database]
 path = "$RUN_DIR/hop.db"
@@ -37,7 +36,7 @@ connect_timeout = 10
 proxy_policy = "assets_only"
 
 [security]
-secret_key_file = "$RUN_DIR/hop.secret"
+master_key_file = "$RUN_DIR/hop.secret"
 
 [runtime]
 temp_dir = "$RUN_DIR/tmp"

@@ -1,9 +1,12 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - master
+      - dev
+      - "dev-*"
     tags:
       - "v*.*.*"
   pull_request:
@@ -32,20 +35,19 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Set up Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: web/admin/package-lock.json
-
-      - name: Install Admin Web dependencies
-        run: npm ci
-        working-directory: web/admin
-
-      - name: Build Admin Web
-        run: npm run build
-        working-directory: web/admin
+      - name: Verify v0.2 clean-break boundary
+        shell: bash
+        run: |
+          test -z "$(git ls-files 'web/admin/**')"
+          test -z "$(git ls-files 'crates/hop-server/src/admin/**')"
+          test -z "$(git ls-files 'migrations/**')"
+          test -z "$(git ls-files 'crates/hop-core/src/db.rs')"
+          if grep -ERq \
+            'web/admin|HOP_ADMIN_STATIC_DIR|hop-admin-web-static|npm (ci|run)' \
+            Dockerfile systemd; then
+            echo "v0.1 Admin Web build dependency remains in an active delivery file" >&2
+            exit 1
+          fi
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -55,6 +57,18 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Install E2E host tools
+        run: sudo apt-get update && sudo apt-get install --yes openssh-server shellcheck
+
+      - name: Check shell scripts
+        run: shellcheck docker-entrypoint.sh scripts/*.sh
+
+      - name: Run Access Key authorization E2E
+        run: ./scripts/manual_e2e_key_asset_access.sh
+
+      - name: Run local OpenSSH E2E
+        run: ./scripts/e2e_local_openssh.sh
 
       - name: Build release binary
         run: cargo build --release --bin hop-server --locked
@@ -102,57 +116,154 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-  release:
-    name: Publish Release Binary
+  core-assets:
+    name: Core ${{ matrix.arch }}
     runs-on: ubuntu-latest
     needs: rust
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+        (startsWith(github.ref, 'refs/tags/v') ||
+         github.ref == 'refs/heads/dev' ||
+         startsWith(github.ref, 'refs/heads/dev-')))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-musl
+            asset: hop-server-linux-x86_64-musl.tar.gz
+          - arch: aarch64
+            target: aarch64-unknown-linux-musl
+            asset: hop-server-linux-aarch64-musl.tar.gz
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
-
-      - name: Set up Node
-        uses: actions/setup-node@v6
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: web/admin/package-lock.json
+          key: core-${{ matrix.target }}
 
-      - name: Install Admin Web dependencies
-        run: npm ci
-        working-directory: web/admin
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross@0.2.5
 
-      - name: Build Admin Web
-        run: npm run build
-        working-directory: web/admin
+      - name: Build static core
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cross build --release --locked --target "$TARGET" --bin hop-server
 
-      - name: Build release binary
-        run: cargo build --release --bin hop-server --locked
-
-      - name: Prepare release assets
+      - name: Verify and archive core
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+          ASSET: ${{ matrix.asset }}
         shell: bash
         run: |
-          mkdir -p dist
-          cp target/release/hop-server dist/hop-server-linux-amd64
-          chmod 0755 dist/hop-server-linux-amd64
-          tar -C web/admin/dist -czf dist/hop-admin-web-static.tar.gz .
+          set -euo pipefail
+          binary="target/${TARGET}/release/hop-server"
+          test -x "$binary"
+          case "$ARCH" in
+            x86_64)
+              readelf --file-header "$binary" | grep -Fq 'Advanced Micro Devices X86-64'
+              ;;
+            aarch64)
+              readelf --file-header "$binary" | grep -Fq 'AArch64'
+              ;;
+            *) exit 2 ;;
+          esac
+          if readelf --program-headers "$binary" | grep -Fq 'Requesting program interpreter'; then
+            echo "core is dynamically linked: $binary" >&2
+            exit 1
+          fi
+          version_output=$(cross run --release --locked --target "$TARGET" --bin hop-server -- --version)
+          case "$version_output" in
+            hop-server\ *) ;;
+            *) echo "unexpected core version output: $version_output" >&2; exit 1 ;;
+          esac
+          staging="$RUNNER_TEMP/hop-core-${ARCH}"
+          mkdir -p "$staging" dist
+          install -m 0755 "$binary" "$staging/hop-server"
+          source_date_epoch=$(git show -s --format=%ct HEAD)
+          tar --sort=name --mtime="@${source_date_epoch}" \
+            --owner=0 --group=0 --numeric-owner -cf - -C "$staging" hop-server \
+            | gzip -n -9 >"dist/$ASSET"
+          test "$(tar -tzf "dist/$ASSET")" = hop-server
+
+      - name: Upload core asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: hop-core-${{ matrix.arch }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7
+
+  core-bundle:
+    name: Assemble Core Release Candidate
+    runs-on: ubuntu-latest
+    needs: core-assets
+    steps:
+      - name: Download core assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hop-core-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify release asset set
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            hop-server-linux-aarch64-musl.tar.gz
+            hop-server-linux-x86_64-musl.tar.gz
+          )
+          mapfile -t actual < <(find dist -maxdepth 1 -type f -printf '%f\n' | sort)
+          test "${actual[*]}" = "${expected[*]}"
+          for archive in "${expected[@]}"; do
+            test "$(tar -tzf "dist/$archive")" = hop-server
+          done
           (
             cd dist
-            sha256sum hop-server-linux-amd64 > hop-server-linux-amd64.sha256
-            sha256sum hop-admin-web-static.tar.gz > hop-admin-web-static.tar.gz.sha256
+            sha256sum "${expected[@]}" >SHA256SUMS
           )
+
+      - name: Upload complete release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: hop-core-release-candidate
+          path: |
+            dist/hop-server-linux-x86_64-musl.tar.gz
+            dist/hop-server-linux-aarch64-musl.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish Core Release
+    runs-on: ubuntu-latest
+    needs: core-bundle
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download complete release candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: hop-core-release-candidate
+          path: dist
 
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
         shell: bash
         run: |
@@ -162,8 +273,7 @@ jobs:
               --generate-notes
           fi
           gh release upload "$TAG_NAME" \
-            dist/hop-server-linux-amd64 \
-            dist/hop-server-linux-amd64.sha256 \
-            dist/hop-admin-web-static.tar.gz \
-            dist/hop-admin-web-static.tar.gz.sha256 \
+            dist/hop-server-linux-x86_64-musl.tar.gz \
+            dist/hop-server-linux-aarch64-musl.tar.gz \
+            dist/SHA256SUMS \
             --clobber

@@ -23,8 +23,7 @@ trap cleanup EXIT
 
 cat > "$RUN_DIR/config.toml" <<EOF
 [server]
-ssh_bind = "127.0.0.1:2222"
-admin_bind = "127.0.0.1:8080"
+ssh_listen = "127.0.0.1:2222"
 
 [database]
 path = "$RUN_DIR/hop.db"
@@ -38,7 +37,7 @@ connect_timeout = 10
 proxy_policy = "assets_only"
 
 [security]
-secret_key_file = "$RUN_DIR/hop.secret"
+master_key_file = "$RUN_DIR/hop.secret"
 
 [runtime]
 temp_dir = "$RUN_DIR/tmp"

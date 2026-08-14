@@ -1,7 +1,7 @@
 use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
-use hop_core::{Asset, HopConfig, HopDb, MasterKey, NewSession};
+use hop_core::{Asset, Catalog, HopConfig, MasterKey, NewSession};
 use russh::{
     keys::{ssh_key::HashAlg, PublicKey},
     server::{self, Msg, Server as _, Session},
@@ -71,7 +71,12 @@ impl ActiveTuiSession {
         &self.id
     }
 
-    pub(crate) async fn finish(self, db: &HopDb, status: &str, error: Option<&str>) -> Result<()> {
+    pub(crate) async fn finish(
+        self,
+        db: &Catalog,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
         db.finish_session(&self.id, status, error).await?;
         Ok(())
     }
@@ -79,7 +84,7 @@ impl ActiveTuiSession {
 
 #[derive(Clone)]
 pub struct HopSshServer {
-    db: HopDb,
+    db: Catalog,
     config: HopConfig,
     master_key: Arc<MasterKey>,
     active_sessions: ActiveSessionRegistry,
@@ -88,7 +93,7 @@ pub struct HopSshServer {
 pub async fn serve_ssh(
     bind: SocketAddr,
     config: HopConfig,
-    db: HopDb,
+    db: Catalog,
     master_key: Arc<MasterKey>,
     active_sessions: ActiveSessionRegistry,
 ) -> Result<()> {
@@ -151,7 +156,7 @@ impl server::Server for HopSshServer {
 }
 
 pub struct HopSshHandler {
-    db: HopDb,
+    db: Catalog,
     config: HopConfig,
     master_key: Arc<MasterKey>,
     active_sessions: ActiveSessionRegistry,
@@ -207,11 +212,7 @@ impl HopSshHandler {
         command: Option<Vec<u8>>,
     ) -> Result<()> {
         let auth = self.auth_info().context("missing authenticated key")?;
-        if !self
-            .db
-            .key_can_access_asset(&auth.key_id, &asset.id)
-            .await?
-        {
+        if !managed_mode_is_authorized(&self.db, &auth.key_id, &asset.id, mode).await? {
             audit_denied_attempt(
                 &self.db,
                 &auth,
@@ -249,6 +250,17 @@ impl HopSshHandler {
     }
 }
 
+async fn managed_mode_is_authorized(
+    db: &Catalog,
+    key_id: &str,
+    asset_id: &str,
+    _mode: ManagedSessionMode,
+) -> Result<bool> {
+    db.key_can_access_asset(key_id, asset_id)
+        .await
+        .map_err(Into::into)
+}
+
 fn managed_session_mode_name(mode: ManagedSessionMode) -> &'static str {
     match mode {
         ManagedSessionMode::Tui => "tui-connect",
@@ -259,7 +271,7 @@ fn managed_session_mode_name(mode: ManagedSessionMode) -> &'static str {
 }
 
 pub(crate) async fn audit_denied_attempt(
-    db: &HopDb,
+    db: &Catalog,
     auth: &AuthInfo,
     mode: &str,
     asset_name: Option<String>,
@@ -286,7 +298,7 @@ pub(crate) async fn audit_denied_attempt(
 }
 
 pub(crate) async fn start_tui_session(
-    db: &HopDb,
+    db: &Catalog,
     auth: &AuthInfo,
     client_ip: Option<String>,
 ) -> Result<ActiveTuiSession> {
@@ -305,7 +317,7 @@ pub(crate) async fn start_tui_session(
 }
 
 fn spawn_tui_termination_watcher(
-    db: HopDb,
+    db: Catalog,
     active_sessions: ActiveSessionRegistry,
     session_id: String,
     channels: SharedChannels,
@@ -834,7 +846,7 @@ mod tests {
 
     use super::*;
 
-    fn test_handler(db: HopDb) -> HopSshHandler {
+    fn test_handler(db: Catalog) -> HopSshHandler {
         HopSshHandler {
             db,
             config: HopConfig::default(),
@@ -1017,7 +1029,7 @@ mod tests {
                 async move { target.run_on_socket(target_config, &target_listener).await },
             );
 
-        let db = HopDb::in_memory().await.unwrap();
+        let db = Catalog::in_memory().await.unwrap();
         let master_key = Arc::new(MasterKey::from_bytes([7; 32]));
         let credential_id = "exec-target-credential";
         let credential = db
@@ -1063,7 +1075,7 @@ mod tests {
         drop(probe);
         let temp = tempfile::tempdir().unwrap();
         let mut config = HopConfig::default();
-        config.server.ssh_bind = hop_addr.to_string();
+        config.server.ssh_listen = hop_addr.to_string();
         config.ssh.host_key_file = temp.path().join("hop-host-key");
         config.ssh.banner = String::new();
         config.ssh.keepalive_interval = 0;
@@ -1139,7 +1151,7 @@ mod tests {
 
     #[tokio::test]
     async fn active_tui_session_finish_marks_record_done() {
-        let db = HopDb::in_memory().await.unwrap();
+        let db = Catalog::in_memory().await.unwrap();
         let session = db
             .start_session(NewSession {
                 key_finger: "SHA256:test".to_string(),
@@ -1239,7 +1251,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_asset_resolution_uses_stable_authenticated_key_id() {
-        let db = HopDb::in_memory().await.unwrap();
+        let db = Catalog::in_memory().await.unwrap();
         let key = db
             .add_authorized_key(NewAuthorizedKey::new(
                 "laptop",
@@ -1276,7 +1288,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_asset_resolution_rejects_unassigned_asset() {
-        let db = HopDb::in_memory().await.unwrap();
+        let db = Catalog::in_memory().await.unwrap();
         let key = db
             .add_authorized_key(NewAuthorizedKey::new(
                 "laptop",
@@ -1310,5 +1322,49 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn tui_direct_exec_and_sftp_share_the_same_managed_authorization_gate() {
+        let db = Catalog::in_memory().await.unwrap();
+        let key = db
+            .add_authorized_key_with_access(
+                NewAuthorizedKey::new("empty", "ssh-ed25519 AAAA-empty", "SHA256:empty"),
+                AssetAccessMode::Restricted,
+                &[],
+            )
+            .await
+            .unwrap();
+        let asset = db
+            .add_asset(NewAsset::new("server", "192.0.2.10", 22))
+            .await
+            .unwrap();
+        for mode in [
+            ManagedSessionMode::Tui,
+            ManagedSessionMode::Direct,
+            ManagedSessionMode::Exec,
+            ManagedSessionMode::Sftp,
+        ] {
+            assert!(!managed_mode_is_authorized(&db, &key.id, &asset.id, mode)
+                .await
+                .unwrap());
+        }
+        db.set_authorized_key_access(
+            &key.id,
+            AssetAccessMode::Restricted,
+            std::slice::from_ref(&asset.id),
+        )
+        .await
+        .unwrap();
+        for mode in [
+            ManagedSessionMode::Tui,
+            ManagedSessionMode::Direct,
+            ManagedSessionMode::Exec,
+            ManagedSessionMode::Sftp,
+        ] {
+            assert!(managed_mode_is_authorized(&db, &key.id, &asset.id, mode)
+                .await
+                .unwrap());
+        }
     }
 }

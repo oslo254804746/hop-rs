@@ -6,30 +6,26 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-argon2.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
-cookie.workspace = true
-form_urlencoded.workspace = true
 futures.workspace = true
+glob.workspace = true
 hop-core = { path = "../hop-core" }
-maud.workspace = true
 nucleo-matcher.workspace = true
-rand.workspace = true
 ratatui.workspace = true
 russh.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+subtle.workspace = true
 termwiz.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

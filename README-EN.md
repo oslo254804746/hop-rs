@@ -1,275 +1,150 @@
-<div align="center">
+# Hop
 
-[中文](README.md) | **English**
+Hop v0.2 is a lightweight SSH jump server for individual developers, homelabs, and small teams sharing one management trust boundary. It works with native OpenSSH clients and covers TUI discovery, direct asset login, remote commands, SCP/SFTP, ProxyJump, and generic TCP forwarding without requiring a browser, custom client, external database, or container runtime.
 
-# 🦀 Hop
+[中文](README.md)
 
-**Minimal SSH bastion, maximum control.**
+## v0.2 boundaries
 
-A single Rust binary that replaces your bloated jump server with pubkey auth, a TUI asset picker, managed credentials, and proxy-aware forwarding — all backed by SQLite.
+- One Rust binary and one SQLite Catalog.
+- Multiple ingress Access Keys that can be enabled, disabled, or deleted independently.
+- An omitted `assets` field grants a key all current and future assets; `assets: []` authenticates but discovers and reaches none; a non-empty list is a strict allowlist.
+- YAML/TOML, the local CLI, and the optional Control API all write through the same Catalog.
+- The HTTP Control API is disabled by default. Core contains no Admin Web, administrator accounts, cookies, CSRF, roles, or RBAC.
+- OpenWrt is a first-class distribution target: a lightweight LuCI/procd package downloads the verified static core for the router architecture instead of compiling or embedding Rust in the IPK/APK.
 
-[![CI](https://github.com/oslo254804746/hop-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/oslo254804746/hop-rs/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+v0.2 is a clean break and does not migrate or read v0.1 data. Hop detects an old database before opening it for writes, refuses startup with backup/delete/new-path guidance, and leaves its bytes and mtime unchanged.
 
-</div>
-
----
-
-## Why Hop?
-
-Most bastion/jump-server solutions are bloated Java/Python stacks with databases, caches, message queues, and admin panels that take a week to deploy. Hop is the opposite:
-
-- **Single binary** — `hop-server` does everything
-- **Zero external deps** — SQLite bundled, no Redis/Postgres/RabbitMQ
-- **Secure by default** — Admin Web on loopback, credentials encrypted with ChaCha20-Poly1305
-- **SSH-native** — your users just `ssh`, no proprietary client needed
-
-## Features
-
-```text
-┌─────────────────────────────────────────────────────────┐
-│  Pubkey Whitelist     Only trusted keys enter Hop       │
-│  TUI Asset Picker     Fuzzy search, connect in seconds  │
-│  Managed Credentials  Server-side auth to targets       │
-│  Generic TCP Forward  RDP/VNC/database SSH tunnels      │
-│  SSH/SFTP             Managed access to SSH targets     │
-│  Operations Dashboard  Health, coverage, actions        │
-│  Audit Logs            SSH and admin event evidence     │
-│  Progressive Team      Simple alone, team when needed   │
-│  Fast Admin Tasks      Drawers and one-click copy       │
-│  Import/Export        Asset and credential metadata     │
-│  TOFU Host Keys       Auto-trust on first connect       │
-│  i18n Admin           Multi-language admin interface    │
-└─────────────────────────────────────────────────────────┘
-```
-
-## Quick Start
+## Quick start
 
 ```bash
-# Build
-cargo build --release -p hop-server
-
-# Run
+cargo build --release --locked -p hop-server
 cp config.example.toml config.toml
-./target/release/hop-server serve --config config.toml
-```
 
-First boot auto-generates:
-- SQLite database
-- Ed25519 host key
-- ChaCha20-Poly1305 master key (`hop.secret`)
-- One-time admin password (printed to stdout)
-
-Default ports: **SSH `0.0.0.0:2222`** | **Admin Web `127.0.0.1:8080`**
-
-Admin Web is not exposed publicly by default. Use an SSH tunnel for remote
-administration:
-
-```bash
-ssh -N -L 8080:127.0.0.1:8080 root@hop-host
-```
-
-## First Setup
-
-In another terminal, add your SSH public key to the Hop whitelist, then create a managed credential and asset:
-
-```bash
 ./target/release/hop-server --config config.toml key add \
-  --name "alice laptop" \
-  --public-key-file ~/.ssh/id_ed25519.pub
+  --name laptop --public-key-file ~/.ssh/id_ed25519.pub
 
-printf '%s' 'target-password' | ./target/release/hop-server --config config.toml credential add \
-  --name deploy-password \
-  --username deploy \
-  --auth-type password \
-  --password-stdin
+printf '%s' 'target-password' | \
+  ./target/release/hop-server --config config.toml credential add \
+  --name homelab-root --username root --auth-type password --password-stdin
 
+credential_id=$(./target/release/hop-server --config config.toml credential list | awk 'NR == 1 { print $1 }')
 ./target/release/hop-server --config config.toml asset add \
-  --name web-prod-01 \
-  --hostname 10.0.1.10 \
-  --port 22 \
-  --tags prod,web \
-  --credential-id <credential-id>
+  --name nas --hostname 192.168.1.20 --port 22 --credential-id "$credential_id"
+
+./target/release/hop-server --config config.toml serve
 ```
 
-`credential add` prints the credential ID for `--credential-id`. Assets without managed credentials can still be used for ProxyJump forwarding.
+SSH listens on `0.0.0.0:2222` by default. No HTTP listener is created.
 
-## Usage
+## Native SSH workflows
 
 ```bash
-# Interactive TUI — fuzzy search your fleet
-ssh -p 2222 hop-host
-
-# Direct connect — asset name as SSH username
-ssh -p 2222 web-prod-01@hop-host
-
-# Remote command — target stdout, stderr, stdin, and exit status pass through
-ssh -p 2222 web-prod-01@hop-host 'uname -a'
-printf 'input' | ssh -p 2222 web-prod-01@hop-host cat
-
-# SFTP — reuse the SSH asset and its managed credential
-sftp -P 2222 web-prod-01@hop-host
-scp -P 2222 ./file web-prod-01@hop-host:/tmp/file
-
-# ProxyJump — Hop as a transparent TCP relay
-ssh -J hop-host:2222 web-prod-01.hop
-
-# RDP — create a protocol=RDP, port=3389 asset in Admin Web, then copy the tunnel command
-ssh -p 2222 -N -T -L 127.0.0.1:13389:win-prod-rdp.hop:3389 hop-host
-mstsc /v:127.0.0.1:13389
-
-# VNC and MySQL use the same generic TCP forwarding path
-ssh -p 2222 -N -T -L 127.0.0.1:15900:vnc-prod.hop:5900 hop-host
-ssh -p 2222 -N -T -L 127.0.0.1:13306:mysql-prod.hop:3306 hop-host
+ssh -p 2222 menu@hop-host
+ssh -p 2222 nas@hop-host
+ssh -p 2222 nas@hop-host 'uname -a'
+scp -P 2222 file.txt nas@hop-host:/tmp/file.txt
+sftp -P 2222 nas@hop-host
+ssh -p 2222 -L 13389:desktop.hop:3389 menu@hop-host
 ```
 
-Interactive TUI, direct connect (including remote commands), and SFTP use Hop-managed credentials to reach SSH targets. Remote commands do not enter the TUI and are accepted only when the SSH username has selected an asset; command contents are not written to the session audit. ProxyJump and local forwarding are transparent, asset-allowlisted TCP relays. RDP, VNC, MySQL, PostgreSQL, and Redis are presets for ports and client guidance; the core does not parse those application protocols. Generic forwarding supports TCP only, not UDP or dynamic multi-port protocols.
+ProxyJump example:
 
-An SSH authentication banner is displayed before the client selects an
-interactive shell, remote command, or subsystem, so a configured banner is
-written to stderr for every connection. Set `ssh.banner = ""` when automation
-requires clean stderr.
+```sshconfig
+Host hop
+  HostName hop-host
+  Port 2222
+  IdentityFile ~/.ssh/id_ed25519
 
-Each active Hop SSH key has its own asset access mode:
+Host *.hop
+  ProxyJump hop
+```
 
-- `all`: access every current and future asset. New keys and keys migrated from earlier releases default to this mode, so upgrades do not revoke existing access.
-- `restricted`: access only explicitly assigned assets. An empty assignment allows authentication to Hop but exposes and reaches no assets.
+TUI discovery, direct login, managed interactive sessions, exec, SCP/SFTP, ProxyJump, and TCP forwarding all use the same Key-to-Asset authorization queries. Crafted targets cannot bypass an allowlist. Ordinary allowlist changes affect new connections; the Control API exposes explicit active-session termination for emergencies.
 
-The entry key controls which assets may be reached; the credential attached to an asset controls how Hop authenticates to that target. TUI, direct SSH, remote commands, SFTP, ProxyJump, and local TCP forwarding all enforce the same policy by stable key and asset IDs. Assign assets from the Admin Web key edit page or use the CLI:
+## Declarative resources
+
+Manifests are strict YAML or TOML. Unknown fields and duplicate resources are rejected. Secrets use `file` or `env` sources and are encrypted with the Master Key before entering SQLite.
+
+```yaml
+api_version: hop/v1alpha1
+
+credentials:
+  homelab:
+    type: password
+    username: root
+    password: { file: /etc/hop/secrets/homelab.password }
+
+assets:
+  nas:
+    type: ssh
+    host: 192.168.1.20
+    port: 22
+    credential: homelab
+  desktop:
+    type: tcp
+    host: 192.168.1.30
+    port: 3389
+    preset: rdp
+
+access:
+  laptop:
+    public_key: { file: /etc/hop/keys/laptop.pub }
+    assets: [nas, desktop]
+```
 
 ```bash
-hop-server key access show <key-id>
-hop-server key access set <key-id> --mode restricted --asset-id <asset-id>
-hop-server key access set <key-id> --mode restricted  # Clear access
-hop-server key access set <key-id> --mode all         # Include future assets
+hop-server config validate -f resources.yaml --offline --json
+hop-server --config config.toml config validate -f resources.yaml --json
+hop-server --config config.toml config diff -f resources.yaml --source home --json
+hop-server --config config.toml apply -f resources.yaml \
+  --source home --base-revision 0 --json
+hop-server --config config.toml apply -f resources.yaml --source home --dry-run
+hop-server --config config.toml apply -f resources.yaml --source home --prune
+hop-server --config config.toml config status --json
 ```
 
-## Admin Web
+Applying identical content does not increment the Catalog revision. Resources missing from a successful full-source scan become usable orphans by default; only explicit `state: absent` or prune deletes them. The startup watcher calls the same Apply engine after a stable scope scan, retains the last valid Catalog on errors, and does not prune unless its source explicitly opts in.
 
-The v0.1.5 Admin Web is organized around frequent operational tasks:
+## Startup configuration and Control API
 
-- **Dashboard** shows live Admin/SSH/SQLite status, version, uptime, asset health, recent activity, coverage, and action items.
-- **Assets** supports search, tag filters, bulk tags, target-address copy, and drawer editing without losing list context.
-- **Credentials** shows only fields required by the authentication mode; blank secret fields preserve existing encrypted values; credentials in use cannot be deleted.
-- **People & SSH Access** assigns all or selected assets to each SSH key.
-- **Known Hosts** supports fingerprint review and copy with explicit confirmation before resetting trust.
-- **Audit Logs** combines recent SSH sessions and administrative actions without recording passwords, private keys, or passphrases.
-- **Settings** changes the current password and adds administrators only when a team needs them.
+`config.example.toml` documents SSH, database, Host Key, Master Key, timeout, keepalive, banner, proxy policy, API, inventory watcher, and runtime settings. YAML accepts the same structure.
 
-Team access is progressive: one active administrator keeps the password-only login. The account field appears only after a second active administrator is added. Owner, Operator, and Viewer describe tasks without exposing a policy editor.
+Catalog resources are dynamically applied. Listener/database/key-path settings require restart. Credential and allowlist changes affect new connections.
 
-| Access level | Capabilities |
-|--------------|--------------|
-| Owner | Full control, including administrators and access levels |
-| Operator | Manage assets, credentials, SSH access, and Known Hosts; read audit evidence |
-| Viewer | Read-only Dashboard, inventory, and audit evidence |
+The API requires an explicit token file and is opt-in:
 
-v0.1.5 shows the latest 100 SSH sessions and 100 admin events. Audit filtering, pagination, retention settings, and export are not yet available. See the [Admin Web guide](docs/admin-guide.md).
-
-## Architecture
-
-```text
-crates/
-├── hop-core/       Config, models, SQLite, credential encryption
-└── hop-server/     SSH server, TUI, Admin Web, local CLI
-migrations/         SQLite schema migrations
-systemd/            Production service unit
+```toml
+[api]
+enabled = true
+listen = "127.0.0.1:8083"
+token_file = "/etc/hop/control-api.token"
+cors_allowlist = []
 ```
 
-**Stack:** `russh` · `ratatui` · `axum` · `sqlx` · `chacha20poly1305` · `maud`
+Every `/api/v1` request uses `Authorization: Bearer <token>`. The API provides status/version, Catalog revision, resource reads and local CRUD, sessions and termination, source/status, validate, diff, apply, and reload. Credential responses expose only `configured`/`missing` states. A non-loopback listener requires an explicit CORS allowlist.
 
-## CLI Reference
+## Verification
 
 ```bash
-hop-server serve                    # Start the server (default)
-hop-server reset-admin              # Reset admin password
-hop-server key add|list|activate|deactivate
-hop-server key access show|set
-hop-server credential add|list|delete
-hop-server asset add|list|delete       # add supports ssh|tcp and common TCP presets
-hop-server export --kind assets --format csv --output dump.csv
-hop-server import --file dump.csv --on-conflict skip
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+./scripts/manual_e2e_key_asset_access.sh
+./scripts/e2e_local_openssh.sh
 ```
 
-Credential import/export transfers metadata only, such as `name`, `username`, and `auth_type`; passwords and private keys are never exported.
-Per-key assignments are stored in the `hop.db` relation table and are intentionally excluded from asset and credential transfer formats. Backing up `hop.db` includes these authorization settings.
-Change the admin password from Admin Web Settings; use `hop-server reset-admin` for recovery if you forget it.
+The isolated OpenSSH E2E covers exec streams and exit status, PTY, SCP, SFTP, ProxyJump, initial Host Key recording and changed-key rejection, and encrypted credential storage.
 
-## Docker
+## Documentation
 
-```bash
-# Linux (recommended): host network preserves loopback binding
-docker run -d --name hop --network host \
-  -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:vX.Y.Z
-
-# Docker Desktop: first set data/config.toml admin_bind to "0.0.0.0:8080"
-docker run -d --name hop \
-  -p 2222:2222 -p 127.0.0.1:8080:8080 \
-  -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:vX.Y.Z
-```
-
-Initial admin password: `docker logs hop`
-
-## Deployment
-
-Documentation:
-
-- **[Deployment, upgrades, backup, and rollback](docs/deployment.md)**
-- **[Admin Web guide](docs/admin-guide.md)**
-- **[v0.1.7 release notes](docs/releases/v0.1.7.md)**
-- **[Documentation index](docs/README.md)**
-
-## Security Model
-
-| Layer | Mechanism |
-|-------|-----------|
-| Hop entry auth | SSH public key whitelist only |
-| Credential storage | ChaCha20-Poly1305 + HKDF-SHA256 |
-| Admin Web auth | Argon2 password hash |
-| ProxyJump targets | Asset allowlist enforcement |
-| Admin Web exposure | Loopback-only by default |
-
-> **`hop.secret` is your crown jewel.** Lose it and all stored credentials become unrecoverable. Back it up.
-
-## Upgrade from v0.1.4
-
-v0.1.7 applies all pending database migrations on first startup while
-preserving existing assets, credentials, SSH keys, Known Hosts, and the admin
-password. Upgrading from v0.1.6 adds no new database migration. After a direct
-upgrade from v0.1.4, the migrated database cannot be opened by v0.1.4.
-
-For a home or production environment that depends on Hop:
-
-1. Arrange an alternate management path that does not depend on Hop.
-2. Stop Hop, then back up the complete persistent data directory and config.
-3. Keep the v0.1.4 binary or container image.
-4. Start v0.1.7 and verify logs, Admin login, and one real SSH path.
-5. To roll back, restore both v0.1.4 and the pre-upgrade data backup; changing
-   only the image tag is not enough.
-
-See the [safe upgrade and rollback runbook](docs/deployment.md#upgrade).
-
-## Backup
-
-Stop Hop before taking a consistent snapshot of the entire persistent data
-directory, and save the configuration with it. For Docker, back up the mounted
-`data/` directory. For a binary deployment, back up `/var/lib/hop` and
-`/etc/hop`.
-
-The three critical runtime files are:
-
-```bash
-hop.db          # Everything: assets, keys, sessions, encrypted creds
-hop.secret      # Master key — unrecoverable if lost
-hop_host_key    # SSH host identity
-```
-
-Asset or credential metadata exports do not replace a full backup. See
-[Backup & Restore](docs/deployment.md#backup--restore).
-
-## Release history
-
-See [CHANGELOG.md](CHANGELOG.md).
+- [Deployment, backup, rebuild, and recovery](docs/deployment.md)
+- [Control API and local management](docs/admin-guide.md)
+- [Declarative Apply specification](docs/product/declarative-apply-spec.md)
+- [Access Key allowlists](docs/product/lightweight-access-control.md)
+- [OpenWrt packaging and measurements](docs/openwrt.md)
+- [v0.2 product direction](docs/product/product-direction-v0.2.md)
+- [Documentation index](docs/README.md)
 
 ## License
 

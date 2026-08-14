@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use hop_core::{validate_tcp_port, Asset, HopDb, NewSession};
+use hop_core::{validate_tcp_port, Asset, Catalog, NewSession};
 use russh::{server, Channel};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -128,7 +128,7 @@ where
 
 pub async fn bridge_direct_tcpip(
     channel: Channel<server::Msg>,
-    db: HopDb,
+    db: Catalog,
     active_sessions: ActiveSessionRegistry,
     auth: AuthInfo,
     asset: Asset,

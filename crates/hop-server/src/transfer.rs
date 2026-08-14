@@ -1,21 +1,11 @@
 use anyhow::{bail, Context, Result};
-use hop_core::{Asset, AuthType, Credential, HopDb, NewAsset, NewCredential, ASSET_PROTOCOL_SSH};
+use hop_core::{Asset, AuthType, Catalog, Credential, NewAsset, NewCredential};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferKind {
     Assets,
     Credentials,
-}
-
-impl TransferKind {
-    pub fn parse(value: &str) -> Result<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "assets" | "asset" => Ok(Self::Assets),
-            "credentials" | "credential" => Ok(Self::Credentials),
-            other => bail!("unsupported import/export kind: {other}"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,33 +15,11 @@ pub enum TransferFormat {
 }
 
 impl TransferFormat {
-    pub fn parse(value: &str) -> Result<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "csv" => Ok(Self::Csv),
-            "json" => Ok(Self::Json),
-            other => bail!("unsupported import/export format: {other}"),
-        }
-    }
-
     pub fn from_path(path: &std::path::Path) -> Option<Self> {
         match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
             "csv" => Some(Self::Csv),
             "json" => Some(Self::Json),
             _ => None,
-        }
-    }
-
-    pub fn content_type(self) -> &'static str {
-        match self {
-            Self::Csv => "text/csv; charset=utf-8",
-            Self::Json => "application/json; charset=utf-8",
-        }
-    }
-
-    pub fn extension(self) -> &'static str {
-        match self {
-            Self::Csv => "csv",
-            Self::Json => "json",
         }
     }
 }
@@ -61,17 +29,6 @@ pub enum ConflictPolicy {
     Skip,
     Overwrite,
     Error,
-}
-
-impl ConflictPolicy {
-    pub fn parse(value: &str) -> Result<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "skip" => Ok(Self::Skip),
-            "overwrite" => Ok(Self::Overwrite),
-            "error" => Ok(Self::Error),
-            other => bail!("unsupported conflict policy: {other}"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -101,6 +58,7 @@ impl ImportSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AssetTransferRow {
     pub name: String,
     pub hostname: String,
@@ -108,7 +66,6 @@ pub struct AssetTransferRow {
     pub description: Option<String>,
     pub tags: Vec<String>,
     pub credential_id: Option<String>,
-    #[serde(default = "default_asset_protocol")]
     pub protocol: String,
     #[serde(default)]
     pub preset: Option<String>,
@@ -145,6 +102,7 @@ impl From<AssetTransferRow> for NewAsset {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CredentialTransferRow {
     pub name: String,
     pub username: String,
@@ -203,7 +161,7 @@ pub fn import_credential_rows(
 }
 
 pub async fn import_assets(
-    db: &HopDb,
+    db: &Catalog,
     input: &str,
     format: TransferFormat,
     policy: ConflictPolicy,
@@ -232,7 +190,7 @@ pub async fn import_assets(
 }
 
 pub async fn import_credentials(
-    db: &HopDb,
+    db: &Catalog,
     input: &str,
     format: TransferFormat,
     policy: ConflictPolicy,
@@ -317,12 +275,24 @@ fn write_credential_csv(rows: &[CredentialTransferRow]) -> String {
 }
 
 fn read_asset_csv(input: &str) -> Result<Vec<AssetTransferRow>> {
+    const HEADER: [&str; 8] = [
+        "name",
+        "hostname",
+        "port",
+        "description",
+        "tags",
+        "credential_id",
+        "protocol",
+        "preset",
+    ];
+    let records = read_csv_records(input);
+    require_csv_header(&records, &HEADER)?;
     let mut rows = Vec::new();
-    for (idx, record) in read_csv_records(input).into_iter().enumerate().skip(1) {
+    for (idx, record) in records.into_iter().enumerate().skip(1) {
         if record.iter().all(|field| field.trim().is_empty()) {
             continue;
         }
-        ensure_len(&record, 6, idx)?;
+        ensure_len(&record, HEADER.len(), idx)?;
         rows.push(AssetTransferRow {
             name: record[0].clone(),
             hostname: record[1].clone(),
@@ -332,23 +302,19 @@ fn read_asset_csv(input: &str) -> Result<Vec<AssetTransferRow>> {
             description: nonempty(record[3].clone()),
             tags: split_tags(&record[4]),
             credential_id: nonempty(record[5].clone()),
-            protocol: record
-                .get(6)
-                .cloned()
-                .unwrap_or_else(default_asset_protocol),
-            preset: record.get(7).cloned().and_then(nonempty),
+            protocol: record[6].clone(),
+            preset: nonempty(record[7].clone()),
         });
     }
     Ok(rows)
 }
 
-fn default_asset_protocol() -> String {
-    ASSET_PROTOCOL_SSH.to_string()
-}
-
 fn read_credential_csv(input: &str) -> Result<Vec<CredentialTransferRow>> {
+    const HEADER: [&str; 3] = ["name", "username", "auth_type"];
+    let records = read_csv_records(input);
+    require_csv_header(&records, &HEADER)?;
     let mut rows = Vec::new();
-    for (idx, record) in read_csv_records(input).into_iter().enumerate().skip(1) {
+    for (idx, record) in records.into_iter().enumerate().skip(1) {
         if record.iter().all(|field| field.trim().is_empty()) {
             continue;
         }
@@ -363,12 +329,23 @@ fn read_credential_csv(input: &str) -> Result<Vec<CredentialTransferRow>> {
 }
 
 fn ensure_len(record: &[String], expected: usize, idx: usize) -> Result<()> {
-    if record.len() < expected {
+    if record.len() != expected {
         bail!(
             "CSV row {} has {} fields, expected {expected}",
             idx + 1,
             record.len()
         );
+    }
+    Ok(())
+}
+
+fn require_csv_header(records: &[Vec<String>], expected: &[&str]) -> Result<()> {
+    let Some(header) = records.first() else {
+        bail!("CSV input is empty");
+    };
+    let actual = header.iter().map(String::as_str).collect::<Vec<_>>();
+    if actual.as_slice() != expected {
+        bail!("CSV header does not match the Hop v0.2 transfer format");
     }
     Ok(())
 }
@@ -459,26 +436,26 @@ mod tests {
     #[test]
     fn imports_assets_from_json_rows() {
         let rows = import_asset_rows(
-            r#"[{"name":"web","hostname":"10.0.0.1","port":3389,"description":null,"tags":["windows"],"credential_id":null,"protocol":"rdp"}]"#,
+            r#"[{"name":"web","hostname":"10.0.0.1","port":3389,"description":null,"tags":["windows"],"credential_id":null,"protocol":"tcp","preset":"rdp"}]"#,
             TransferFormat::Json,
         )
         .unwrap();
 
         assert_eq!(rows[0].name, "web");
-        assert_eq!(rows[0].protocol, "rdp");
+        assert_eq!(rows[0].protocol, "tcp");
+        assert_eq!(rows[0].preset.as_deref(), Some("rdp"));
         assert_eq!(rows[0].tags, vec!["windows"]);
     }
 
     #[test]
-    fn imports_legacy_asset_csv_rows_as_ssh_protocol() {
-        let rows = import_asset_rows(
+    fn rejects_v0_1_asset_csv_rows() {
+        let error = import_asset_rows(
             "name,hostname,port,description,tags,credential_id\nweb,10.0.0.1,22,,prod,\n",
             TransferFormat::Csv,
         )
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(rows[0].name, "web");
-        assert_eq!(rows[0].protocol, "ssh");
+        assert!(error.to_string().contains("Hop v0.2 transfer format"));
     }
 
     #[test]
@@ -505,7 +482,7 @@ mod tests {
         hop_core::Asset {
             id: name.to_string(),
             name: name.to_string(),
-            protocol: ASSET_PROTOCOL_SSH.to_string(),
+            protocol: hop_core::ASSET_PROTOCOL_SSH.to_string(),
             preset: None,
             hostname: hostname.to_string(),
             port: 22,
@@ -538,20 +515,21 @@ mod tests {
             description: Some("prod web".to_string()),
             tags: vec!["prod".to_string()],
             credential_id: None,
-            protocol: "rdp".to_string(),
-            preset: None,
+            protocol: "tcp".to_string(),
+            preset: Some("rdp".to_string()),
         };
 
         let new_asset: NewAsset = row.into();
 
         assert_eq!(new_asset.name, "web");
-        assert_eq!(new_asset.protocol, "rdp");
+        assert_eq!(new_asset.protocol, "tcp");
+        assert_eq!(new_asset.preset.as_deref(), Some("rdp"));
         assert_eq!(new_asset.tags, vec!["prod"]);
     }
 
     #[tokio::test]
     async fn credential_metadata_overwrite_preserves_existing_secret_fields() {
-        let db = HopDb::in_memory().await.unwrap();
+        let db = Catalog::in_memory().await.unwrap();
         let existing = db
             .add_credential(NewCredential {
                 id: Some("cred-1".to_string()),
@@ -586,7 +564,7 @@ mod tests {
 
     #[tokio::test]
     async fn credential_metadata_import_does_not_create_missing_secret_credentials() {
-        let db = HopDb::in_memory().await.unwrap();
+        let db = Catalog::in_memory().await.unwrap();
 
         let summary = import_credentials(
             &db,

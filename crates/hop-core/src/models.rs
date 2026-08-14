@@ -251,43 +251,9 @@ pub struct NewCredential {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct AdminUser {
-    pub id: String,
-    pub username: String,
-    pub display_name: String,
-    pub auth_source: String,
-    pub is_active: bool,
-    pub access_profile: String,
-    pub must_change_password: bool,
-    pub created_at: Option<String>,
-    pub last_login_at: Option<String>,
-}
-
-pub const ADMIN_PROFILE_OWNER: &str = "owner";
-pub const ADMIN_PROFILE_OPERATOR: &str = "operator";
-pub const ADMIN_PROFILE_VIEWER: &str = "viewer";
-
-pub fn is_valid_admin_profile(profile: &str) -> bool {
-    matches!(
-        profile,
-        ADMIN_PROFILE_OWNER | ADMIN_PROFILE_OPERATOR | ADMIN_PROFILE_VIEWER
-    )
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewAdminUser {
-    pub username: String,
-    pub display_name: String,
-    pub password_hash: String,
-    pub access_profile: String,
-    pub must_change_password: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AuditEvent {
     pub id: String,
     pub occurred_at: Option<String>,
-    pub actor_id: Option<String>,
     pub actor_label: String,
     pub action: String,
     pub target_type: String,
@@ -300,7 +266,6 @@ pub struct AuditEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewAuditEvent {
-    pub actor_id: Option<String>,
     pub actor_label: String,
     pub action: String,
     pub target_type: String,
@@ -370,12 +335,6 @@ pub struct NewKnownHost {
     pub fingerprint: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct Setting {
-    pub key: String,
-    pub value: String,
-}
-
 pub fn new_id() -> String {
     Uuid::new_v4().to_string()
 }
@@ -403,14 +362,7 @@ pub fn normalize_asset_protocol(
     protocol: &str,
     preset: Option<&str>,
 ) -> crate::Result<(String, Option<String>)> {
-    let protocol = protocol.trim().to_ascii_lowercase();
-    let legacy_preset = validate_asset_preset(Some(protocol.as_str()))
-        .ok()
-        .flatten();
-    if legacy_preset.is_some() {
-        return Ok((ASSET_PROTOCOL_TCP.to_string(), legacy_preset));
-    }
-    let protocol = validate_asset_protocol(&protocol)?;
+    let protocol = validate_asset_protocol(protocol)?;
     let preset = validate_asset_preset(preset)?;
     if protocol == ASSET_PROTOCOL_SSH && preset.is_some() {
         return Err(HopCoreError::Validation(
@@ -510,10 +462,7 @@ mod tests {
         assert_eq!(validate_asset_protocol("ssh").unwrap(), "ssh");
         assert_eq!(validate_asset_protocol(" tcp ").unwrap(), "tcp");
         assert!(validate_asset_protocol("vnc").is_err());
-        assert_eq!(
-            normalize_asset_protocol("RDP", None).unwrap(),
-            ("tcp".to_string(), Some("rdp".to_string()))
-        );
+        assert!(normalize_asset_protocol("RDP", None).is_err());
         assert_eq!(
             normalize_asset_protocol("tcp", Some("VNC")).unwrap(),
             ("tcp".to_string(), Some("vnc".to_string()))

@@ -1,264 +1,171 @@
-<div align="center">
+# Hop
 
-**中文** | [English](README-EN.md)
+Hop v0.2 是一个面向个人开发者、Homelab 和单一管理信任域小团队的轻量 SSH 跳板机。它使用原生 OpenSSH 客户端，覆盖 TUI、资产直连、远程命令、SCP/SFTP、ProxyJump 和通用 TCP 转发；不要求浏览器、专属客户端、外部数据库或容器运行时。
 
-# 🦀 Hop
+[English](README-EN.md)
 
-**极简 SSH 跳板机，极致掌控。**
+## v0.2 边界
 
-一个 Rust 单二进制文件，用公钥认证、TUI 资产选择器、托管凭证和代理转发，替代你臃肿的跳板机方案 —— 全部由 SQLite 驱动。
+- 单一 Rust 二进制和单一 SQLite Catalog。
+- 多把入口 Access Key，可独立启用、禁用或删除。
+- Key 未声明 `assets` 时访问全部当前及未来资产；`assets: []` 表示认证成功但不能发现或访问资产；非空数组是严格白名单。
+- YAML/TOML、CLI 和可选 Control API 都写入同一个 Catalog。
+- HTTP Control API 默认关闭；核心不包含 Admin Web、管理员账号、Cookie、CSRF、角色或 RBAC。
+- OpenWrt 是一等发行目标：轻量 LuCI/procd 包按架构下载经 SHA256 校验的静态核心，不在 IPK/APK 内编译或内置 Rust 后端。
 
-[![CI](https://github.com/oslo254804746/hop-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/oslo254804746/hop-rs/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-
-</div>
-
----
-
-## 为什么选 Hop？
-
-大多数跳板机/堡垒机方案是臃肿的 Java/Python 全家桶，需要数据库、缓存、消息队列和各种管理面板，部署一套要一周。Hop 反其道而行：
-
-- **单二进制** —— `hop-server` 一个文件搞定一切
-- **零外部依赖** —— SQLite 内嵌，不需要 Redis/Postgres/RabbitMQ
-- **默认安全** —— Admin Web 仅监听本地回环，凭证使用 ChaCha20-Poly1305 加密
-- **SSH 原生** —— 用户只需要 `ssh`，无需专属客户端
-
-## 功能一览
-
-```text
-┌────────────────────────────────────────────────────────┐
-│  公钥白名单        仅受信密钥可进入 Hop               │
-│  TUI 资产选择器    模糊搜索，秒级连接                 │
-│  托管凭证          服务端代理认证目标主机             │
-│  通用 TCP 转发     RDP/VNC/数据库等标准 SSH 隧道      │
-│  SSH/SFTP          托管凭证透明连接目标主机           │
-│  运营 Dashboard    网关、资产健康、覆盖率与行动项     │
-│  审计日志          SSH 会话与管理操作分流记录          │
-│  渐进多人管理      单人保持简单，按需增加管理员       │
-│  Admin 高频操作    抽屉编辑、地址与指纹一键复制       │
-│  批量导入/导出     资产与凭证元数据迁移               │
-│  TOFU 主机密钥     首次连接自动信任                   │
-│  i18n 管理界面     多语言支持                         │
-└────────────────────────────────────────────────────────┘
-```
+v0.2 是 clean break，不迁移或兼容 v0.1 数据。进程会在创建可写连接前识别旧数据库并拒绝启动，错误会提示先备份并删除旧库或选择新路径；拒绝路径不会修改旧库内容或 mtime。
 
 ## 快速开始
 
 ```bash
-# 构建
-cargo build --release -p hop-server
-
-# 运行
+cargo build --release --locked -p hop-server
 cp config.example.toml config.toml
-./target/release/hop-server serve --config config.toml
 ```
 
-首次启动自动生成：
-- SQLite 数据库
-- Ed25519 主机密钥
-- ChaCha20-Poly1305 主密钥（`hop.secret`）
-- 一次性管理员密码（输出到终端）
-
-默认端口：**SSH `0.0.0.0:2222`** | **Admin Web `127.0.0.1:8080`**
-
-Admin Web 默认不暴露到外网。远程管理建议使用 SSH 隧道：
-
-```bash
-ssh -N -L 8080:127.0.0.1:8080 root@hop-host
-```
-
-## 首次初始化
-
-另开一个终端，先把自己的 SSH 公钥加入 Hop 白名单，再创建托管凭证和资产：
+添加入口公钥、目标凭据和资产：
 
 ```bash
 ./target/release/hop-server --config config.toml key add \
-  --name "alice laptop" \
-  --public-key-file ~/.ssh/id_ed25519.pub
+  --name laptop --public-key-file ~/.ssh/id_ed25519.pub
 
-printf '%s' 'target-password' | ./target/release/hop-server --config config.toml credential add \
-  --name deploy-password \
-  --username deploy \
-  --auth-type password \
-  --password-stdin
+printf '%s' 'target-password' | \
+  ./target/release/hop-server --config config.toml credential add \
+  --name homelab-root --username root --auth-type password --password-stdin
 
+credential_id=$(./target/release/hop-server --config config.toml credential list | awk 'NR == 1 { print $1 }')
 ./target/release/hop-server --config config.toml asset add \
-  --name web-prod-01 \
-  --hostname 10.0.1.10 \
-  --port 22 \
-  --tags prod,web \
-  --credential-id <credential-id>
+  --name nas --hostname 192.168.1.20 --port 22 --credential-id "$credential_id"
+
+./target/release/hop-server --config config.toml serve
 ```
 
-`credential add` 会输出凭证 ID，填入资产的 `--credential-id`。没有托管凭证的资产仍可用于 ProxyJump 转发。
+默认 SSH 监听 `0.0.0.0:2222`，Control API 不启动。
 
-## 使用方式
+## 原生 SSH 使用
 
 ```bash
-# 交互式 TUI —— 模糊搜索你的服务器
-ssh -p 2222 hop-host
+# TUI 资产选择器
+ssh -p 2222 menu@hop-host
 
-# 直连模式 —— 资产名作为 SSH 用户名
-ssh -p 2222 web-prod-01@hop-host
+# 资产名直连与远程命令
+ssh -p 2222 nas@hop-host
+ssh -p 2222 nas@hop-host 'uname -a'
 
-# 远程命令 —— stdout、stderr、stdin 和退出码均由目标原样返回
-ssh -p 2222 web-prod-01@hop-host 'uname -a'
-printf 'input' | ssh -p 2222 web-prod-01@hop-host cat
+# SCP / SFTP 使用 Hop 托管的目标凭据
+scp -P 2222 file.txt nas@hop-host:/tmp/file.txt
+sftp -P 2222 nas@hop-host
 
-# SFTP —— 使用同一 SSH 资产及其托管凭证
-sftp -P 2222 web-prod-01@hop-host
-scp -P 2222 ./file web-prod-01@hop-host:/tmp/file
-
-# ProxyJump —— Hop 作为透明 TCP 中继
-ssh -J hop-host:2222 web-prod-01.hop
-
-# RDP —— Admin Web 中创建 protocol=RDP、port=3389 的资产后复制隧道命令
-ssh -p 2222 -N -T -L 127.0.0.1:13389:win-prod-rdp.hop:3389 hop-host
-mstsc /v:127.0.0.1:13389
-
-# VNC / MySQL 等都使用相同的通用 TCP 转发
-ssh -p 2222 -N -T -L 127.0.0.1:15900:vnc-prod.hop:5900 hop-host
-ssh -p 2222 -N -T -L 127.0.0.1:13306:mysql-prod.hop:3306 hop-host
+# 将已登记的 RDP 资产映射到本机
+ssh -p 2222 -L 13389:desktop.hop:3389 menu@hop-host
 ```
 
-交互式 TUI、直连模式（包括远程命令）和 SFTP 使用 Hop 托管凭证连接 SSH 目标。远程命令不会进入 TUI，只能对已由 SSH 用户名选定的资产执行；命令内容不会写入会话审计。ProxyJump 与本地端口转发是受资产白名单约束的透明 TCP 中继，RDP、VNC、MySQL、PostgreSQL、Redis 只是端口和客户端提示预设，核心不解析应用协议。通用转发仅支持 TCP，不自动处理 UDP 或动态多端口协议。
+ProxyJump 示例：
 
-SSH 认证 banner 在客户端选择交互式 shell、远程命令或子系统之前显示，因此配置的 banner 会写入所有连接的 stderr。自动化需要纯净 stderr 时，请设置 `ssh.banner = ""`。
+```sshconfig
+Host hop
+  HostName hop-host
+  Port 2222
+  IdentityFile ~/.ssh/id_ed25519
 
-每把启用的 Hop SSH Key 都有独立的资产访问模式：
+Host *.hop
+  ProxyJump hop
+```
 
-- `all`：可访问当前及未来新增的全部资产。新建密钥和升级前已有密钥默认使用此模式，升级不会收回现有权限。
-- `restricted`：只能访问明确分配给该密钥的资产；空分配表示可以认证进入 Hop，但不能发现或连接任何资产。
+Hop 在 TUI 列表、资产名直连、托管交互会话、远程命令、SCP/SFTP、ProxyJump 和 TCP 转发入口使用同一 Key-to-Asset 授权查询；手工构造目标不会绕过白名单。普通白名单变更只影响新连接，紧急阻断使用 Control API 的显式会话终止接口。
 
-入口密钥只决定“可以访问哪些资产”，资产绑定的托管凭据决定 Hop“如何认证到目标”。TUI、直连 SSH、远程命令、SFTP、ProxyJump 和本地 TCP 转发使用同一套按 key ID 校验的授权规则。可在 Admin Web 的密钥编辑页搜索并勾选资产，也可使用 CLI：
+## 声明式资源
+
+资源 manifest 支持严格 YAML 或 TOML，拒绝未知字段和重复资源。Secret 默认只允许 `file` 或 `env` 来源，解析后使用 Master Key 加密写入 SQLite。
+
+```yaml
+api_version: hop/v1alpha1
+
+credentials:
+  homelab:
+    type: password
+    username: root
+    password:
+      file: /etc/hop/secrets/homelab.password
+
+assets:
+  nas:
+    type: ssh
+    host: 192.168.1.20
+    port: 22
+    credential: homelab
+
+  desktop:
+    type: tcp
+    host: 192.168.1.30
+    port: 3389
+    preset: rdp
+
+access:
+  laptop:
+    public_key:
+      file: /etc/hop/keys/laptop.pub
+    assets: [nas, desktop]
+```
 
 ```bash
-hop-server key access show <key-id>
-hop-server key access set <key-id> --mode restricted --asset-id <asset-id>
-hop-server key access set <key-id> --mode restricted  # 清空权限
-hop-server key access set <key-id> --mode all         # 包含未来资产
+# 纯离线语法、secret 和引用校验
+hop-server config validate -f resources.yaml --offline --json
+
+# 针对现有 Catalog 的只读校验与 diff
+hop-server --config config.toml config validate -f resources.yaml --json
+hop-server --config config.toml config diff -f resources.yaml --source home --json
+
+# 原子提交；可选 revision 乐观锁、dry-run 和显式 prune
+hop-server --config config.toml apply -f resources.yaml \
+  --source home --base-revision 0 --json
+hop-server --config config.toml apply -f resources.yaml --source home --dry-run
+hop-server --config config.toml apply -f resources.yaml --source home --prune
+
+hop-server --config config.toml config status --json
 ```
 
-## Admin Web
+同一内容重复 apply 不增加 Catalog revision。完整 source 扫描中缺失的资源默认只标记 orphan 并继续可用；只有显式 `state: absent` 或 `--prune` 才删除。启动配置中的 watcher 同样调用这套 Apply engine，等待 scope 稳定后重扫；错误只记录状态并保留上一代有效 Catalog，且默认不 prune。
 
-v0.1.5 的 Admin Web 围绕日常运维任务组织：
+## 启动配置与 Control API
 
-- **Dashboard**：真实显示 Admin/SSH/SQLite 状态、版本、运行时间、资产健康、近期活动、覆盖率和待处理事项。
-- **资产**：搜索、标签筛选、批量标签、目标地址复制，以及不离开列表上下文的抽屉编辑。
-- **凭据**：按认证方式显示必要字段；编辑时留空敏感字段会保留原加密值；仍被资产使用时禁止删除。
-- **People & SSH Access**：按 SSH Key 选择全部资产或受限资产。
-- **Known Hosts**：检查和复制指纹，通过显式确认重置信任。
-- **审计日志**：并列查看最近的 SSH 会话和管理操作，审计详情不记录密码、私钥或 passphrase。
-- **Settings**：修改自己的密码，并在需要时添加管理员。
+`config.example.toml` 展示所有启动边界：SSH listen、数据库、Host Key、Master Key、超时、keepalive、banner、proxy policy、API、inventory source/watcher 和运行设置。YAML 配置使用相同字段。
 
-多人能力采用渐进式交互：只有一位有效管理员时仍是密码直达；添加第二位管理员后登录页才显示账号名。访问级别使用任务化的 Owner、Operator 和 Viewer，不提供复杂的 RBAC 策略编辑器。
+Catalog 资源可以动态 apply；监听地址、数据库和密钥路径等启动字段需要重启；白名单和凭据变化只影响新连接。
 
-| 访问级别 | 能力 |
-|----------|------|
-| Owner | 完整管理，包括管理员和访问级别 |
-| Operator | 管理资产、凭据、SSH 访问和 Known Hosts；查看审计 |
-| Viewer | 只读查看 Dashboard、库存和审计 |
+启用 API 时必须显式创建 Token 文件：
 
-v0.1.5 的审计页展示最近 100 条 SSH 会话和 100 条管理事件；筛选、分页、留存设置和审计导出尚未上线。完整说明见 [Admin Web 使用指南](docs/admin-guide.zh-CN.md)。
-
-## 项目结构
-
-```text
-crates/
-├── hop-core/       配置、模型、SQLite、凭证加密
-└── hop-server/     SSH 服务、TUI、Admin Web、本机 CLI
-migrations/         SQLite schema 迁移
-systemd/            生产环境 systemd 服务单元
+```toml
+[api]
+enabled = true
+listen = "127.0.0.1:8083"
+token_file = "/etc/hop/control-api.token"
+cors_allowlist = []
 ```
 
-**技术栈：** `russh` · `ratatui` · `axum` · `sqlx` · `chacha20poly1305` · `maud`
+所有 `/api/v1` 请求使用 `Authorization: Bearer <token>`。API 提供状态、Catalog revision、资源和本地 CRUD、会话终止、source/status、validate、diff、apply 与 reload；凭据响应只包含 `configured`/`missing` 状态，不返回密文或明文。非 loopback 监听必须配置明确的 CORS allowlist。
 
-## CLI 参考
+## 验证
 
 ```bash
-hop-server serve                    # 启动服务（默认）
-hop-server reset-admin              # 重置管理员密码
-hop-server key add|list|activate|deactivate
-hop-server key access show|set
-hop-server credential add|list|delete
-hop-server asset add|list|delete       # add 支持 ssh|tcp 及常见 TCP presets
-hop-server export --kind assets --format csv --output dump.csv
-hop-server import --file dump.csv --on-conflict skip
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+./scripts/manual_e2e_key_asset_access.sh
+./scripts/e2e_local_openssh.sh
 ```
 
-凭证导入/导出只迁移 `name`、`username`、`auth_type` 等元数据，不导出密码或私钥材料。
-按密钥的资产分配保存在 `hop.db` 的关联表中，不包含在资产或凭据导入/导出格式里；备份 `hop.db` 即会备份这些授权设置。
-管理员密码可在 Admin Web 的 Settings 页面修改；忘记密码时使用 `hop-server reset-admin` 随机重置。
+第二个 E2E 会启动隔离的 OpenSSH 目标，验证远程命令、stdin/stdout/stderr、退出码、PTY、SCP、SFTP、ProxyJump、Host Key 首次记录与变更拒绝，以及凭据密文。
 
-## Docker
+## 文档
 
-```bash
-# Linux（推荐）：host 网络保持回环绑定
-docker run -d --name hop --network host \
-  -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:vX.Y.Z
+- [部署、备份、重建和故障恢复](docs/deployment.md)
+- [Control API 与本地管理](docs/admin-guide.zh-CN.md)
+- [声明式 Apply 规范](docs/product/declarative-apply-spec.md)
+- [Access Key 与资产白名单](docs/product/lightweight-access-control.md)
+- [OpenWrt 打包与资源测量](docs/openwrt.md)
+- [v0.2 产品方向](docs/product/product-direction-v0.2.md)
+- [文档索引](docs/README.md)
 
-# Docker Desktop：先将 data/config.toml 的 admin_bind 改成 "0.0.0.0:8080"
-docker run -d --name hop \
-  -p 2222:2222 -p 127.0.0.1:8080:8080 \
-  -v "$PWD/data:/data" ghcr.io/oslo254804746/hop-rs:vX.Y.Z
-```
+## License
 
-查看初始管理员密码：`docker logs hop`
-
-## 部署
-
-完整文档：
-
-- **[部署、升级、备份与回滚](docs/deployment.md)**
-- **[Admin Web 使用指南](docs/admin-guide.zh-CN.md)**
-- **[v0.1.7 发布说明](docs/releases/v0.1.7.zh-CN.md)**
-- **[文档索引](docs/README.md)**
-
-## 安全模型
-
-| 层级 | 机制 |
-|------|------|
-| Hop 入口认证 | 仅 SSH 公钥白名单 |
-| 凭证存储 | ChaCha20-Poly1305 + HKDF-SHA256 |
-| Admin Web 认证 | Argon2 密码哈希 |
-| ProxyJump 目标 | 资产白名单强制校验 |
-| Admin Web 暴露面 | 默认仅监听回环地址 |
-
-> **`hop.secret` 是你的命根子。** 丢了它，所有已存储的凭证将无法恢复。务必备份。
-
-## 从 v0.1.4 升级
-
-v0.1.7 会在首次启动时应用所有待执行的数据库迁移，并保留现有资产、凭据、SSH Key、Known Hosts 和管理员密码。从 v0.1.6 升级不包含新的数据库迁移；从 v0.1.4 直接升级后，迁移后的数据库不能直接交给 v0.1.4 使用。
-
-对于依赖 Hop 访问家庭或生产设备的部署：
-
-1. 先准备一条不经过 Hop 的备用管理路径。
-2. 停止服务后备份整个持久化数据目录和配置。
-3. 保留 v0.1.4 二进制或容器镜像。
-4. 启动 v0.1.7 后检查日志、Admin 登录和一条真实 SSH 路径。
-5. 回滚时同时恢复 v0.1.4 和升级前的数据备份，不能只切换旧镜像。
-
-具体命令见 [安全升级与回滚](docs/deployment.md#upgrade)。
-
-## 备份
-
-停止 Hop 后对整个持久化目录做一致性快照，并同时保存配置。Docker 部署直接备份挂载的 `data/`；二进制部署备份 `/var/lib/hop` 和 `/etc/hop`。
-
-其中三个不可缺少的运行数据文件是：
-
-```bash
-hop.db          # 所有数据：资产、密钥、会话、加密凭证
-hop.secret      # 主密钥 —— 丢失不可恢复
-hop_host_key    # SSH 主机身份
-```
-
-只导出资产或凭据元数据不能替代完整备份。详见 [备份与恢复](docs/deployment.md#backup--restore)。
-
-## 版本记录
-
-参见 [CHANGELOG.md](CHANGELOG.md)。
-
-## 许可证
-
-[MIT](LICENSE)
+MIT

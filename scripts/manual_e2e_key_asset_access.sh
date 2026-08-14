@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hop-key-access-e2e.XXXXXX")"
 SSH_PORT=32222
-ADMIN_PORT=38080
 ASSET_ONE_PORT=39001
 ASSET_TWO_PORT=39002
 HOP_PID=""
@@ -38,8 +37,7 @@ ssh-keygen -q -t ed25519 -N '' -f "$RUN_DIR/key-restricted"
 
 cat > "$RUN_DIR/config.toml" <<EOF
 [server]
-ssh_bind = "127.0.0.1:$SSH_PORT"
-admin_bind = "127.0.0.1:$ADMIN_PORT"
+ssh_listen = "127.0.0.1:$SSH_PORT"
 
 [database]
 path = "$RUN_DIR/hop.db"
@@ -53,7 +51,7 @@ connect_timeout = 5
 proxy_policy = "assets_only"
 
 [security]
-secret_key_file = "$RUN_DIR/hop.secret"
+master_key_file = "$RUN_DIR/hop.secret"
 
 [runtime]
 temp_dir = "$RUN_DIR/tmp"

@@ -1,157 +1,129 @@
-# Admin Web Guide
+# Hop v0.2 Control API and local management
 
-[简体中文](admin-guide.zh-CN.md) | **English**
+Hop v0.2 has no built-in Admin Web or administrator-account protocol. Management belongs to one trust domain and uses either the local CLI, declarative Apply, or one equal-privilege Control API token.
 
-Hop's Admin Web is designed for a personal jump server or a small operations
-team. A single administrator gets a password-only login and a compact settings
-page. Team controls appear only when an Owner chooses to add another
-administrator.
+## Enable the API
 
-For deployment, network exposure, backup, and recovery, use the
-[deployment guide](deployment.md).
+The API is disabled by default and creates no HTTP listener. Create a protected high-entropy token file, configure the loopback listener, and restart:
 
-## Open Admin Web safely
-
-Admin Web listens on `127.0.0.1:8080` by default. Keep that default and use an
-SSH tunnel when administering a remote host:
-
-```bash
-ssh -N -L 8080:127.0.0.1:8080 root@hop-host
+```toml
+[api]
+enabled = true
+listen = "127.0.0.1:8083"
+token_file = "/var/lib/hop/control-api.token"
+cors_allowlist = []
 ```
 
-Then open `http://127.0.0.1:8080`.
+Every request requires:
 
-If a reverse proxy terminates HTTPS, set `security.admin_cookie_secure = true`.
-Do not publish the Admin port directly to an untrusted network.
+```http
+Authorization: Bearer <token>
+```
 
-## Login behavior
+A non-loopback listener is rejected unless `cors_allowlist` is explicit. Put remote access behind TLS and network controls; CORS alone is not a security boundary.
 
-- With one active administrator, the login asks only for a password.
-- After a second active administrator is added, the login also asks for the
-  account name.
-- Account names are matched case-insensitively.
-- New teammates receive a temporary password of at least 12 characters and
-  must replace it on first login before making changes.
-- Admin sessions expire after 30 minutes of inactivity and are stored in
-  memory, so restarting Hop signs administrators out.
+## Read and operate
 
-The administrator migrated from v0.1.4 keeps the existing password and becomes
-an Owner.
+Versioned endpoints:
 
-## Dashboard
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/status` | health, version, Catalog revision |
+| GET | `/api/v1/catalog/revision` | optimistic-concurrency revision |
+| GET/POST | `/api/v1/assets` | list/create local assets |
+| PUT/DELETE | `/api/v1/assets/{id}` | update/delete one local asset |
+| GET/POST | `/api/v1/credentials` | list secret status/create local credentials |
+| PUT/DELETE | `/api/v1/credentials/{id}` | update/delete one local credential |
+| GET/POST | `/api/v1/access-keys` | list/create local Access Keys |
+| DELETE | `/api/v1/access-keys/{id}` | revoke and remove a local key |
+| PUT | `/api/v1/access-keys/{id}/enabled` | enable/disable a key |
+| PUT | `/api/v1/access-keys/{id}/access` | replace all/restricted asset scope |
+| GET | `/api/v1/sessions` | recent sessions |
+| POST | `/api/v1/sessions/{id}/terminate` | explicitly terminate an active registered session |
+| GET | `/api/v1/config/sources` | source success/failure generations |
+| GET | `/api/v1/config/status` | sources, orphans, schema and revision |
+| POST | `/api/v1/config/validate` | validate manifest content |
+| POST | `/api/v1/config/diff` | read-only manifest diff |
+| POST | `/api/v1/config/apply` | atomic manifest apply with required base revision |
+| POST | `/api/v1/config/reload` | reload configured inventory sources through the same Apply engine |
 
-The Dashboard uses live runtime and database data:
+Credential responses never contain plaintext, encrypted envelopes, private keys, or passwords. Each secret field is `configured` or `missing`. Access Key responses omit the public-key body and expose only name, fingerprint, state, mode, and assigned asset IDs.
 
-- **Gateway status** checks the Admin and SSH listeners, SQLite health,
-  running version, start time, and uptime.
-- **Recent SSH access** summarizes identities, targets, modes, results, and
-  durations.
-- **Recent admin changes** comes from the separate `audit_events` store.
-- **Asset health** uses results recorded by real SSH or TCP connection
-  attempts. A newly added or never-used asset remains `unknown`.
-- **Action items** identify failed or unknown targets, missing managed
-  credentials, missing active SSH access, or a failed Dashboard data source.
-- **Coverage** explains managed-credential, restricted-access, and Known Hosts
-  coverage with both counts and percentages.
+## Local CRUD examples
 
-A failed data source degrades only its own Dashboard section instead of taking
-down the full page.
+```json
+POST /api/v1/credentials
+{
+  "name": "root",
+  "username": "root",
+  "auth_type": "password",
+  "password": "request-only-secret"
+}
+```
 
-## Assets
+Supported `auth_type` values are `password`, `key`, and `key_passphrase`. On update, omitting a secret preserves the existing compatible secret; switching authentication type requires the new type's material.
 
-The Assets page is the primary operational inventory.
+```json
+POST /api/v1/assets
+{
+  "name": "server",
+  "protocol": "ssh",
+  "hostname": "192.0.2.10",
+  "port": 22,
+  "credential_id": "<credential-id>",
+  "tags": ["home"]
+}
+```
 
-- Search across names, addresses, descriptions, protocols, presets, and tags.
-- Filter by tag and apply tags to multiple selected assets.
-- Copy `hostname:port` without opening the edit form.
-- Edit an asset in a focused drawer while keeping the list context.
-- Assign a managed credential to SSH assets.
-- Use RDP, VNC, MySQL, PostgreSQL, Redis, or Generic TCP presets for tunnel
-  defaults and client guidance.
+TCP assets use `protocol: "tcp"`, no credential, and may set `preset` to `rdp`, `vnc`, `mysql`, `postgres`, or `redis`.
 
-Presets do not make Hop an application-layer proxy. Generic forwarding is TCP
-only.
+```json
+POST /api/v1/access-keys
+{
+  "name": "laptop",
+  "public_key": "ssh-ed25519 AAAA...",
+  "assets": []
+}
+```
 
-## Credentials
+For key create/access updates, omitting `assets` means all assets, `[]` means none, and a non-empty list is a strict list of internal asset IDs.
 
-Credentials describe how Hop authenticates to an SSH target for managed TUI,
-direct SSH, and SFTP connections.
+Local CRUD can modify only resources whose ownership is `local`. A declarative resource returns HTTP 409 with code `managed_by_source`; change its owning manifest and apply it instead. Unique-name/reference conflicts are also reported without exposing database or secret details.
 
-- Create or edit credentials in a drawer.
-- The selected authentication mode shows only its relevant secret fields.
-- Saved secrets are encrypted and are never rendered back to the browser.
-- On edit, blank secret fields retain the existing encrypted value; enter a
-  value only when rotating that field.
-- The list shows how many assets use each credential.
-- A credential cannot be deleted while an asset still references it.
-- CSV and JSON exports contain metadata only. Passwords, private keys, and
-  passphrases are never exported.
+## Validate, diff, and apply
 
-Back up `hop.secret` with `hop.db`. Losing `hop.secret` makes every stored
-credential unrecoverable.
+The API accepts manifest content rather than arbitrary server-side paths:
 
-## People and SSH access
+```json
+POST /api/v1/config/diff
+{
+  "content": "api_version: hop/v1alpha1\nassets: {}\n",
+  "format": "yaml",
+  "source_id": "panel",
+  "prune": false
+}
+```
 
-An SSH public key controls who may enter Hop and which assets that key may
-reach. It is separate from a target credential.
+Apply additionally requires the revision returned by `/api/v1/catalog/revision`:
 
-- `all` grants access to every current and future asset.
-- `restricted` grants access only to explicitly selected asset IDs.
-- An empty `restricted` assignment allows authentication to Hop but exposes no
-  assets.
+```json
+POST /api/v1/config/apply
+{
+  "content": "api_version: hop/v1alpha1\nassets: {}\n",
+  "format": "yaml",
+  "source_id": "panel",
+  "base_revision": 12,
+  "prune": false,
+  "dry_run": false
+}
+```
 
-TUI, direct SSH, SFTP, ProxyJump, and generic `direct-tcpip` forwarding enforce
-the same per-key asset assignment.
+An outdated base returns `409 revision_conflict`. Validation and apply errors use stable codes and resource paths. Failed writes record a non-sensitive source/audit summary but do not partially modify resources. Dry-run does not write Catalog state.
 
-## Known Hosts
+## Session behavior
 
-Known Hosts stores TOFU trust for target SSH servers.
+Disabling a key, narrowing an allowlist, changing a credential, or deleting an asset affects new connections. Existing SSH streams are not implicitly killed. Use the explicit termination endpoint when an active session must be interrupted immediately.
 
-- Review the recorded target, key type, and fingerprint.
-- Copy a fingerprint for out-of-band comparison.
-- See whether a trust record matches an existing asset.
-- Reset trust only after confirming that the target was intentionally
-  reinstalled or its host key was intentionally rotated.
+## Panel boundary
 
-Resetting a record removes the stored trust decision. The next connection
-creates a new TOFU record, so verify the new fingerprint before proceeding.
-
-## Audit Logs
-
-Audit Logs combines two evidence streams:
-
-- SSH sessions record identity, mode, target, client address, result, start,
-  end, and error context.
-- Admin events record the actor, action, target, result, source address, and
-  allowlisted structured metadata.
-
-Passwords, private keys, passphrases, and uploaded secret contents are not
-written to audit event details.
-
-v0.1.5 displays the most recent 100 SSH sessions and 100 admin events. Query
-filters, pagination, retention controls, and audit export are planned but are
-not part of v0.1.5.
-
-## Team access without a heavy RBAC UI
-
-Hop exposes three task-oriented access levels:
-
-| Access level | Can do |
-|--------------|--------|
-| Owner | Everything, including administrators and access levels |
-| Operator | View inventory and audit evidence; manage assets, credentials, SSH access, and Known Hosts |
-| Viewer | View inventory, Dashboard, and audit evidence without changing configuration |
-
-Only an Owner can add administrators or change their access and active status.
-Hop prevents disabling or demoting the final active Owner. Changing an
-administrator's access or active status immediately invalidates that
-administrator's current sessions.
-
-## Current v0.1.5 boundaries
-
-- Local password authentication only; no OIDC or external identity provider.
-- Three fixed access levels; no custom policy editor.
-- No aggregated person record containing multiple SSH keys.
-- No audit filter, pagination, export, or retention UI yet.
-- Asset health is event-driven by real connection attempts, not a continuous
-  background monitoring system.
+An external panel or optional LuCI package may consume `/api/v1`; it must not read/write SQLite directly or duplicate assets, credentials, and Access Keys in UCI. The core does not serve panel assets and does not depend on any frontend repository.

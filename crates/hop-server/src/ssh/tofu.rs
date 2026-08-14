@@ -1,9 +1,9 @@
 use anyhow::Result;
-use hop_core::{HopDb, NewKnownHost};
+use hop_core::{Catalog, NewKnownHost};
 use russh::keys::{ssh_key::HashAlg, PublicKey};
 
 pub async fn verify_or_learn(
-    db: &HopDb,
+    db: &Catalog,
     hostname: &str,
     port: i64,
     key: &PublicKey,

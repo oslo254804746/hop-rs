@@ -1,33 +1,26 @@
-# Hop Documentation
+# Hop documentation
 
-Start with the guide that matches the job you are doing:
+## Operate v0.2
 
-## Run Hop
+- [Deployment, backup, rebuild, and recovery](deployment.md)
+- Control API and local management — [简体中文](admin-guide.zh-CN.md) | [English](admin-guide.md)
+- [OpenWrt distribution and footprint](openwrt.md)
 
-- [Deployment](deployment.md) — binary, systemd, Docker, network exposure,
-  upgrades, backups, rollback, and troubleshooting.
-- Admin Web guide — [简体中文](admin-guide.zh-CN.md) |
-  [English](admin-guide.md). Covers Dashboard, assets, credentials, SSH
-  access, Known Hosts, audit evidence, and progressive team access.
+## Active product contracts
 
-## Releases
+These documents define v0.2 behavior and take precedence over historical plans:
 
-- v0.1.7 release notes — [简体中文](releases/v0.1.7.zh-CN.md) |
-  [English](releases/v0.1.7.md). Covers the OpenSSH channel-window hotfix and
-  clean-stderr guidance for remote-command automation.
-- v0.1.6 release notes — [简体中文](releases/v0.1.6.zh-CN.md) |
-  [English](releases/v0.1.6.md). Covers managed remote commands, live session
-  termination, compatibility, and upgrade guidance.
-- v0.1.5 release notes — [简体中文](releases/v0.1.5.zh-CN.md) |
-  [English](releases/v0.1.5.md). Covers Admin redesign, operational data, team
-  access, compatibility, known limitations, and the safe upgrade path.
-- [Changelog](../CHANGELOG.md) — concise release history.
+- [Hop v0.2 product direction](product/product-direction-v0.2.md)
+- [Access Key and asset allowlist](product/lightweight-access-control.md)
+- [Declarative Apply and SQLite source-of-truth specification](product/declarative-apply-spec.md)
 
-## Product and implementation notes
+## Historical records
 
-These documents explain product intent and delivery sequencing. They are not a
-substitute for the operator guides above.
+The following describe earlier releases or superseded implementation work. They are not v0.2 requirements and must not be used to reintroduce Admin Web, migration, multi-admin roles, or RBAC:
 
-- [Admin redesign roadmap](product/admin-redesign-roadmap.md)
-- [Lightweight access control](product/lightweight-access-control.md)
-- [Release A implementation plan](product/release-a-implementation-plan.md)
+- [v0.1.7 release notes](releases/v0.1.7.md) / [简体中文](releases/v0.1.7.zh-CN.md)
+- [v0.1.6 release notes](releases/v0.1.6.md) / [简体中文](releases/v0.1.6.zh-CN.md)
+- [v0.1.5 release notes](releases/v0.1.5.md) / [简体中文](releases/v0.1.5.zh-CN.md)
+- [Archived Admin redesign roadmap](product/admin-redesign-roadmap.md)
+- [Historical Release A implementation plan](product/release-a-implementation-plan.md)
+- [Changelog](../CHANGELOG.md)
