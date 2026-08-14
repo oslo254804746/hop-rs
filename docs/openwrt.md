@@ -44,11 +44,12 @@ repository workflow.
 
 The core workflow runs the cross-architecture asset jobs for `dev`/`dev-*`
 branch pushes, release tags, and manual dispatches. It checks the ELF machine,
-rejects a dynamic program interpreter, executes `hop-server --version` through
-`cross`, and verifies the archive member name. Every path assembles the exact
-two archives and one
-`SHA256SUMS` file as a complete release-candidate artifact; only a version tag
-publishes that candidate to GitHub Releases.
+rejects a dynamic program interpreter, and executes `hop-server --version`
+directly for x86_64 or through `qemu-aarch64` for aarch64. The runtime
+self-check has a bounded timeout. It then verifies the archive member name.
+Every path assembles exactly two archives and one `SHA256SUMS` file as a
+complete release-candidate artifact; only a version tag publishes that
+candidate to GitHub Releases.
 
 UCI owns only enablement, startup config path, download release/version, and
 service logging. Assets, credentials, Access Keys, and key-to-asset allowlists
