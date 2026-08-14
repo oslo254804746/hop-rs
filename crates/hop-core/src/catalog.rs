@@ -349,19 +349,27 @@ mod tests {
 
     #[tokio::test]
     async fn read_only_open_does_not_modify_the_catalog_file() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("hop.db");
-        let catalog = Catalog::connect(&path).await.unwrap();
-        catalog.pool().close().await;
-        let before_bytes = std::fs::read(&path).unwrap();
-        let before_modified = modified(&path);
+        for _ in 0..8 {
+            let directory = tempdir().unwrap();
+            let path = directory.path().join("hop.db");
+            let catalog = Catalog::connect(&path).await.unwrap();
+            let checkpoint =
+                sqlx::query_as::<_, (i64, i64, i64)>("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .fetch_one(catalog.pool())
+                    .await
+                    .unwrap();
+            assert_eq!(checkpoint.0, 0, "WAL checkpoint must not be busy");
+            catalog.pool().close().await;
+            let before_bytes = std::fs::read(&path).unwrap();
+            let before_modified = modified(&path);
 
-        let read_only = Catalog::connect_read_only(&path).await.unwrap();
-        assert_eq!(read_only.revision().await.unwrap(), 0);
-        read_only.pool().close().await;
+            let read_only = Catalog::connect_read_only(&path).await.unwrap();
+            assert_eq!(read_only.revision().await.unwrap(), 0);
+            read_only.pool().close().await;
 
-        assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
-        assert_eq!(modified(&path), before_modified);
+            assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+            assert_eq!(modified(&path), before_modified);
+        }
     }
 
     #[tokio::test]
