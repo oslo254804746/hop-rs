@@ -222,9 +222,9 @@ OpenWrt 是 v0.2 的一等发行目标，而不是发布后手工打包：
 - inventory source 在启动时调用统一 Apply engine；watcher 等待 scope 稳定后重扫，失败保留上一代有效 Catalog，且默认不 prune。
 - OpenWrt `all` 架构 LuCI/procd/UCI 包、校验下载器，以及 x86_64/aarch64 静态核心 Release 契约。
 - OpenWrt 24.10.4 IPK 与 25.12.5 APK 已由各自官方 SDK 完成云端实际打包验证。
+- x86_64/aarch64 musl 核心已完成云端静态构建、ELF/运行自检、归档、统一 `SHA256SUMS` 与完整候选包验证。
 - v0.2 schema 上的隔离 OpenSSH E2E 已覆盖远程命令流与退出码、PTY、SCP、SFTP、ProxyJump、Host Key 首次记录与变更拒绝，以及凭据密文。
 
-仍属于完成 Goal 前的未完成项：
+后续真实硬件复测：
 
-- x86_64/aarch64 musl 核心资产的云端构建记录。
-- 真实 OpenWrt 设备上的分架构 RSS 复测；在获得设备前以隔离的 x86_64 GNU/Linux 基线持续观察资源趋势。
+- 在真实 x86_64 与 aarch64 OpenWrt 设备上复测 RSS；获得设备前，以隔离的 x86_64 GNU/Linux 基线持续观察资源趋势。该复测不改变已经验证的首批静态核心与轻量控制包边界。

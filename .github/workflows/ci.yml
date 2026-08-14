@@ -235,6 +235,7 @@ jobs:
           test "${actual[*]}" = "${expected[*]}"
           for archive in "${expected[@]}"; do
             test "$(tar -tzf "dist/$archive")" = hop-server
+            stat --printf='%n %s bytes\n' "dist/$archive"
           done
           (
             cd dist

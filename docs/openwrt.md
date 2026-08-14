@@ -40,7 +40,7 @@ never checks out `hop-rs`, and never runs Cargo.
 On 2026-08-14, the official OpenWrt 24.10.4 SDK produced the architecture-
 independent IPK and the official OpenWrt 25.12.5 SDK produced the APK from the
 same source. Both packages passed artifact recording and upload in the LuCI
-repository workflow.
+repository [workflow run 31778288869](https://github.com/oslo254804746/luci-app-hop/actions/runs/31778288869).
 
 The core workflow runs the cross-architecture asset jobs for `dev`/`dev-*`
 branch pushes, release tags, and manual dispatches. It checks the ELF machine,
@@ -50,6 +50,12 @@ self-check has a bounded timeout. It then verifies the archive member name.
 Every path assembles exactly two archives and one `SHA256SUMS` file as a
 complete release-candidate artifact; only a version tag publishes that
 candidate to GitHub Releases.
+
+The first complete core validation is
+[workflow run 31779498525](https://github.com/oslo254804746/hop-rs/actions/runs/31779498525).
+Its x86_64 and aarch64 transport artifacts were 3,619,728 and 3,690,286 bytes;
+the complete release-candidate artifact was 7,310,244 bytes. Candidate assembly
+also prints the raw compressed archive sizes before generating `SHA256SUMS`.
 
 UCI owns only enablement, startup config path, download release/version, and
 service logging. Assets, credentials, Access Keys, and key-to-asset allowlists
