@@ -584,8 +584,6 @@ struct AssetWriteRequest {
     name: String,
     #[serde(default = "default_asset_protocol")]
     protocol: String,
-    #[serde(default)]
-    preset: Option<String>,
     hostname: String,
     port: i64,
     #[serde(default)]
@@ -601,7 +599,6 @@ impl From<AssetWriteRequest> for NewAsset {
         Self {
             name: request.name,
             protocol: request.protocol,
-            preset: request.preset,
             hostname: request.hostname,
             port: request.port,
             description: request.description,
@@ -1294,7 +1291,7 @@ mod tests {
     async fn api_crud_rejects_declarative_resources_as_managed_by_source() {
         let catalog = Catalog::in_memory().await.unwrap();
         let manifest = Manifest::from_yaml(
-            "api_version: hop/v1alpha1\nassets:\n  managed:\n    type: tcp\n    host: 192.0.2.20\n    port: 3389\n    preset: rdp\n",
+            "api_version: hop/v1alpha1\nassets:\n  managed:\n    type: tcp\n    host: 192.0.2.20\n    port: 3389\n",
         )
         .unwrap();
         catalog
@@ -1322,7 +1319,6 @@ mod tests {
                 serde_json::json!({
                     "name": "managed",
                     "protocol": "tcp",
-                    "preset": "rdp",
                     "hostname": "192.0.2.21",
                     "port": 3389
                 }),

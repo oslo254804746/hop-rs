@@ -62,6 +62,10 @@ service logging. Assets, credentials, Access Keys, and key-to-asset allowlists
 remain exclusively in the Hop SQLite Catalog. The OpenWrt package has no
 Node.js, Docker, built-in Admin Web, or Rust toolchain dependency.
 
+Installation, UCI fields, core updates, resource manifests, firewall scope,
+and backup are documented in the
+[`luci-app-hop` configuration guide](https://github.com/oslo254804746/luci-app-hop/blob/dev/docs/configuration.zh-CN.md).
+
 ## 2026-08-14 host baseline
 
 Measured with `cargo build --release -p hop-server --locked` on x86_64 GNU/Linux

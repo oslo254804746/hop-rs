@@ -12,8 +12,7 @@ Hop v0.2 is a lightweight SSH jump server for individual developers, homelabs, a
 - YAML/TOML, the local CLI, and the optional Control API all write through the same Catalog.
 - The HTTP Control API is disabled by default. Core contains no Admin Web, administrator accounts, cookies, CSRF, roles, or RBAC.
 - OpenWrt is a first-class distribution target: a lightweight LuCI/procd package downloads the verified static core for the router architecture instead of compiling or embedding Rust in the IPK/APK.
-
-v0.2 is a clean break and does not migrate or read v0.1 data. Hop detects an old database before opening it for writes, refuses startup with backup/delete/new-path guidance, and leaves its bytes and mtime unchanged.
+- Asset types are limited to `ssh` and `tcp`. Hop manages SSH protocol and credentials; RDP and database services use generic TCP forwarding.
 
 ## Quick start
 
@@ -34,6 +33,8 @@ credential_id=$(./target/release/hop-server --config config.toml credential list
 
 ./target/release/hop-server --config config.toml serve
 ```
+
+Startup configuration can also use [`config.example.yaml`](config.example.yaml). [`resources.example.yaml`](resources.example.yaml) is a secret-free SSH/TCP manifest that can be validated as-is.
 
 SSH listens on `0.0.0.0:2222` by default. No HTTP listener is created.
 
@@ -85,7 +86,6 @@ assets:
     type: tcp
     host: 192.168.1.30
     port: 3389
-    preset: rdp
 
 access:
   laptop:
@@ -138,6 +138,9 @@ The isolated OpenSSH E2E covers exec streams and exit status, PTY, SCP, SFTP, Pr
 
 ## Documentation
 
+- [SSH and TCP proxying, Chinese](docs/proxying.zh-CN.md)
+- [Configuration reference, Chinese](docs/configuration.zh-CN.md)
+- [Deployment guide, Chinese](docs/deployment.zh-CN.md)
 - [Deployment, backup, rebuild, and recovery](docs/deployment.md)
 - [Control API and local management](docs/admin-guide.md)
 - [Declarative Apply specification](docs/product/declarative-apply-spec.md)

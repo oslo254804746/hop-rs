@@ -17,8 +17,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use hop_core::{
     load_master_key, load_or_create_master_key, ApplyOptions, AssetAccessMode, AuthType, Catalog,
-    CatalogError, HopConfig, MasterKey, NewAsset, ASSET_PRESET_RDP, ASSET_PROTOCOL_SSH,
-    ASSET_PROTOCOL_TCP,
+    CatalogError, HopConfig, MasterKey, NewAsset, ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
 };
 use serde::Serialize;
 use tracing::{info, warn};
@@ -261,24 +260,14 @@ enum CredentialCommand {
 #[derive(Debug, Clone, ValueEnum)]
 enum AssetProtocolArg {
     Ssh,
-    Rdp,
     Tcp,
-    Vnc,
-    Mysql,
-    Postgres,
-    Redis,
 }
 
 impl AssetProtocolArg {
-    fn parts(&self) -> (&'static str, Option<&'static str>) {
+    fn as_str(&self) -> &'static str {
         match self {
-            Self::Ssh => (ASSET_PROTOCOL_SSH, None),
-            Self::Tcp => (ASSET_PROTOCOL_TCP, None),
-            Self::Rdp => (ASSET_PROTOCOL_TCP, Some(ASSET_PRESET_RDP)),
-            Self::Vnc => (ASSET_PROTOCOL_TCP, Some("vnc")),
-            Self::Mysql => (ASSET_PROTOCOL_TCP, Some("mysql")),
-            Self::Postgres => (ASSET_PROTOCOL_TCP, Some("postgres")),
-            Self::Redis => (ASSET_PROTOCOL_TCP, Some("redis")),
+            Self::Ssh => ASSET_PROTOCOL_SSH,
+            Self::Tcp => ASSET_PROTOCOL_TCP,
         }
     }
 }
@@ -407,13 +396,11 @@ async fn main() -> Result<()> {
                     tags,
                     credential_id,
                 } => {
-                    let (protocol, preset) = protocol.parts();
                     local_cli::add_asset(
                         &db,
                         NewAsset {
                             name,
-                            protocol: protocol.to_string(),
-                            preset: preset.map(str::to_string),
+                            protocol: protocol.as_str().to_string(),
                             hostname,
                             port,
                             description,
@@ -1006,15 +993,15 @@ access:
     }
 
     #[test]
-    fn asset_add_parses_rdp_protocol_option() {
+    fn asset_add_accepts_only_ssh_and_tcp_protocol_options() {
         let cli = Cli::try_parse_from([
             "hop-server",
             "asset",
             "add",
             "--name",
-            "win-rdp",
+            "desktop",
             "--protocol",
-            "rdp",
+            "tcp",
             "--hostname",
             "10.0.2.20",
             "--port",
@@ -1029,11 +1016,23 @@ access:
             panic!("expected asset add");
         };
 
-        assert_eq!(
-            protocol.parts(),
-            (ASSET_PROTOCOL_TCP, Some(ASSET_PRESET_RDP))
-        );
+        assert_eq!(protocol.as_str(), ASSET_PROTOCOL_TCP);
         assert_eq!(port, 3389);
+
+        assert!(Cli::try_parse_from([
+            "hop-server",
+            "asset",
+            "add",
+            "--name",
+            "desktop",
+            "--protocol",
+            "rdp",
+            "--hostname",
+            "10.0.2.20",
+            "--port",
+            "3389",
+        ])
+        .is_err());
     }
 
     #[test]
@@ -1078,7 +1077,7 @@ access:
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             file.path(),
-            "name,hostname,port,description,tags,credential_id,protocol,preset\nweb,10.0.0.2,22,,,,ssh,\n",
+            "name,hostname,port,description,tags,credential_id,protocol\nweb,10.0.0.2,22,,,,ssh\n",
         )
         .unwrap();
 

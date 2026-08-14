@@ -5,7 +5,7 @@ use sqlx::{Sqlite, Transaction};
 use super::Catalog;
 use crate::{
     models::{AssetRow, AuthorizedKeyRow},
-    new_id, normalize_asset_protocol, protocol_supports_managed_credentials,
+    new_id, protocol_supports_managed_credentials, validate_asset_protocol,
     validate_credential_material, validate_tcp_port, Asset, AssetAccessMode, AuthorizedKey,
     Credential, HopCoreError, KnownHost, NewAsset, NewAuthorizedKey, NewCredential, NewKnownHost,
     NewSession, Result, Session,
@@ -337,7 +337,7 @@ impl Catalog {
     pub async fn list_assets_for_key(&self, key_id: &str) -> Result<Vec<Asset>> {
         let rows = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT a.id, a.name, a.asset_type AS protocol, a.preset, a.host AS hostname,
+            SELECT a.id, a.name, a.asset_type AS protocol, a.host AS hostname,
                    a.port, a.description, a.tags_json AS tags, a.credential_id,
                    a.created_at, a.updated_at
             FROM assets a
@@ -361,7 +361,7 @@ impl Catalog {
     ) -> Result<Option<Asset>> {
         let row = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT a.id, a.name, a.asset_type AS protocol, a.preset, a.host AS hostname,
+            SELECT a.id, a.name, a.asset_type AS protocol, a.host AS hostname,
                    a.port, a.description, a.tags_json AS tags, a.credential_id,
                    a.created_at, a.updated_at
             FROM assets a
@@ -410,7 +410,7 @@ impl Catalog {
             .unwrap_or(host_to_connect);
         let row = sqlx::query_as::<_, AssetRow>(
             r#"
-            SELECT a.id, a.name, a.asset_type AS protocol, a.preset, a.host AS hostname,
+            SELECT a.id, a.name, a.asset_type AS protocol, a.host AS hostname,
                    a.port, a.description, a.tags_json AS tags, a.credential_id,
                    a.created_at, a.updated_at
             FROM assets a
@@ -532,7 +532,7 @@ impl Catalog {
 
 fn asset_select(suffix: &str) -> String {
     format!(
-        "SELECT id, name, asset_type AS protocol, preset, host AS hostname, port, description, tags_json AS tags, credential_id, created_at, updated_at FROM assets {suffix}"
+        "SELECT id, name, asset_type AS protocol, host AS hostname, port, description, tags_json AS tags, credential_id, created_at, updated_at FROM assets {suffix}"
     )
 }
 
@@ -565,7 +565,7 @@ async fn write_asset(
     asset: NewAsset,
     update: bool,
 ) -> Result<()> {
-    let (protocol, preset) = normalize_asset_protocol(&asset.protocol, asset.preset.as_deref())?;
+    let protocol = validate_asset_protocol(&asset.protocol)?;
     let port = validate_tcp_port(asset.port)?;
     let tags = serde_json::to_string(&asset.tags)?;
     let credential_id = if protocol_supports_managed_credentials(&protocol) {
@@ -576,14 +576,13 @@ async fn write_asset(
     if update {
         sqlx::query(
             r#"
-            UPDATE assets SET name = ?1, asset_type = ?2, preset = ?3, host = ?4,
-                port = ?5, description = ?6, tags_json = ?7, credential_id = ?8,
-                updated_at = CURRENT_TIMESTAMP WHERE id = ?9
+            UPDATE assets SET name = ?1, asset_type = ?2, host = ?3,
+                port = ?4, description = ?5, tags_json = ?6, credential_id = ?7,
+                updated_at = CURRENT_TIMESTAMP WHERE id = ?8
             "#,
         )
         .bind(asset.name)
         .bind(protocol)
-        .bind(preset)
         .bind(asset.hostname)
         .bind(i64::from(port))
         .bind(asset.description)
@@ -596,14 +595,13 @@ async fn write_asset(
         sqlx::query(
             r#"
             INSERT INTO assets
-                (id, name, asset_type, preset, host, port, description, tags_json, credential_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                (id, name, asset_type, host, port, description, tags_json, credential_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
         )
         .bind(id)
         .bind(asset.name)
         .bind(protocol)
-        .bind(preset)
         .bind(asset.hostname)
         .bind(i64::from(port))
         .bind(asset.description)
@@ -737,9 +735,7 @@ fn row_not_found() -> HopCoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        AuthType, NewCredential, ASSET_PRESET_POSTGRES, ASSET_PRESET_RDP, ASSET_PROTOCOL_TCP,
-    };
+    use crate::{AuthType, NewCredential, ASSET_PROTOCOL_TCP};
 
     #[tokio::test]
     async fn local_crud_uses_catalog_revision_and_ownership() {
@@ -795,7 +791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn access_scope_is_identical_for_discovery_direct_managed_and_tcp_presets() {
+    async fn access_scope_is_identical_for_discovery_direct_managed_and_tcp_assets() {
         let catalog = Catalog::in_memory().await.unwrap();
         let ssh = catalog
             .add_asset(NewAsset::new("shell", "192.0.2.10", 22))
@@ -805,7 +801,6 @@ mod tests {
             .add_asset(NewAsset {
                 name: "desktop".to_string(),
                 protocol: ASSET_PROTOCOL_TCP.to_string(),
-                preset: Some(ASSET_PRESET_RDP.to_string()),
                 hostname: "192.0.2.20".to_string(),
                 port: 3389,
                 description: None,
@@ -818,7 +813,6 @@ mod tests {
             .add_asset(NewAsset {
                 name: "postgres".to_string(),
                 protocol: ASSET_PROTOCOL_TCP.to_string(),
-                preset: Some(ASSET_PRESET_POSTGRES.to_string()),
                 hostname: "192.0.2.30".to_string(),
                 port: 5432,
                 description: None,

@@ -1228,7 +1228,6 @@ mod tests {
             id: "asset-1".to_string(),
             name: "web-prod-01".to_string(),
             protocol: hop_core::ASSET_PROTOCOL_SSH.to_string(),
-            preset: None,
             hostname: "10.0.0.10".to_string(),
             port: 22,
             description: None,

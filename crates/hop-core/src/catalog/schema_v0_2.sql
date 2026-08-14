@@ -38,12 +38,10 @@ CREATE TABLE assets (
     display_name  TEXT,
     description   TEXT,
     tags_json     TEXT,
-    preset        TEXT,
     credential_id TEXT REFERENCES credentials(id) ON DELETE RESTRICT,
     created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CHECK (asset_type = 'ssh' OR credential_id IS NULL),
-    CHECK (asset_type = 'tcp' OR preset IS NULL)
+    CHECK (asset_type = 'ssh' OR credential_id IS NULL)
 );
 
 CREATE INDEX idx_assets_host_port ON assets(host, port);

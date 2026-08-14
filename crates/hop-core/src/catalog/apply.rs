@@ -215,7 +215,6 @@ struct AssetUpsert {
     display_name: Option<String>,
     description: Option<String>,
     credential_id: Option<String>,
-    preset: Option<String>,
     hash: String,
 }
 
@@ -416,7 +415,6 @@ async fn build_plan(
                 display_name,
                 description,
                 credential,
-                preset,
             } => {
                 let credential_id = credential
                     .as_ref()
@@ -436,7 +434,6 @@ async fn build_plan(
                     display_name.as_deref(),
                     description.as_deref(),
                     credential.as_deref(),
-                    preset.as_deref(),
                 );
                 let existing = existing_assets.get(name).map(ExistingAsset::resource);
                 let (id, action) = classify_present(existing.as_ref(), source_id, &hash, &path)?;
@@ -452,7 +449,6 @@ async fn build_plan(
                         display_name: display_name.clone(),
                         description: description.clone(),
                         credential_id,
-                        preset: preset.clone(),
                         hash,
                     });
                 }
@@ -790,8 +786,8 @@ async fn execute_plan(
         sqlx::query(
             r#"
             INSERT INTO assets
-                (id, name, asset_type, host, port, display_name, description, preset, credential_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                (id, name, asset_type, host, port, display_name, description, credential_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 asset_type = excluded.asset_type,
@@ -799,7 +795,6 @@ async fn execute_plan(
                 port = excluded.port,
                 display_name = excluded.display_name,
                 description = excluded.description,
-                preset = excluded.preset,
                 credential_id = excluded.credential_id,
                 updated_at = CURRENT_TIMESTAMP
             "#,
@@ -811,7 +806,6 @@ async fn execute_plan(
         .bind(i64::from(asset.port))
         .bind(&asset.display_name)
         .bind(&asset.description)
-        .bind(&asset.preset)
         .bind(&asset.credential_id)
         .execute(&mut **transaction)
         .await
@@ -1066,7 +1060,6 @@ fn asset_hash(
     display_name: Option<&str>,
     description: Option<&str>,
     credential: Option<&str>,
-    preset: Option<&str>,
 ) -> String {
     hash_value(serde_json::json!({
         "type": asset_type.as_str(),
@@ -1075,7 +1068,6 @@ fn asset_hash(
         "display_name": display_name,
         "description": description,
         "credential": credential,
-        "preset": preset,
     }))
 }
 

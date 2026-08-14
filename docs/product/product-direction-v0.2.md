@@ -8,6 +8,9 @@
 
 - [声明式资源 Apply 与 SQLite 事实源规范](declarative-apply-spec.md)
 - [Access Key 与资产白名单方案](lightweight-access-control.md)
+- [SSH 与 TCP 代理](../proxying.zh-CN.md)
+- [配置参考](../configuration.zh-CN.md)
+- [部署指南](../deployment.zh-CN.md)
 
 ## 1. 产品定位
 
@@ -71,7 +74,7 @@ Hop 优先完善：
 - 托管远程命令。
 - SCP/SFTP。
 - ProxyJump。
-- 通用 TCP 转发及 RDP/VNC/数据库预设。
+- 通用 TCP 转发。RDP、VNC 和数据库等服务统一使用 TCP 资产。
 - 凭据托管。
 - Host Key 信任。
 - 多入口 SSH Key。
@@ -101,7 +104,7 @@ Hop 明确区分两个层面：
 - 不提供自定义角色、capability 编辑器或策略语言。
 - 独立面板和 LuCI 都接入同一个版本化 Control API。
 
-v0.2 是明确的 clean break。多管理员、访问级别和内置 Admin Web 直接退出新架构，不实现旧数据迁移或兼容层。进程检测到 v0.1 数据库时必须安全拒绝启动并提示备份或删除，绝不能自动覆盖、DROP 或改写旧库。
+核心不保留多管理员、访问级别和内置 Admin Web 的兼容层。管理入口只围绕当前的单一信任域模型设计。
 
 ### 4.2 访问面
 
@@ -211,8 +214,7 @@ OpenWrt 是 v0.2 的一等发行目标，而不是发布后手工打包：
 
 已经落地：
 
-- 全新的单一 v0.2 SQLite baseline，核心启动不再执行 v0.1 migration chain。
-- v0.1 数据库在建立可写连接前只读拒绝，并有字节和修改时间不变测试。
+- 单一 v0.2 SQLite Catalog 和明确的 schema marker。
 - 统一 Catalog、资源归属、revision、source generation、orphan 和显式 prune。
 - 严格 YAML/TOML manifest、离线/在线 validate、diff、dry-run 和原子 apply。
 - 多 Access Key 的 `all` / `restricted` / 空白名单语义继续覆盖 SSH 运行路径。

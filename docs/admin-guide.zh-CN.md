@@ -75,7 +75,7 @@ Authorization: Bearer <token>
 }
 ```
 
-TCP 资产使用 `protocol: "tcp"`，不带凭据，可用 `rdp`、`vnc`、`mysql`、`postgres` 或 `redis` preset。
+TCP 资产使用 `protocol: "tcp"`，不带 SSH 凭据。RDP、VNC、MySQL、PostgreSQL 和 Redis 都使用同一种 TCP 资产，不需要额外的类型别名。
 
 创建 Access Key：
 

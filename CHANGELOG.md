@@ -6,13 +6,13 @@ All notable user-visible changes to Hop are recorded here.
 
 ### Changed
 
-- Replaced the v0.1 migration chain with a fresh `hop/v0.2` SQLite Catalog
-  baseline. Existing non-v0.2 databases are rejected read-only with explicit
-  backup/delete/new-path guidance.
+- Uses one `hop/v0.2` SQLite Catalog for resources and runtime state.
 - Added strict YAML/TOML validate, diff, dry-run, atomic apply, revision
   conflicts, source ownership, orphan status, and opt-in prune.
-- Unified TUI, direct SSH, exec, SCP/SFTP, ProxyJump, TCP forwarding, and TCP
-  presets on the same all/restricted Access Key boundary.
+- Unified TUI, direct SSH, exec, SCP/SFTP, ProxyJump, and TCP forwarding on the
+  same all/restricted Access Key boundary.
+- Limited the asset type contract to `ssh` and `tcp`; service names such as RDP
+  and MySQL no longer appear as protocol aliases or presets.
 - Added a default-off, loopback Control API with one management token, local
   resource CRUD, session termination, and declarative operations.
 - Removed the built-in Admin Web, its Node/Docker/release-asset pipeline,
@@ -20,11 +20,7 @@ All notable user-visible changes to Hop are recorded here.
   capability code, and `reset-admin`.
 - Added stable-snapshot inventory watching through the same Apply engine and
   an OpenWrt core-package boundary with procd/UCI service integration.
-
-### Compatibility
-
-- v0.2 is intentionally incompatible with v0.1 data and provides no migration,
-  import, compatibility reader, or dual-version mode.
+- Added configuration, proxying, Linux deployment, and `luci-app-hop` guides.
 
 ## [0.1.7] - 2026-08-09
 

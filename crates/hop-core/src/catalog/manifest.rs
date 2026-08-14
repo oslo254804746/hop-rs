@@ -268,7 +268,6 @@ pub struct AssetSpec {
     pub display_name: Option<String>,
     pub description: Option<String>,
     pub credential: Option<String>,
-    pub preset: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,7 +341,6 @@ pub(crate) enum ResolvedAsset {
         display_name: Option<String>,
         description: Option<String>,
         credential: Option<String>,
-        preset: Option<String>,
     },
 }
 
@@ -449,7 +447,6 @@ fn resolve_asset(spec: &AssetSpec, path: &str) -> CatalogResult<ResolvedAsset> {
                 spec.display_name.is_some(),
                 spec.description.is_some(),
                 spec.credential.is_some(),
-                spec.preset.is_some(),
             ],
         )?;
         return Ok(ResolvedAsset::Absent);
@@ -463,31 +460,13 @@ fn resolve_asset(spec: &AssetSpec, path: &str) -> CatalogResult<ResolvedAsset> {
         .filter(|port| *port > 0)
         .ok_or_else(|| missing_field(format!("{path}.port"), "port must be between 1 and 65535"))?;
     let credential = optional_name(spec.credential.as_deref(), &format!("{path}.credential"))?;
-    let preset = trim_optional(spec.preset.as_deref());
-    let preset = match asset_type {
-        AssetType::Ssh if preset.is_some() => {
-            return Err(CatalogError::new(
-                CatalogErrorCode::ApplyFailed,
-                Some(format!("{path}.preset")),
-                "ssh asset cannot set a tcp preset",
-            ));
-        }
-        AssetType::Tcp if credential.is_some() => {
-            return Err(CatalogError::new(
-                CatalogErrorCode::ApplyFailed,
-                Some(format!("{path}.credential")),
-                "tcp asset cannot reference an ssh credential",
-            ));
-        }
-        AssetType::Tcp => crate::validate_asset_preset(preset.as_deref()).map_err(|_| {
-            CatalogError::new(
-                CatalogErrorCode::ApplyFailed,
-                Some(format!("{path}.preset")),
-                "tcp preset must be rdp, vnc, mysql, postgres or redis",
-            )
-        })?,
-        AssetType::Ssh => None,
-    };
+    if asset_type == AssetType::Tcp && credential.is_some() {
+        return Err(CatalogError::new(
+            CatalogErrorCode::ApplyFailed,
+            Some(format!("{path}.credential")),
+            "tcp asset cannot reference an ssh credential",
+        ));
+    }
     Ok(ResolvedAsset::Present {
         asset_type,
         host,
@@ -495,7 +474,6 @@ fn resolve_asset(spec: &AssetSpec, path: &str) -> CatalogResult<ResolvedAsset> {
         display_name: trim_optional(spec.display_name.as_deref()),
         description: trim_optional(spec.description.as_deref()),
         credential,
-        preset,
     })
 }
 
@@ -856,13 +834,12 @@ assets = ["server"]
     }
 
     #[test]
-    fn declarative_tcp_assets_reject_unknown_presets() {
-        let manifest = Manifest::from_yaml(
+    fn declarative_assets_reject_preset_aliases() {
+        let error = Manifest::from_yaml(
             "api_version: hop/v1alpha1\nassets:\n  console:\n    type: tcp\n    host: 192.0.2.10\n    port: 5900\n    preset: telnet\n",
         )
-        .unwrap();
-        let error = manifest.validate_offline().unwrap_err();
-        assert_eq!(error.code, CatalogErrorCode::ApplyFailed);
+        .unwrap_err();
+        assert_eq!(error.code, CatalogErrorCode::UnknownField);
         assert_eq!(error.path.as_deref(), Some("assets.console.preset"));
     }
 }

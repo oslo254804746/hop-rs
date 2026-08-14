@@ -127,7 +127,6 @@ assets:
     type: tcp
     host: 192.168.11.133
     port: 3389
-    preset: rdp
 
 access:
   oslo:
@@ -315,7 +314,7 @@ assets:
 
 - 端口范围为 `1..=65535`。
 - `ssh` 资产可以引用 SSH credential。
-- `tcp` 资产不得引用 SSH credential；RDP/VNC/MySQL 等使用 `preset` 表达客户端提示。
+- `tcp` 资产不得引用 SSH credential；RDP、VNC 和 MySQL 等服务统一使用 `tcp` 类型。
 - 同一资产的类型改变必须经过完整兼容性校验，不能保留不再适用的 credential 字段。
 
 ### 8.3 凭据规则
@@ -448,14 +447,6 @@ CREATE TABLE config_sources (
 );
 ```
 
-v0.2 使用全新的 schema baseline，不执行 v0.1 数据迁移：
-
-- 新数据库直接创建 v0.2 Catalog、状态和 apply 元数据表。
-- 检测到 v0.1 schema 时返回 `legacy_database_unsupported` 并拒绝启动。
-- 拒绝路径不得执行 DROP、ALTER 或任何写入。
-- 错误信息提示用户先备份旧数据库，再显式删除或选择新的数据库路径。
-- 不提供旧资产、凭据、Access Key、管理员或审计数据的导入工具。
-
 ## 14. 错误码
 
 v1 至少定义：
@@ -473,7 +464,6 @@ v1 至少定义：
 - `managed_by_source`
 - `revision_conflict`
 - `source_scan_incomplete`
-- `legacy_database_unsupported`
 - `apply_failed`
 
 适用时错误响应包含资源路径，例如 `assets.demo.credential`；数据库级失败可能没有资源路径。任何错误都不得包含 password、private key 或 passphrase 内容。
@@ -496,8 +486,7 @@ v1 至少定义：
 12. 并发 API 修改导致 base revision 过期时 apply 失败。
 13. apply 不会在日志、diff、审计或错误中泄露 secret。
 14. 删除资产后新连接被拒绝，既有连接按默认策略保持。
-15. 使用 v0.1 数据库启动时安全失败，旧数据库内容和修改时间保持不变。
 
 ## 16. 实现状态
 
-v0.2 已实现统一 Catalog、全新 baseline、旧库只读拒绝、严格 YAML/TOML、validate/diff/dry-run、单事务 apply、revision、ownership、absent/orphan/prune、CLI、稳定快照 watcher 和版本化 Control API。外部面板只能通过 API 提交操作，不得直接编辑数据库；SQLite 始终是资源运行事实源。
+v0.2 已实现统一 Catalog、严格 YAML/TOML、validate/diff/dry-run、单事务 apply、revision、ownership、absent/orphan/prune、CLI、稳定快照 watcher 和版本化 Control API。外部面板只能通过 API 提交操作，不得直接编辑数据库；SQLite 始终是资源运行事实源。

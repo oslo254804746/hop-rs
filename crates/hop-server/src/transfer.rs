@@ -67,8 +67,6 @@ pub struct AssetTransferRow {
     pub tags: Vec<String>,
     pub credential_id: Option<String>,
     pub protocol: String,
-    #[serde(default)]
-    pub preset: Option<String>,
 }
 
 impl From<Asset> for AssetTransferRow {
@@ -81,7 +79,6 @@ impl From<Asset> for AssetTransferRow {
             tags: asset.tags,
             credential_id: asset.credential_id,
             protocol: asset.protocol,
-            preset: asset.preset,
         }
     }
 }
@@ -91,7 +88,6 @@ impl From<AssetTransferRow> for NewAsset {
         Self {
             name: row.name,
             protocol: row.protocol,
-            preset: row.preset,
             hostname: row.hostname,
             port: row.port,
             description: row.description,
@@ -239,8 +235,7 @@ pub async fn import_credentials(
 }
 
 fn write_asset_csv(rows: &[AssetTransferRow]) -> String {
-    let mut output =
-        String::from("name,hostname,port,description,tags,credential_id,protocol,preset\n");
+    let mut output = String::from("name,hostname,port,description,tags,credential_id,protocol\n");
     for row in rows {
         push_csv_row(
             &mut output,
@@ -252,7 +247,6 @@ fn write_asset_csv(rows: &[AssetTransferRow]) -> String {
                 &row.tags.join("|"),
                 row.credential_id.as_deref().unwrap_or(""),
                 row.protocol.as_str(),
-                row.preset.as_deref().unwrap_or(""),
             ],
         );
     }
@@ -275,7 +269,7 @@ fn write_credential_csv(rows: &[CredentialTransferRow]) -> String {
 }
 
 fn read_asset_csv(input: &str) -> Result<Vec<AssetTransferRow>> {
-    const HEADER: [&str; 8] = [
+    const HEADER: [&str; 7] = [
         "name",
         "hostname",
         "port",
@@ -283,7 +277,6 @@ fn read_asset_csv(input: &str) -> Result<Vec<AssetTransferRow>> {
         "tags",
         "credential_id",
         "protocol",
-        "preset",
     ];
     let records = read_csv_records(input);
     require_csv_header(&records, &HEADER)?;
@@ -303,7 +296,6 @@ fn read_asset_csv(input: &str) -> Result<Vec<AssetTransferRow>> {
             tags: split_tags(&record[4]),
             credential_id: nonempty(record[5].clone()),
             protocol: record[6].clone(),
-            preset: nonempty(record[7].clone()),
         });
     }
     Ok(rows)
@@ -345,7 +337,7 @@ fn require_csv_header(records: &[Vec<String>], expected: &[&str]) -> Result<()> 
     };
     let actual = header.iter().map(String::as_str).collect::<Vec<_>>();
     if actual.as_slice() != expected {
-        bail!("CSV header does not match the Hop v0.2 transfer format");
+        bail!("CSV header does not match the current Hop transfer format");
     }
     Ok(())
 }
@@ -427,35 +419,43 @@ mod tests {
 
         let csv = export_assets(&[asset], TransferFormat::Csv).unwrap();
 
-        assert!(
-            csv.starts_with("name,hostname,port,description,tags,credential_id,protocol,preset\n")
-        );
-        assert!(csv.contains("web,10.0.0.1,22,,prod|web,,ssh,"));
+        assert!(csv.starts_with("name,hostname,port,description,tags,credential_id,protocol\n"));
+        assert!(csv.contains("web,10.0.0.1,22,,prod|web,,ssh"));
     }
 
     #[test]
     fn imports_assets_from_json_rows() {
         let rows = import_asset_rows(
-            r#"[{"name":"web","hostname":"10.0.0.1","port":3389,"description":null,"tags":["windows"],"credential_id":null,"protocol":"tcp","preset":"rdp"}]"#,
+            r#"[{"name":"web","hostname":"10.0.0.1","port":3389,"description":null,"tags":["windows"],"credential_id":null,"protocol":"tcp"}]"#,
             TransferFormat::Json,
         )
         .unwrap();
 
         assert_eq!(rows[0].name, "web");
         assert_eq!(rows[0].protocol, "tcp");
-        assert_eq!(rows[0].preset.as_deref(), Some("rdp"));
         assert_eq!(rows[0].tags, vec!["windows"]);
     }
 
     #[test]
-    fn rejects_v0_1_asset_csv_rows() {
+    fn asset_import_rejects_preset_aliases() {
+        let error = import_asset_rows(
+            r#"[{"name":"web","hostname":"10.0.0.1","port":3389,"description":null,"tags":[],"credential_id":null,"protocol":"tcp","preset":"rdp"}]"#,
+            TransferFormat::Json,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn rejects_legacy_asset_csv_rows() {
         let error = import_asset_rows(
             "name,hostname,port,description,tags,credential_id\nweb,10.0.0.1,22,,prod,\n",
             TransferFormat::Csv,
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("Hop v0.2 transfer format"));
+        assert!(error.to_string().contains("current Hop transfer format"));
     }
 
     #[test]
@@ -483,7 +483,6 @@ mod tests {
             id: name.to_string(),
             name: name.to_string(),
             protocol: hop_core::ASSET_PROTOCOL_SSH.to_string(),
-            preset: None,
             hostname: hostname.to_string(),
             port: 22,
             description: None,
@@ -516,14 +515,12 @@ mod tests {
             tags: vec!["prod".to_string()],
             credential_id: None,
             protocol: "tcp".to_string(),
-            preset: Some("rdp".to_string()),
         };
 
         let new_asset: NewAsset = row.into();
 
         assert_eq!(new_asset.name, "web");
         assert_eq!(new_asset.protocol, "tcp");
-        assert_eq!(new_asset.preset.as_deref(), Some("rdp"));
         assert_eq!(new_asset.tags, vec!["prod"]);
     }
 

@@ -1,6 +1,6 @@
 # Hop v0.2 deployment and recovery
 
-This guide describes the v0.2 clean-break runtime. It does not apply to the v0.1 Admin Web or database.
+This guide covers Linux binaries, systemd, Docker, backup, and recovery.
 
 ## Runtime files
 
@@ -205,18 +205,6 @@ sudo -u hop hop-server --config /etc/hop/config.toml key list
 
 For a clean rebuild, keep the source manifests and secret files, choose an empty database path, then run `apply`. Runtime sessions, health, audit history, and TOFU Known Hosts are intentionally not reconstructed from manifests.
 
-## v0.1 databases
-
-Never point v0.2 at the only copy of a v0.1 database. Hop opens a non-empty existing file read-only for schema preflight and rejects anything without the exact `hop/v0.2` marker. It does not migrate, import, rename, drop, or alter the old file.
-
-Recovery choices are intentionally explicit:
-
-1. stop the old process and back up its whole data directory;
-2. delete or move the old database and let v0.2 create a fresh Catalog; or
-3. set `database.path` to a new file and rebuild resources through v0.2 CLI/manifest/API inputs.
-
-There is no compatibility reader or automated old-data importer.
-
 ## OpenWrt
 
 The separate `luci-app-hop` repository provides an architecture-independent LuCI/procd control package. It does not compile or embed Rust. On the first enabled start it downloads the matching static `hop-server` release archive, verifies it against `SHA256SUMS`, self-checks it, and installs it atomically. UCI does not own Catalog resources. See [OpenWrt distribution and footprint](openwrt.md).
@@ -225,7 +213,6 @@ The separate `luci-app-hop` repository provides an architecture-independent LuCI
 
 | Symptom | Check |
 |---|---|
-| `legacy_database_unsupported` | Back up the old database and use a fresh v0.2 path |
 | `Permission denied (publickey)` | The ingress public key fingerprint is active in `key list` |
 | Asset missing from TUI | Inspect `key access show <key-id>` and `config status` orphans |
 | Direct/exec/SFTP rejected | The key must reach the asset and an SSH asset must reference a credential |

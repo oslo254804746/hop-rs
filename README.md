@@ -12,8 +12,7 @@ Hop v0.2 是一个面向个人开发者、Homelab 和单一管理信任域小团
 - YAML/TOML、CLI 和可选 Control API 都写入同一个 Catalog。
 - HTTP Control API 默认关闭；核心不包含 Admin Web、管理员账号、Cookie、CSRF、角色或 RBAC。
 - OpenWrt 是一等发行目标：轻量 LuCI/procd 包按架构下载经 SHA256 校验的静态核心，不在 IPK/APK 内编译或内置 Rust 后端。
-
-v0.2 是 clean break，不迁移或兼容 v0.1 数据。进程会在创建可写连接前识别旧数据库并拒绝启动，错误会提示先备份并删除旧库或选择新路径；拒绝路径不会修改旧库内容或 mtime。
+- 资产类型只有 `ssh` 和 `tcp`。SSH 由 Hop 管理协议与凭据，RDP、数据库等服务使用通用 TCP 转发。
 
 ## 快速开始
 
@@ -21,6 +20,8 @@ v0.2 是 clean break，不迁移或兼容 v0.1 数据。进程会在创建可写
 cargo build --release --locked -p hop-server
 cp config.example.toml config.toml
 ```
+
+启动配置也可以使用 [`config.example.yaml`](config.example.yaml)。[`resources.example.yaml`](resources.example.yaml) 提供了可以直接离线校验的 SSH/TCP 资源样例。
 
 添加入口公钥、目标凭据和资产：
 
@@ -98,7 +99,6 @@ assets:
     type: tcp
     host: 192.168.1.30
     port: 3389
-    preset: rdp
 
 access:
   laptop:
@@ -158,7 +158,10 @@ cargo test --workspace --locked
 
 ## 文档
 
-- [部署、备份、重建和故障恢复](docs/deployment.md)
+- [SSH 与 TCP 代理](docs/proxying.zh-CN.md)
+- [配置参考](docs/configuration.zh-CN.md)
+- [部署指南](docs/deployment.zh-CN.md)
+- [Deployment, backup, rebuild, and recovery](docs/deployment.md)
 - [Control API 与本地管理](docs/admin-guide.zh-CN.md)
 - [声明式 Apply 规范](docs/product/declarative-apply-spec.md)
 - [Access Key 与资产白名单](docs/product/lightweight-access-control.md)

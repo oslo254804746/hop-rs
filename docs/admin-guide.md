@@ -75,7 +75,7 @@ POST /api/v1/assets
 }
 ```
 
-TCP assets use `protocol: "tcp"`, no credential, and may set `preset` to `rdp`, `vnc`, `mysql`, `postgres`, or `redis`.
+TCP assets use `protocol: "tcp"` without an SSH credential. RDP, VNC, MySQL, PostgreSQL, and Redis all use the same TCP asset type.
 
 ```json
 POST /api/v1/access-keys
