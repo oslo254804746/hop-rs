@@ -7,6 +7,7 @@ use std::{
 use russh::keys::{decode_secret_key, parse_public_key_base64, ssh_key::HashAlg, PublicKeyBase64};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use zeroize::Zeroize;
 
 pub const MANIFEST_API_VERSION: &str = "hop/v1alpha1";
 
@@ -279,32 +280,69 @@ pub struct AccessSpec {
     pub assets: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretSource {
     pub file: Option<PathBuf>,
     pub env: Option<String>,
+    #[serde(skip)]
+    inline: Option<String>,
+}
+
+impl std::fmt::Debug for SecretSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SecretSource")
+            .field("file", &self.file)
+            .field("env", &self.env)
+            .field("inline", &self.inline.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+impl Drop for SecretSource {
+    fn drop(&mut self) {
+        if let Some(inline) = &mut self.inline {
+            inline.zeroize();
+        }
+    }
 }
 
 impl SecretSource {
+    pub(crate) fn inline(value: String) -> Self {
+        Self {
+            file: None,
+            env: None,
+            inline: Some(value),
+        }
+    }
+
+    pub(crate) fn file(path: PathBuf) -> Self {
+        Self {
+            file: Some(path),
+            env: None,
+            inline: None,
+        }
+    }
+
     fn read(&self, path: &str) -> CatalogResult<String> {
-        match (&self.file, &self.env) {
-            (Some(file), None) => fs::read_to_string(file).map_err(|_| {
+        match (&self.file, &self.env, &self.inline) {
+            (Some(file), None, None) => fs::read_to_string(file).map_err(|_| {
                 CatalogError::new(
                     CatalogErrorCode::SecretUnavailable,
                     Some(path.to_string()),
                     format!("unable to read secret file {}", file.display()),
                 )
             }),
-            (None, Some(variable)) if !variable.trim().is_empty() => {
-                env::var(variable).map_err(|_| {
+            (None, Some(variable), None) if !variable.trim().is_empty() => env::var(variable)
+                .map_err(|_| {
                     CatalogError::new(
                         CatalogErrorCode::SecretUnavailable,
                         Some(path.to_string()),
                         format!("secret environment variable {variable} is unavailable"),
                     )
-                })
-            }
+                }),
+            (None, None, Some(value)) => Ok(value.clone()),
             _ => Err(CatalogError::new(
                 CatalogErrorCode::InvalidSecretSource,
                 Some(path.to_string()),

@@ -1,159 +1,100 @@
 # Hop
 
-Hop v0.2 is a lightweight SSH jump server for individual developers, homelabs, and small teams sharing one management trust boundary. It works with native OpenSSH clients and covers TUI discovery, direct asset login, remote commands, SCP/SFTP, ProxyJump, and generic TCP forwarding without requiring a browser, custom client, external database, or container runtime.
+Hop is a lightweight, self-hosted SSH jump server. Ingress accepts registered public keys only, target credentials are encrypted at rest, and an official web panel is included.
 
-[中文](README.md)
+## Quick start: web panel (recommended)
 
-## v0.2 boundaries
-
-- One Rust binary and one SQLite Catalog.
-- Multiple ingress Access Keys that can be enabled, disabled, or deleted independently.
-- An omitted `assets` field grants a key all current and future assets; `assets: []` authenticates but discovers and reaches none; a non-empty list is a strict allowlist.
-- YAML/TOML, the local CLI, and the optional Control API all write through the same Catalog.
-- The HTTP Control API is disabled by default. Core contains no Admin Web, administrator accounts, cookies, CSRF, roles, or RBAC.
-- OpenWrt is a first-class distribution target: a lightweight LuCI/procd package downloads the verified static core for the router architecture instead of compiling or embedding Rust in the IPK/APK. Its current LuCI page manages the service shell, not Catalog resources.
-- Asset types are limited to `ssh` and `tcp`. Hop manages SSH protocol and credentials; RDP and database services use generic TCP forwarding.
-
-## Management-panel status
-
-v0.2.0 does not currently ship an official graphical interface for assets, credentials, Access Keys, allowlists, or sessions. A standalone Hop panel and `luci-app-hop` resource views are now explicit v0.2 deliverables; use the CLI, resource manifests, or Control API until they are released. The panel will not restore the old Admin Web account and role model. See the [v0.2 management-panel delivery contract](docs/product/management-panel-v0.2.md).
-
-## Quick start
+Place `hop-rs` and `hop-rs-frontend` next to each other, then run from the backend repository:
 
 ```bash
-cargo build --release --locked -p hop-server
-cp config.example.toml config.toml
-
-./target/release/hop-server --config config.toml key add \
-  --name laptop --public-key-file ~/.ssh/id_ed25519.pub
-
-printf '%s' 'target-password' | \
-  ./target/release/hop-server --config config.toml credential add \
-  --name homelab-root --username root --auth-type password --password-stdin
-
-credential_id=$(./target/release/hop-server --config config.toml credential list | awk 'NR == 1 { print $1 }')
-./target/release/hop-server --config config.toml asset add \
-  --name nas --hostname 192.168.1.20 --port 22 --credential-id "$credential_id"
-
-./target/release/hop-server --config config.toml serve
+cp hop.yaml hop.local.yaml
+sed -i 's/token: change-me/token: replace-with-a-long-random-value/' hop.local.yaml
+chmod 0600 hop.local.yaml
+HOP_CONFIG_FILE=./hop.local.yaml docker compose up -d --build
 ```
 
-Startup configuration can also use [`config.example.yaml`](config.example.yaml). [`resources.example.yaml`](resources.example.yaml) is a secret-free SSH/TCP manifest that can be validated as-is.
+Open:
 
-SSH listens on `0.0.0.0:2222` by default. No HTTP listener is created.
+- Panel: `http://localhost:8080`
+- SSH: `localhost:2222`
 
-## Native SSH workflows
+On first load, enter only the webpage management Token from `hop.local.yaml`. The panel uses same-origin `/api/v1`; the backend management port is not published to the host. The initial Catalog is empty, so add an ingress public key, target credential, and asset in the panel.
+
+The checked-in `compose.yaml` mounts `./hop.yaml` by default. Set `HOP_CONFIG_FILE` for the local copy shown above, or safely edit and protect `hop.yaml` itself.
+
+## One YAML, no panel
+
+Copy the complete example and fill in your public key and target:
 
 ```bash
-ssh -p 2222 menu@hop-host
-ssh -p 2222 nas@hop-host
-ssh -p 2222 nas@hop-host 'uname -a'
-scp -P 2222 file.txt nas@hop-host:/tmp/file.txt
-sftp -P 2222 nas@hop-host
-ssh -p 2222 -L 13389:desktop.hop:3389 menu@hop-host
+cp config.example.yaml hop.local.yaml
+chmod 0600 hop.local.yaml
+cargo run --release -p hop-server -- --config ./hop.local.yaml config validate
+cargo run --release -p hop-server -- --config ./hop.local.yaml serve
 ```
 
-ProxyJump example:
+One `hop.yaml` contains listeners, data directory, webpage management Token, SSH runtime settings, target credentials, assets, and ingress public keys. At startup, Hop applies its declared resources through the internal atomic Apply engine. Any error prevents listeners from starting and never leaves a partial Catalog.
 
-```sshconfig
-Host hop
-  HostName hop-host
-  Port 2222
-  IdentityFile ~/.ssh/id_ed25519
-
-Host *.hop
-  ProxyJump hop
-```
-
-TUI discovery, direct login, managed interactive sessions, exec, SCP/SFTP, ProxyJump, and TCP forwarding all use the same Key-to-Asset authorization queries. Crafted targets cannot bypass an allowlist. Ordinary allowlist changes affect new connections; the Control API exposes explicit active-session termination for emergencies.
-
-## Declarative resources
-
-Manifests are strict YAML or TOML. Unknown fields and duplicate resources are rejected. Secrets use `file` or `env` sources and are encrypted with the Master Key before entering SQLite.
+## Minimal configuration
 
 ```yaml
-api_version: hop/v1alpha1
+listen: 0.0.0.0:2222
+data_dir: ./data
+
+api:
+  enabled: true
+  listen: 127.0.0.1:8083
+  token: change-me
 
 credentials:
-  homelab:
-    type: password
+  nas-root:
     username: root
-    password: { file: /etc/hop/secrets/homelab.password }
+    password: replace-this-password
 
 assets:
   nas:
-    type: ssh
     host: 192.168.1.20
-    port: 22
-    credential: homelab
-  desktop:
-    type: tcp
-    host: 192.168.1.30
-    port: 3389
+    credential: nas-root
 
-access:
+access_keys:
   laptop:
-    public_key: { file: /etc/hop/keys/laptop.pub }
-    assets: [nas, desktop]
+    public_key_file: ./laptop.pub
+    assets: [nas]
 ```
+
+`password`, `private_key`, and `passphrase` are direct YAML strings, so protect the file with `chmod 0600` and keep it out of version control. Each ingress key must set exactly one of `public_key` or `public_key_file`. Relative paths resolve from the configuration file directory.
+
+If `api.token` is missing or empty, only the Control API is disabled; SSH continues to run. `change-me` is a first-run placeholder and triggers warnings in both backend and panel. Replace it for every real deployment.
+
+## Resource ownership
+
+- Resources created through the panel or local commands are `local` and remain editable.
+- Resources declared in `hop.yaml` are `config`; the panel marks them read-only before rendering actions.
+- Restart Hop after changing configuration-managed resources. Startup Apply updates them and removes only resources deleted from the same configuration, preserving local resources.
+
+## Connect
 
 ```bash
-hop-server config validate -f resources.yaml --offline --json
-hop-server --config config.toml config validate -f resources.yaml --json
-hop-server --config config.toml config diff -f resources.yaml --source home --json
-hop-server --config config.toml apply -f resources.yaml \
-  --source home --base-revision 0 --json
-hop-server --config config.toml apply -f resources.yaml --source home --dry-run
-hop-server --config config.toml apply -f resources.yaml --source home --prune
-hop-server --config config.toml config status --json
+ssh -p 2222 <asset-name>@<hop-host>
 ```
 
-Applying identical content does not increment the Catalog revision. Resources missing from a successful full-source scan become usable orphans by default; only explicit `state: absent` or prune deletes them. The startup watcher calls the same Apply engine after a stable scope scan, retains the last valid Catalog on errors, and does not prune unless its source explicitly opts in.
-
-## Startup configuration and Control API
-
-`config.example.toml` documents SSH, database, Host Key, Master Key, timeout, keepalive, banner, proxy policy, API, inventory watcher, and runtime settings. YAML accepts the same structure.
-
-Catalog resources are dynamically applied. Listener/database/key-path settings require restart. Credential and allowlist changes affect new connections.
-
-The API requires an explicit token file and is opt-in:
-
-```toml
-[api]
-enabled = true
-listen = "127.0.0.1:8083"
-token_file = "/etc/hop/control-api.token"
-cors_allowlist = []
-```
-
-Every `/api/v1` request uses `Authorization: Bearer <token>`. The API provides status/version, Catalog revision, resource reads and local CRUD, sessions and termination, source/status, validate, diff, apply, and reload. Credential responses expose only `configured`/`missing` states. A non-loopback listener requires an explicit CORS allowlist.
-
-## Verification
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
-./scripts/manual_e2e_key_asset_access.sh
-./scripts/e2e_local_openssh.sh
-```
-
-The isolated OpenSSH E2E covers exec streams and exit status, PTY, SCP, SFTP, ProxyJump, initial Host Key recording and changed-key rejection, and encrypted credential storage.
+Hop ingress advertises `publickey` authentication only. An unregistered key receives `Permission denied (publickey)` without a password prompt.
 
 ## Documentation
 
-- [SSH and TCP proxying, Chinese](docs/proxying.zh-CN.md)
-- [Configuration reference, Chinese](docs/configuration.zh-CN.md)
-- [Deployment guide, Chinese](docs/deployment.zh-CN.md)
-- [Deployment, backup, rebuild, and recovery](docs/deployment.md)
-- [Control API and local management](docs/admin-guide.md)
-- [Declarative Apply specification](docs/product/declarative-apply-spec.md)
-- [Access Key allowlists](docs/product/lightweight-access-control.md)
-- [v0.2 management-panel delivery contract](docs/product/management-panel-v0.2.md)
-- [OpenWrt packaging and measurements](docs/openwrt.md)
-- [v0.2 product direction](docs/product/product-direction-v0.2.md)
-- [Documentation index](docs/README.md)
+- [Deployment](docs/deployment.md)
+- [Configuration reference (Chinese)](docs/configuration.zh-CN.md)
+- [Administrator guide](docs/admin-guide.md)
+- [中文 README](README.md)
 
-## License
+## Development gates
 
-MIT
+```bash
+cargo fmt --all --check
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+shellcheck docker-entrypoint.sh scripts/*.sh
+docker compose config
+```
+
+License: MIT.

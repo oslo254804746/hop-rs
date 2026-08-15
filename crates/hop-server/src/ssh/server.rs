@@ -5,7 +5,7 @@ use hop_core::{Asset, Catalog, HopConfig, MasterKey, NewSession};
 use russh::{
     keys::{ssh_key::HashAlg, PublicKey},
     server::{self, Msg, Server as _, Session},
-    Channel, ChannelId, Pty,
+    Channel, ChannelId, MethodKind, MethodSet, Pty,
 };
 use tokio::{
     net::TcpListener,
@@ -98,8 +98,9 @@ pub async fn serve_ssh(
     active_sessions: ActiveSessionRegistry,
 ) -> Result<()> {
     let host_key =
-        host_key::load_or_generate(&config.ssh.host_key_file, &config.ssh.host_key_type)?;
+        host_key::load_or_generate(&config.ssh_host_key_path(), &config.ssh.host_key_type)?;
     let russh_config = server::Config {
+        methods: ingress_auth_methods(),
         inactivity_timeout: Some(Duration::from_secs(3600)),
         keepalive_interval: ssh_keepalive_interval(&config),
         auth_rejection_time: Duration::from_secs(1),
@@ -120,6 +121,10 @@ pub async fn serve_ssh(
         .run_on_socket(Arc::new(russh_config), &listener)
         .await?;
     Ok(())
+}
+
+fn ingress_auth_methods() -> MethodSet {
+    MethodSet::from(&[MethodKind::PublicKey][..])
 }
 
 fn ssh_keepalive_interval(config: &HopConfig) -> Option<Duration> {
@@ -1076,12 +1081,17 @@ mod tests {
         let hop_addr = probe.local_addr().unwrap();
         drop(probe);
         let temp = tempfile::tempdir().unwrap();
-        let mut config = HopConfig::default();
-        config.server.ssh_listen = hop_addr.to_string();
-        config.ssh.host_key_file = temp.path().join("hop-host-key");
-        config.ssh.banner = String::new();
-        config.ssh.keepalive_interval = 0;
-        config.ssh.connect_timeout = 5;
+        let config = HopConfig {
+            listen: hop_addr.to_string(),
+            data_dir: temp.path().to_path_buf(),
+            ssh: hop_core::config::SshConfig {
+                banner: String::new(),
+                keepalive_interval: 0,
+                connect_timeout: 5,
+                ..hop_core::config::SshConfig::default()
+            },
+            ..HopConfig::default()
+        };
         let hop_task = tokio::spawn(serve_ssh(
             hop_addr,
             config,
@@ -1187,6 +1197,11 @@ mod tests {
 
         config.ssh.keepalive_interval = 0;
         assert_eq!(ssh_keepalive_interval(&config), None);
+    }
+
+    #[test]
+    fn ingress_advertises_only_public_key_authentication() {
+        assert_eq!(&*ingress_auth_methods(), &[MethodKind::PublicKey]);
     }
 
     #[test]

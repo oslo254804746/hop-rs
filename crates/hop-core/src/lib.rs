@@ -6,7 +6,8 @@ pub mod models;
 
 pub use catalog::{
     ApplyAction, ApplyChange, ApplyOptions, ApplySummary, Catalog, CatalogError, CatalogErrorCode,
-    CatalogStatus, ConfigSourceStatus, Manifest, OrphanStatus, MANIFEST_API_VERSION,
+    CatalogStatus, ConfigSourceStatus, Manifest, OrphanStatus, ResourceOwnership,
+    MANIFEST_API_VERSION,
 };
 pub use config::HopConfig;
 pub use crypto::{

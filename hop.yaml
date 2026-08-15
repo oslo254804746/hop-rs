@@ -1,0 +1,8 @@
+# Panel-first Compose configuration. Change this token before remote use.
+listen: 0.0.0.0:2222
+data_dir: /data
+
+api:
+  enabled: true
+  listen: 0.0.0.0:8083
+  token: change-me

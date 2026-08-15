@@ -12,6 +12,24 @@ use crate::{
 };
 
 impl Catalog {
+    pub async fn resource_ownership(
+        &self,
+        resource_type: &str,
+        resource_id: &str,
+    ) -> Result<super::ResourceOwnership> {
+        let mode = sqlx::query_scalar::<_, String>(
+            "SELECT management_mode FROM resource_ownership WHERE resource_type = ?1 AND resource_id = ?2",
+        )
+        .bind(resource_type)
+        .bind(resource_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match mode.as_deref() {
+            Some("declarative") => super::ResourceOwnership::Config,
+            _ => super::ResourceOwnership::Local,
+        })
+    }
+
     pub async fn health_check(&self) -> Result<()> {
         sqlx::query_scalar::<_, i64>("SELECT 1")
             .fetch_one(&self.pool)

@@ -38,6 +38,7 @@ cargo build --quiet --locked --manifest-path "$repo_dir/Cargo.toml" -p hop-serve
 ssh-keygen -q -t ed25519 -N '' -f "$run_dir/target_host_key"
 ssh-keygen -q -t ed25519 -N '' -f "$run_dir/target_login_key"
 ssh-keygen -q -t ed25519 -N '' -f "$run_dir/hop_ingress_key"
+ssh-keygen -q -t ed25519 -N '' -f "$run_dir/wrong_ingress_key"
 cp "$run_dir/target_login_key.pub" "$run_dir/authorized_keys"
 chmod 600 "$run_dir/authorized_keys" "$run_dir/target_login_key" "$run_dir/hop_ingress_key"
 
@@ -61,42 +62,32 @@ EOF
 "$sshd_bin" -D -e -f "$run_dir/sshd_config" >"$run_dir/target.log" 2>&1 &
 target_pid=$!
 
-cat >"$run_dir/hop.toml" <<EOF
-[server]
-ssh_listen = "127.0.0.1:$hop_port"
-
-[database]
-path = "$run_dir/hop.db"
-
-[api]
-enabled = false
-
-[ssh]
-host_key_file = "$run_dir/hop_host_key"
-host_key_type = "ed25519"
-banner = ""
-keepalive_interval = 30
-connect_timeout = 5
-proxy_policy = "assets_only"
-
-[security]
-master_key_file = "$run_dir/hop.secret"
-
-[runtime]
-temp_dir = "$run_dir/tmp"
+cat >"$run_dir/hop.yaml" <<EOF
+listen: 127.0.0.1:$hop_port
+data_dir: $run_dir
+ssh:
+  banner: ""
+  keepalive_interval: 30
+  connect_timeout: 5
+credentials:
+  e2e-target:
+    username: $current_user
+    private_key: |
+$(sed 's/^/      /' "$run_dir/target_login_key")
+assets:
+  managed-target:
+    host: 127.0.0.1
+    port: $target_port
+    credential: e2e-target
+access_keys:
+  e2e-ingress:
+    public_key_file: ./hop_ingress_key.pub
+    assets: [managed-target]
 EOF
 
-"$bin" --config "$run_dir/hop.toml" key add \
-	--name e2e-ingress --public-key-file "$run_dir/hop_ingress_key.pub"
-"$bin" --config "$run_dir/hop.toml" credential add \
-	--name e2e-target --username "$current_user" --auth-type key \
-	--private-key-file "$run_dir/target_login_key"
-credential_id=$("$bin" --config "$run_dir/hop.toml" credential list | awk 'NR == 1 { print $1 }')
-"$bin" --config "$run_dir/hop.toml" asset add \
-	--name managed-target --hostname 127.0.0.1 --port "$target_port" \
-	--credential-id "$credential_id"
+"$bin" --config "$run_dir/hop.yaml" config validate
 
-"$bin" --config "$run_dir/hop.toml" serve >"$run_dir/hop.log" 2>&1 &
+"$bin" --config "$run_dir/hop.yaml" serve >"$run_dir/hop.log" 2>&1 &
 hop_pid=$!
 for _ in $(seq 1 100); do
 	if (exec 3<>/dev/tcp/127.0.0.1/"$hop_port") 2>/dev/null; then
@@ -120,6 +111,26 @@ common_client_options=(
 ssh_options=(-p "$hop_port" "${common_client_options[@]}")
 scp_options=(-P "$hop_port" "${common_client_options[@]}")
 sftp_options=(-P "$hop_port" "${common_client_options[@]}")
+
+set +e
+wrong_key_output=$(timeout 5 ssh -p "$hop_port" \
+	-i "$run_dir/wrong_ingress_key" \
+	-o IdentitiesOnly=yes \
+	-o PreferredAuthentications=publickey,password,keyboard-interactive \
+	-o StrictHostKeyChecking=no \
+	-o UserKnownHostsFile=/dev/null \
+	managed-target@127.0.0.1 true 2>&1)
+wrong_key_status=$?
+set -e
+if [[ $wrong_key_status -eq 0 ]] || ! grep -q 'Permission denied (publickey)' <<<"$wrong_key_output"; then
+	echo "unmatched key did not fail with publickey-only authentication" >&2
+	printf '%s\n' "$wrong_key_output" >&2
+	exit 1
+fi
+if grep -Eqi 'password:|keyboard-interactive' <<<"$wrong_key_output"; then
+	echo "unmatched key was offered an ingress password method" >&2
+	exit 1
+fi
 
 test "$(ssh "${ssh_options[@]}" managed-target@127.0.0.1 'printf managed-ok')" = managed-ok
 test "$(printf 'stdin-roundtrip' | ssh "${ssh_options[@]}" managed-target@127.0.0.1 cat)" = stdin-roundtrip
@@ -226,4 +237,4 @@ PY
 test "$stored_host_fingerprint" = "$original_host_fingerprint"
 
 rm -f "$run_dir/scp-remote.txt"
-echo "Local OpenSSH exec/PTY/SCP/SFTP/ProxyJump/Host-Key end-to-end test passed"
+echo "Single-YAML OpenSSH publickey/exec/PTY/SCP/SFTP/ProxyJump/Host-Key end-to-end test passed"

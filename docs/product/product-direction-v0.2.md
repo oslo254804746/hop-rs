@@ -1,244 +1,40 @@
-# Hop v0.2 产品方向：小而全的 SSH 跳板机
+# Hop 当前产品方向
 
-状态：Active，取代此前以 Admin Web、多管理员和角色能力为中心的后续路线。
+## 定位
 
-确认日期：2026-08-14
+Hop 是小型、自托管、默认安全的 SSH/TCP 跳板：入口公钥认证、按资产授权、加密目标凭据、统一会话记录，以及无需数据库知识的官方网页面板。
 
-相关规范：
+## 两条清晰路径
 
-- [声明式资源 Apply 与 SQLite 事实源规范](declarative-apply-spec.md)
-- [Access Key 与资产白名单方案](lightweight-access-control.md)
-- [管理面板交付边界](management-panel-v0.2.md)
-- [SSH 与 TCP 代理](../proxying.zh-CN.md)
-- [配置参考](../configuration.zh-CN.md)
-- [部署指南](../deployment.zh-CN.md)
+1. **Compose + 面板（推荐）**：复制最小 `hop.yaml`、更换网页管理 Token、启动 Compose，在空 Catalog 中从网页创建本地资源。
+2. **单 YAML、无面板**：在一份文件中声明运行参数与资源，验证后直接启动。
 
-## 1. 产品定位
+两条路径共享同一个 Catalog 与权限模型，不要求用户理解内部数据库或 Apply 实现。
 
-Hop 面向个人开发者、Homelab 使用者和共享同一管理信任边界的小团队，目标是提供：
+## 安全边界
 
-- 简单部署。
-- 快速接入家中或内网资产。
-- 覆盖常用 SSH 跳板机使用方式。
-- 不要求外部数据库、缓存、消息队列或专属客户端。
+- 入口 SSH 只宣告 `publickey`；
+- Control API 默认关闭，Compose 中仅在私有网络可达；
+- 面板同源代理只开放 `/api/v1`；
+- 网页管理 Token 只在浏览器内存；
+- 目标 secret 加密保存且永不回读；
+- YAML secret 采用直接字符串，因此文件权限与备份被视为部署安全边界。
 
-一句话定位：
+## 管理边界
 
-> 一个可以快速部署到家庭或内网、使用原生 SSH 客户端访问多种资产的小而全跳板机。
+- `local` 资源来自面板或本地命令，可在面板编辑；
+- `config` 资源来自 `hop.yaml`，面板只读；
+- API 在资源响应中提供最小 ownership，UI 在展示操作前做出判断；
+- 后端事务与冲突检查始终是最终一致性防线。
 
-“小而全”中的“小”指部署模型、管理模型和用户心智足够小；“全”指连接与运维能力完整，而不是企业组织治理能力完整。
+## 用户体验
 
-## 2. 核心用户假设
+- 默认连接当前面板 Origin，只输入 Token；
+- 独立远程 API URL 是高级选项；
+- 设置页关注连接安全与 ownership，不暴露内部配置编排；
+- 面板提供 English / 简体中文切换；
+- `change-me` 在后端和面板都有清晰告警。
 
-一个 Hop 实例通常由以下主体部署和管理：
+## 交付标准
 
-- 一名个人使用者；或者
-- 一个共享同一信任边界的小团队。
-
-因此，一个实例对应一个管理信任域。Hop 不再将“同一实例内存在互不信任的多类管理员”作为核心场景。
-
-当确实存在不同管理边界时，推荐部署多个轻量 Hop 实例，而不是在一个实例中建立企业 RBAC、组织和策略系统。
-
-## 3. 产品原则
-
-### 3.1 原生协议优先
-
-用户通过已有工具使用 Hop：
-
-- `ssh`
-- `scp`
-- `sftp`
-- `ProxyJump`
-- SSH 本地端口转发
-
-不要求安装 Hop 专属终端客户端。
-
-### 3.2 默认路径必须最短
-
-首次可用路径应保持为：
-
-```text
-部署一个二进制或软件包
-→ 添加一把入口 SSH Key
-→ 添加凭据和资产
-→ 使用原生 ssh 连接
-```
-
-默认路径不出现管理员角色、权限矩阵、组织、策略、身份源或审批概念。
-
-### 3.3 功能完整不等于治理复杂
-
-Hop 优先完善：
-
-- 交互式 TUI。
-- 资产名直连。
-- 托管远程命令。
-- SCP/SFTP。
-- ProxyJump。
-- 通用 TCP 转发。RDP、VNC 和数据库等服务统一使用 TCP 资产。
-- 凭据托管。
-- Host Key 信任。
-- 多入口 SSH Key。
-- 可选的按 Key 资产白名单。
-- 声明式资源 apply。
-- 可选 Control API。
-- Docker、Linux 二进制和 OpenWrt 分发。
-
-Hop 不以企业人员治理、合规工作台或 IAM/PAM 平台为产品完成度标准。
-
-## 4. 管理面与访问面
-
-Hop 明确区分两个层面：
-
-| 层面 | 解决的问题 | v0.2 模型 |
-|---|---|---|
-| 管理面 | 谁可以修改 Hop | 一个管理信任域，管理凭据等权 |
-| 访问面 | 哪把 SSH Key 可以访问哪些资产 | 多 Key，默认全部，可选白名单 |
-
-### 4.1 管理面
-
-管理面保持简单：
-
-- 默认只有部署者需要管理 Hop。
-- Control API 使用一个管理 Token；后续如支持多个 Token，它们也只用于独立吊销，不区分角色。
-- 不再继续发展 Owner、Operator、Viewer。
-- 不提供自定义角色、capability 编辑器或策略语言。
-- 独立面板和 LuCI 都接入同一个版本化 Control API。
-
-核心不保留多管理员、访问级别和内置 Admin Web 的兼容层。管理入口只围绕当前的单一信任域模型设计。
-
-### 4.2 访问面
-
-Hop 允许添加多把入口 SSH Key。每把 Key 是一个独立访问入口，可以单独启用、禁用和吊销。
-
-默认行为：
-
-- 未配置资产范围时访问当前和未来的全部资产。
-- 用户主动选择限制范围时，才配置资产白名单。
-- 空白名单表示可以通过公钥认证，但不能发现或访问任何资产。
-
-这是一层简单 ACL，不是角色系统。它应统一作用于 TUI、直连、远程命令、SFTP、ProxyJump 和 TCP 转发。
-
-## 5. 配置与状态
-
-Hop 使用不对称混合模型：
-
-- 启动参数以 YAML/TOML 文件为事实源。
-- 资产、凭据、Access Key 和资产白名单 apply 后以 SQLite 为运行事实源。
-- YAML/TOML、CLI 和 Control API 是写入同一 Catalog 的不同入口。
-- 会话、审计、资产健康和 Known Hosts 属于 SQLite 或内存运行状态。
-
-SQLite 是嵌入式实现细节，不引入外部服务，也不违背简单部署目标。
-
-## 6. Control API 与面板
-
-### 6.1 Control API
-
-- 默认关闭。
-- 默认监听 loopback。
-- 使用版本化 `/api/v1` 协议。
-- 使用管理 Token 认证，不引入管理员角色。
-- 提供状态、资源、validate、diff、apply 和 reload 能力。
-- 对 secret 只返回 configured/missing/changed 等状态。
-
-### 6.2 管理面板
-
-- 核心不包含完整 Admin Web，也不托管面板静态资源。
-- v0.2 必须提供一个独立发布的官方通用面板，通过稳定 Control API 管理 Hop。
-- `luci-app-hop` 必须在现有服务与核心下载页之外提供 Catalog 资源管理入口。
-- 通用面板和 LuCI 使用同一信息架构与 API 语义，不各自发明资源模型。
-- LuCI 通过受 ACL 保护的 rpcd 后端访问 loopback API，不能把管理 Token 暴露给浏览器。
-- 面板不可用时，CLI、manifest 和全部核心连接能力必须保持完整。
-
-完整交付、安全和首版范围见 [管理面板交付边界](management-panel-v0.2.md)。v0.2.0 当前只交付了 Control API 与 `luci-app-hop` 服务外壳，尚未交付可管理 Catalog 资源的图形面板。
-
-## 7. OpenWrt 分发
-
-OpenWrt 是 v0.2 的一等发行目标，而不是发布后手工打包：
-
-- `hop-rs` Release：按 x86_64/aarch64 发布静态 musl 核心与统一 `SHA256SUMS`。
-- `luci-app-hop`：`all` 架构的 LuCI/procd/UCI 控制包，缺少核心时按架构下载并验证，不在 IPK/APK 内编译或内置 Rust。
-- UCI 只负责 enabled、config path、日志等服务外壳。
-- 资产、凭据和 Access Key 不在 UCI 与 Hop manifest 中重复维护。
-- 首批优先验证 x86_64 和 aarch64，再依据依赖兼容性扩展其他架构。
-- 必须评估二进制大小、常驻内存和 SQLite 日志对路由器闪存的写入影响。
-
-## 8. 明确不继续发展的能力
-
-- 多管理员角色和访问级别。
-- Owner、Operator、Viewer 产品模型。
-- 自定义 RBAC 或 capability 编辑器。
-- People 聚合实体和组织通讯录。
-- OIDC、SCIM 和组织身份同步。
-- 审批、JIT Access、临时提权。
-- 多层组织、项目、空间和资源继承。
-- 以合规报表为中心的审计工作台。
-- 多节点 HA 控制平面。
-
-保留轻量会话和变更记录，用于排错和解释运行行为；它们不扩展为合规平台。
-
-## 9. v0.2 优先级
-
-### P0：重新建立核心边界
-
-1. 将本文件设为活跃产品方向。
-2. 提取统一 Catalog service。
-3. 实现声明式 validate/diff/apply 与 SQLite 资源归属。
-4. 用回归测试保留 SSH、SFTP、远程命令、ProxyJump 和 TCP 转发的核心行为。
-5. 保留多 Access Key 和可选资产白名单。
-
-### P1：控制面解耦
-
-1. 建立版本化 Control API。
-2. 默认关闭 HTTP 管理接口。
-3. 从 v0.2 核心删除内置 Admin Web、多管理员和角色代码，不保留兼容层。
-4. 管理认证简化为单一信任域，不增加角色能力。
-
-### P2：分发体验
-
-1. 独立通用面板发布物。
-2. `luci-app-hop` Catalog 资源管理入口。
-3. Linux x86_64/aarch64 静态核心 Release。
-4. OpenWrt 轻量 LuCI/procd 控制包与校验下载器。
-5. Docker 发行。
-6. 安装、备份、重建和故障恢复文档。
-
-## 10. 产品完成标准
-
-当以下体验成立时，Hop 才算符合新的“小而全”定位：
-
-- 新用户可以在数分钟内完成部署和第一条真实 SSH 连接。
-- 单人用户不需要理解角色、管理员账号或权限矩阵。
-- 添加第二把 SSH Key 不需要创建用户或组织。
-- Key 默认访问全部资产，限制范围是可选操作。
-- 资产清单修改可以安全 validate、diff、apply，失败不影响上一份有效数据。
-- 不启用 Control API 和面板时，全部核心连接能力仍可使用。
-- 选择图形管理时，Linux/Docker 和 OpenWrt 用户都有官方、可安装的面板入口。
-- OpenWrt 安装不要求 Docker、Node.js 或外部数据库。
-- 文档首先解释连接与部署，不以 Dashboard 或团队治理作为主卖点。
-
-## 11. 当前实现状态（2026-08-14）
-
-已经落地：
-
-- 单一 v0.2 SQLite Catalog 和明确的 schema marker。
-- 统一 Catalog、资源归属、revision、source generation、orphan 和显式 prune。
-- 严格 YAML/TOML manifest、离线/在线 validate、diff、dry-run 和原子 apply。
-- 多 Access Key 的 `all` / `restricted` / 空白名单语义继续覆盖 SSH 运行路径。
-- 核心已删除 Admin Web、管理员密码、Cookie、CSRF、角色与 capability 代码。
-- `/api/v1` Control API 默认关闭；启用时使用单一等权 Bearer Token。
-- Control API 已覆盖资源、本地 CRUD、会话终止、source/status、validate、diff、apply 与 reload，secret 响应只暴露状态。
-- inventory source 在启动时调用统一 Apply engine；watcher 等待 scope 稳定后重扫，失败保留上一代有效 Catalog，且默认不 prune。
-- OpenWrt `all` 架构 LuCI/procd/UCI 服务外壳、校验下载器，以及 x86_64/aarch64 静态核心 Release 契约。
-- OpenWrt 24.10.4 IPK 与 25.12.5 APK 已由各自官方 SDK 完成云端实际打包验证。
-- x86_64/aarch64 musl 核心已完成云端静态构建、ELF/运行自检、归档、统一 `SHA256SUMS` 与完整候选包验证。
-- v0.2 schema 上的隔离 OpenSSH E2E 已覆盖远程命令流与退出码、PTY、SCP、SFTP、ProxyJump、Host Key 首次记录与变更拒绝，以及凭据密文。
-
-后续真实硬件复测：
-
-- 在真实 x86_64 与 aarch64 OpenWrt 设备上复测 RSS；获得设备前，以隔离的 x86_64 GNU/Linux 基线持续观察资源趋势。该复测不改变已经验证的首批静态核心与轻量控制包边界。
-
-尚未交付：
-
-- 独立通用管理面板。
-- `luci-app-hop` 的资产、凭据、Access Key、白名单、会话和声明式配置管理页面。
+前后端使用匹配版本标签，文档以 Compose 面板路径为首，单 YAML 为第二路径。发布必须通过 Rust、Node、Docker、Compose、桌面/移动浏览器和真实 OpenSSH 全链路验证。

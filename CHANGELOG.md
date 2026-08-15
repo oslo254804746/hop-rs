@@ -4,13 +4,40 @@ All notable user-visible changes to Hop are recorded here.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-15
+
+### Added
+
+- Added one strict startup YAML for runtime settings, direct target secrets,
+  assets, and ingress public keys, applied atomically before listeners start.
+- Added the official `hop` + `panel` Compose deployment with a private Control
+  API, same-origin panel proxy, read-only configuration, and persistent data.
+- Added minimal `local`/`config` ownership to resource API responses so the
+  panel can make configuration-managed records read-only before rendering
+  mutation actions.
+
+### Fixed
+
+- Made `api.cors_allowlist = ["*"]` select Tower HTTP's wildcard origin mode
+  instead of panicking, and reject ambiguous wildcard-plus-origin lists with a
+  configuration error.
+- Limited the SSH ingress authentication methods advertised to clients to
+  `publickey`, avoiding misleading password prompts for an ingress that has no
+  password authentication.
+
 ### Changed
 
+- Replaced `api.token_file` with the direct, redacted `api.token`. A missing or
+  empty token disables only the optional Control API; SSH continues to run.
+- Removed startup inventory lists, file watching, the separate Docker resource
+  manifest, and the reload endpoint from the supported startup workflow.
+- Removed the non-loopback requirement for a non-empty CORS list. Complete
+  Origins remain supported for direct cross-origin clients, while Compose uses
+  same-origin proxying and publishes no backend API port.
 - Limited the asset type contract to `ssh` and `tcp`; service names such as RDP
   and MySQL no longer appear as protocol aliases or presets.
-- Made the missing graphical management surface explicit: the standalone Hop
-  panel and `luci-app-hop` Catalog views are separate v0.2 deliverables, while
-  the current LuCI page remains a service/core-download shell.
+- Added the production graphical management panel as the recommended path;
+  the LuCI package remains a separate service/core-download integration.
 - Removed superseded Admin Web roadmaps and implementation plans from the
   active repository documentation.
 - Removed unused bulk-session registry code and replaced v0.1-specific
@@ -116,7 +143,8 @@ See the [full v0.1.6 release notes](docs/releases/v0.1.6.md).
 
 See the [full v0.1.5 release notes](docs/releases/v0.1.5.md).
 
-[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/oslo254804746/hop-rs/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/oslo254804746/hop-rs/releases/tag/v0.2.0
 [0.1.7]: https://github.com/oslo254804746/hop-rs/releases/tag/v0.1.7
 [0.1.6]: https://github.com/oslo254804746/hop-rs/releases/tag/v0.1.6

@@ -21,24 +21,13 @@ cleanup() {
 trap cleanup EXIT
 
 printf '%s\n' \
-	'[server]' \
-	'ssh_listen = "127.0.0.1:0"' \
-	'' \
-	'[database]' \
-	"path = \"$run_dir/hop.db\"" \
-	'' \
-	'[api]' \
-	'enabled = false' \
-	'' \
-	'[ssh]' \
-	"host_key_file = \"$run_dir/host_key\"" \
-	'banner = ""' \
-	'' \
-	'[security]' \
-	"master_key_file = \"$run_dir/master.key\"" \
-	>"$run_dir/config.toml"
+	'listen: 127.0.0.1:0' \
+	"data_dir: $run_dir" \
+	'ssh:' \
+	'  banner: ""' \
+	>"$run_dir/hop.yaml"
 
-"$binary" --config "$run_dir/config.toml" serve >"$run_dir/server.log" 2>&1 &
+"$binary" --config "$run_dir/hop.yaml" serve >"$run_dir/server.log" 2>&1 &
 server_pid=$!
 
 for _ in $(seq 1 100); do

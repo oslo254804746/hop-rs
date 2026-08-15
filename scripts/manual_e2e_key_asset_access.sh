@@ -35,43 +35,32 @@ BIN="$ROOT/target/debug/hop-server"
 ssh-keygen -q -t ed25519 -N '' -f "$RUN_DIR/key-all"
 ssh-keygen -q -t ed25519 -N '' -f "$RUN_DIR/key-restricted"
 
-cat > "$RUN_DIR/config.toml" <<EOF
-[server]
-ssh_listen = "127.0.0.1:$SSH_PORT"
-
-[database]
-path = "$RUN_DIR/hop.db"
-
-[ssh]
-host_key_file = "$RUN_DIR/hop_host_key"
-host_key_type = "ed25519"
-banner = ""
-keepalive_interval = 30
-connect_timeout = 5
-proxy_policy = "assets_only"
-
-[security]
-master_key_file = "$RUN_DIR/hop.secret"
-
-[runtime]
-temp_dir = "$RUN_DIR/tmp"
+cat > "$RUN_DIR/hop.yaml" <<EOF
+listen: 127.0.0.1:$SSH_PORT
+data_dir: $RUN_DIR
+ssh:
+  banner: ""
+  keepalive_interval: 30
+  connect_timeout: 5
+runtime:
+  temp_dir: $RUN_DIR/tmp
 EOF
 
-"$BIN" --config "$RUN_DIR/config.toml" key add \
+"$BIN" --config "$RUN_DIR/hop.yaml" key add \
   --name key-all --public-key-file "$RUN_DIR/key-all.pub"
-"$BIN" --config "$RUN_DIR/config.toml" key add \
+"$BIN" --config "$RUN_DIR/hop.yaml" key add \
   --name key-restricted --public-key-file "$RUN_DIR/key-restricted.pub"
-"$BIN" --config "$RUN_DIR/config.toml" asset add \
+"$BIN" --config "$RUN_DIR/hop.yaml" asset add \
   --name asset-one --protocol tcp --hostname 127.0.0.1 --port "$ASSET_ONE_PORT"
-"$BIN" --config "$RUN_DIR/config.toml" asset add \
+"$BIN" --config "$RUN_DIR/hop.yaml" asset add \
   --name asset-two --protocol tcp --hostname 127.0.0.1 --port "$ASSET_TWO_PORT"
 
-KEY_RESTRICTED_ID="$("$BIN" --config "$RUN_DIR/config.toml" key list | awk '$4 == "key-restricted" {print $1}')"
-ASSET_ONE_ID="$("$BIN" --config "$RUN_DIR/config.toml" asset list | awk '$2 == "asset-one" {print $1}')"
+KEY_RESTRICTED_ID="$("$BIN" --config "$RUN_DIR/hop.yaml" key list | awk '$4 == "key-restricted" {print $1}')"
+ASSET_ONE_ID="$("$BIN" --config "$RUN_DIR/hop.yaml" asset list | awk '$2 == "asset-one" {print $1}')"
 test -n "$KEY_RESTRICTED_ID"
 test -n "$ASSET_ONE_ID"
 
-"$BIN" --config "$RUN_DIR/config.toml" key access set "$KEY_RESTRICTED_ID" \
+"$BIN" --config "$RUN_DIR/hop.yaml" key access set "$KEY_RESTRICTED_ID" \
   --mode restricted --asset-id "$ASSET_ONE_ID"
 
 python3 -m http.server "$ASSET_ONE_PORT" --bind 127.0.0.1 \
@@ -80,7 +69,7 @@ HTTP_ONE_PID=$!
 python3 -m http.server "$ASSET_TWO_PORT" --bind 127.0.0.1 \
   --directory "$RUN_DIR" >"$RUN_DIR/http-two.log" 2>&1 &
 HTTP_TWO_PID=$!
-"$BIN" --config "$RUN_DIR/config.toml" serve >"$RUN_DIR/hop.log" 2>&1 &
+"$BIN" --config "$RUN_DIR/hop.yaml" serve >"$RUN_DIR/hop.log" 2>&1 &
 HOP_PID=$!
 
 for _ in $(seq 1 100); do
@@ -143,7 +132,7 @@ for denied_target in \
   fi
 done
 
-"$BIN" --config "$RUN_DIR/config.toml" key access set "$KEY_RESTRICTED_ID" \
+"$BIN" --config "$RUN_DIR/hop.yaml" key access set "$KEY_RESTRICTED_ID" \
   --mode restricted
 if http_through_hop "$RUN_DIR/key-restricted" "asset-one.hop:$ASSET_ONE_PORT" \
   >/dev/null 2>&1; then

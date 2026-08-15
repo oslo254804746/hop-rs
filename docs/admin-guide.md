@@ -1,131 +1,79 @@
-# Hop v0.2 Control API and local management
+# Hop administrator guide
 
-Hop v0.2 has no built-in Admin Web or administrator-account protocol. Management belongs to one trust domain and uses either the local CLI, declarative Apply, or one equal-privilege Control API token.
+Use the official panel for day-to-day local resources. Resources declared in `hop.yaml` must be changed in that file and applied by restarting Hop.
 
-## Enable the API
+## Web panel
 
-The API is disabled by default and creates no HTTP listener. Create a protected high-entropy token file, configure the loopback listener, and restart:
+Open the Compose panel at `http://<host>:8080` and enter `api.token`. The panel calls same-origin `/api/v1` by default. The Token stays only in page memory and is cleared on refresh. A separate remote API URL is available under the advanced connection disclosure.
 
-```toml
-[api]
-enabled = true
-listen = "127.0.0.1:8083"
-token_file = "/var/lib/hop/control-api.token"
-cors_allowlist = []
+Both backend and panel warn when `change-me` is used. After rotating the Token, reopen the connection dialog and authenticate again.
+
+The panel checks API `ownership` before rendering mutations:
+
+- `local`: editable, removable, and rotatable;
+- `config`: read-only, labelled as managed by `hop.yaml`, with mutation actions absent.
+
+## Ingress public keys
+
+Ingress keys decide who can connect to Hop. Add them in the panel or with the CLI:
+
+```bash
+hop-server --config /etc/hop/hop.yaml key add \
+  --name oslo-laptop \
+  --public-key-file ./oslo-laptop.pub
+hop-server --config /etc/hop/hop.yaml key list
 ```
 
-Every request requires:
+In `hop.yaml`, choose exactly one of `public_key` and `public_key_file`. Omitting `assets` grants all assets, `[]` grants none, and a non-empty list grants exactly those assets.
 
-```http
-Authorization: Bearer <token>
+## Target credentials
+
+Target credentials let Hop log into SSH assets. The panel and API return only configured/missing secret status, never stored values.
+
+```bash
+hop-server --config /etc/hop/hop.yaml credential list
+hop-server --config /etc/hop/hop.yaml credential add-password \
+  --name nas-root --username root
 ```
 
-A non-loopback listener is rejected unless `cors_allowlist` is explicit. Put remote access behind TLS and network controls; CORS alone is not a security boundary.
+Interactive secret input is not echoed. Direct secrets in YAML require `0600` permissions.
 
-## Read and operate
+## Assets
 
-Versioned endpoints:
-
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/api/v1/status` | health, version, Catalog revision |
-| GET | `/api/v1/catalog/revision` | optimistic-concurrency revision |
-| GET/POST | `/api/v1/assets` | list/create local assets |
-| PUT/DELETE | `/api/v1/assets/{id}` | update/delete one local asset |
-| GET/POST | `/api/v1/credentials` | list secret status/create local credentials |
-| PUT/DELETE | `/api/v1/credentials/{id}` | update/delete one local credential |
-| GET/POST | `/api/v1/access-keys` | list/create local Access Keys |
-| DELETE | `/api/v1/access-keys/{id}` | revoke and remove a local key |
-| PUT | `/api/v1/access-keys/{id}/enabled` | enable/disable a key |
-| PUT | `/api/v1/access-keys/{id}/access` | replace all/restricted asset scope |
-| GET | `/api/v1/sessions` | recent sessions |
-| POST | `/api/v1/sessions/{id}/terminate` | explicitly terminate an active registered session |
-| GET | `/api/v1/config/sources` | source success/failure generations |
-| GET | `/api/v1/config/status` | sources, orphans, schema and revision |
-| POST | `/api/v1/config/validate` | validate manifest content |
-| POST | `/api/v1/config/diff` | read-only manifest diff |
-| POST | `/api/v1/config/apply` | atomic manifest apply with required base revision |
-| POST | `/api/v1/config/reload` | reload configured inventory sources through the same Apply engine |
-
-Credential responses never contain plaintext, encrypted envelopes, private keys, or passwords. Each secret field is `configured` or `missing`. Access Key responses omit the public-key body and expose only name, fingerprint, state, mode, and assigned asset IDs.
-
-## Local CRUD examples
-
-```json
-POST /api/v1/credentials
-{
-  "name": "root",
-  "username": "root",
-  "auth_type": "password",
-  "password": "request-only-secret"
-}
+```bash
+hop-server --config /etc/hop/hop.yaml asset add-ssh \
+  --name nas --host 192.168.1.20 --port 22 --credential nas-root
+hop-server --config /etc/hop/hop.yaml asset add-tcp \
+  --name metrics --host 192.168.1.30 --port 9090
+hop-server --config /etc/hop/hop.yaml asset list
 ```
 
-Supported `auth_type` values are `password`, `key`, and `key_passphrase`. On update, omitting a secret preserves the existing compatible secret; switching authentication type requires the new type's material.
+Connect using the asset name:
 
-```json
-POST /api/v1/assets
-{
-  "name": "server",
-  "protocol": "ssh",
-  "hostname": "192.0.2.10",
-  "port": 22,
-  "credential_id": "<credential-id>",
-  "tags": ["home"]
-}
+```bash
+ssh -p 2222 nas@hop.example.com
 ```
 
-TCP assets use `protocol: "tcp"` without an SSH credential. RDP, VNC, MySQL, PostgreSQL, and Redis all use the same TCP asset type.
+## Sessions
 
-```json
-POST /api/v1/access-keys
-{
-  "name": "laptop",
-  "public_key": "ssh-ed25519 AAAA...",
-  "assets": []
-}
-```
+The panel shows the latest 100 session records. Termination can signal only a `started` session with an active in-memory transport. A stale record may return not active while remaining in history.
 
-For key create/access updates, omitting `assets` means all assets, `[]` means none, and a non-empty list is a strict list of internal asset IDs.
+## Backup and restore
 
-Local CRUD can modify only resources whose ownership is `local`. A declarative resource returns HTTP 409 with code `managed_by_source`; change its owning manifest and apply it instead. Unique-name/reference conflicts are also reported without exposing database or secret details.
+Back up together:
 
-## Validate, diff, and apply
+- `hop.yaml` and referenced public-key files;
+- `data_dir/hop.db`;
+- `data_dir/hop.secret`;
+- `data_dir/hop_host_key`.
 
-The API accepts manifest content rather than arbitrary server-side paths:
+The database and `hop.secret` must be restored as a pair or stored target secrets cannot be decrypted. Stop Hop, restore complete files and permissions, then restart and inspect logs.
 
-```json
-POST /api/v1/config/diff
-{
-  "content": "api_version: hop/v1alpha1\nassets: {}\n",
-  "format": "yaml",
-  "source_id": "panel",
-  "prune": false
-}
-```
+## Security checklist
 
-Apply additionally requires the revision returned by `/api/v1/catalog/revision`:
-
-```json
-POST /api/v1/config/apply
-{
-  "content": "api_version: hop/v1alpha1\nassets: {}\n",
-  "format": "yaml",
-  "source_id": "panel",
-  "base_revision": 12,
-  "prune": false,
-  "dry_run": false
-}
-```
-
-An outdated base returns `409 revision_conflict`. Validation and apply errors use stable codes and resource paths. Failed writes record a non-sensitive source/audit summary but do not partially modify resources. Dry-run does not write Catalog state.
-
-## Session behavior
-
-Disabling a key, narrowing an allowlist, changing a credential, or deleting an asset affects new connections. Existing SSH streams are not implicitly killed. Use the explicit termination endpoint when an active session must be interrupted immediately.
-
-## Panel availability and boundary
-
-v0.2.0 does not currently ship an official graphical interface for Catalog resources. `hop-rs` removed the old Admin Web, while the current `luci-app-hop` page covers only the OpenWrt service shell, core download, and logging; it does not call the Control API. Use the local CLI, manifests, or `/api/v1` to manage assets, credentials, Access Keys, and allowlists today.
-
-The planned standalone panel and LuCI resource views must both consume `/api/v1`. They must not read/write SQLite directly or duplicate assets, credentials, and Access Keys in UCI. The core does not serve panel assets and does not depend on a frontend repository. See the [v0.2 management-panel delivery contract](product/management-panel-v0.2.md) for the agreed scope and security boundary.
+- YAML is `0600` and excluded from version control.
+- Compose does not publish the Control API port.
+- Non-Compose remote management is behind a TLS reverse proxy.
+- Webpage Token and target credentials are rotated.
+- Unregistered keys receive only `Permission denied (publickey)`.
+- Tokens and target secrets never appear in logs, API responses, or frontend assets.

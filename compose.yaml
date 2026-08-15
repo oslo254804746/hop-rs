@@ -1,0 +1,44 @@
+name: hop
+
+services:
+  hop:
+    image: ghcr.io/oslo254804746/hop-rs:${HOP_VERSION:-v0.2.1}
+    build:
+      context: .
+    command: ["hop-server", "--config", "/etc/hop/hop.yaml", "serve"]
+    environment:
+      HOP_CONFIG: /etc/hop/hop.yaml
+      HOP_DATA_DIR: /data
+    restart: unless-stopped
+    ports:
+      - "${HOP_SSH_PORT:-2222}:2222"
+    expose:
+      - "8083"
+    volumes:
+      - ${HOP_CONFIG_FILE:-./hop.yaml}:/etc/hop/hop.yaml:ro
+      - hop-data:/data
+    networks:
+      - hop-private
+
+  panel:
+    image: ghcr.io/oslo254804746/hop-rs-frontend:${HOP_VERSION:-v0.2.1}
+    build:
+      context: ../hop-rs-frontend
+    depends_on:
+      - hop
+    restart: unless-stopped
+    read_only: true
+    ports:
+      - "${HOP_PANEL_PORT:-8080}:80"
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+    networks:
+      - hop-private
+
+networks:
+  hop-private:
+    internal: false
+
+volumes:
+  hop-data:

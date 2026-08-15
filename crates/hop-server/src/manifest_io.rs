@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, time::UNIX_EPOCH};
+use std::{fs, path::PathBuf};
 
 use hop_core::{CatalogError, CatalogErrorCode, Manifest};
 
@@ -26,31 +26,6 @@ pub fn load_manifest_scope(inputs: &[PathBuf]) -> Result<Manifest, CatalogError>
         })
         .collect::<Result<Vec<_>, _>>()?;
     Manifest::merge(manifests)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScopeSnapshot(Vec<(PathBuf, u64, u128)>);
-
-pub fn scope_snapshot(inputs: &[PathBuf]) -> Result<ScopeSnapshot, CatalogError> {
-    let paths = expand_manifest_scope(inputs)?;
-    let mut entries = Vec::with_capacity(paths.len());
-    for path in paths {
-        let metadata = fs::metadata(&path).map_err(|_| {
-            CatalogError::new(
-                CatalogErrorCode::SourceScanIncomplete,
-                Some(path.display().to_string()),
-                "unable to inspect complete manifest scope",
-            )
-        })?;
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default();
-        entries.push((path, metadata.len(), modified));
-    }
-    Ok(ScopeSnapshot(entries))
 }
 
 fn expand_manifest_scope(inputs: &[PathBuf]) -> Result<Vec<PathBuf>, CatalogError> {

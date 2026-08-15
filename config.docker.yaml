@@ -1,0 +1,9 @@
+listen: 0.0.0.0:2222
+data_dir: /data
+
+# The Control API is opt-in for a backend-only container. Official Compose
+# enables it in the mounted hop.yaml and keeps port 8083 private.
+api:
+  enabled: false
+  listen: 0.0.0.0:8083
+  token: change-me # Replace before enabling the API.

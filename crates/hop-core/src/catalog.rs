@@ -45,6 +45,13 @@ pub struct OrphanStatus {
     pub orphaned_at: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceOwnership {
+    Local,
+    Config,
+}
+
 const SCHEMA_VERSION: &str = "hop/v0.2";
 const BASELINE_SQL: &str = include_str!("catalog/schema_v0_2.sql");
 

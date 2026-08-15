@@ -18,10 +18,12 @@ SSH 资产可以引用一个托管凭据：
 ```yaml
 credentials:
   nas-root:
-    type: ssh_key
     username: root
-    private_key:
-      file: /etc/hop/secrets/nas-root
+    private_key: |
+      -----BEGIN OPENSSH PRIVATE KEY-----
+      replace-with-target-private-key
+      -----END OPENSSH PRIVATE KEY-----
+    passphrase: "optional-passphrase"
 
 assets:
   nas:
@@ -30,6 +32,8 @@ assets:
     port: 22
     credential: nas-root
 ```
+
+这是主 `hop.yaml` 的片段，不是单独的资源文件。目标私钥与密码一样直接保存在受保护的主配置中；请使用 `chmod 0600 hop.yaml`，不要提交到版本控制。
 
 设置凭据后，Hop 可以提供以下能力：
 

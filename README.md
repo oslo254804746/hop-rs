@@ -1,179 +1,100 @@
 # Hop
 
-Hop v0.2 是一个面向个人开发者、Homelab 和单一管理信任域小团队的轻量 SSH 跳板机。它使用原生 OpenSSH 客户端，覆盖 TUI、资产直连、远程命令、SCP/SFTP、ProxyJump 和通用 TCP 转发；不要求浏览器、专属客户端、外部数据库或容器运行时。
+Hop 是一个轻量、自托管的 SSH 跳板机：入口只接受已登记的公钥，目标凭据加密保存，并提供官方网页面板。
 
-[English](README-EN.md)
+## 快速开始：网页面板（推荐）
 
-## v0.2 边界
-
-- 单一 Rust 二进制和单一 SQLite Catalog。
-- 多把入口 Access Key，可独立启用、禁用或删除。
-- Key 未声明 `assets` 时访问全部当前及未来资产；`assets: []` 表示认证成功但不能发现或访问资产；非空数组是严格白名单。
-- YAML/TOML、CLI 和可选 Control API 都写入同一个 Catalog。
-- HTTP Control API 默认关闭；核心不包含 Admin Web、管理员账号、Cookie、CSRF、角色或 RBAC。
-- OpenWrt 是一等发行目标：轻量 LuCI/procd 包按架构下载经 SHA256 校验的静态核心，不在 IPK/APK 内编译或内置 Rust 后端；当前 LuCI 页面只管理服务外壳，不管理 Catalog 资源。
-- 资产类型只有 `ssh` 和 `tcp`。SSH 由 Hop 管理协议与凭据，RDP、数据库等服务使用通用 TCP 转发。
-
-## 管理面板现状
-
-v0.2.0 当前没有可管理资产、凭据、Access Key、白名单和会话的官方图形面板。通用 Hop 面板与 `luci-app-hop` 资源页面已经被确认为 v0.2 的独立交付物；在它们发布前，请使用 CLI、资源 manifest 或 Control API。面板不会恢复旧 Admin Web 的管理员账号和角色模型，详细边界见 [v0.2 管理面板交付边界](docs/product/management-panel-v0.2.md)。
-
-## 快速开始
+把 `hop-rs` 与 `hop-rs-frontend` 放在同一父目录，然后在后端仓库执行：
 
 ```bash
-cargo build --release --locked -p hop-server
-cp config.example.toml config.toml
+cp hop.yaml hop.local.yaml
+sed -i 's/token: change-me/token: 请替换为随机长字符串/' hop.local.yaml
+chmod 0600 hop.local.yaml
+HOP_CONFIG_FILE=./hop.local.yaml docker compose up -d --build
 ```
 
-启动配置也可以使用 [`config.example.yaml`](config.example.yaml)。[`resources.example.yaml`](resources.example.yaml) 提供了可以直接离线校验的 SSH/TCP 资源样例。
+默认打开：
 
-添加入口公钥、目标凭据和资产：
+- 面板：`http://localhost:8080`
+- SSH：`localhost:2222`
+
+首次打开面板时，只需输入 `hop.local.yaml` 中的网页管理 Token。面板与后端使用同源 `/api/v1`，后端管理端口不会发布到宿主机。初始 Catalog 为空，可直接在网页中添加入口公钥、目标凭据和资产。
+
+仓库自带的 `compose.yaml` 目前默认挂载 `./hop.yaml`。若使用上面的本地副本，可在启动前设置 `HOP_CONFIG_FILE`；也可以直接安全地修改并保护 `hop.yaml`。
+
+## 单 YAML、无面板
+
+复制完整示例并填写入口公钥与目标信息：
 
 ```bash
-./target/release/hop-server --config config.toml key add \
-  --name laptop --public-key-file ~/.ssh/id_ed25519.pub
-
-printf '%s' 'target-password' | \
-  ./target/release/hop-server --config config.toml credential add \
-  --name homelab-root --username root --auth-type password --password-stdin
-
-credential_id=$(./target/release/hop-server --config config.toml credential list | awk 'NR == 1 { print $1 }')
-./target/release/hop-server --config config.toml asset add \
-  --name nas --hostname 192.168.1.20 --port 22 --credential-id "$credential_id"
-
-./target/release/hop-server --config config.toml serve
+cp config.example.yaml hop.local.yaml
+chmod 0600 hop.local.yaml
+cargo run --release -p hop-server -- --config ./hop.local.yaml config validate
+cargo run --release -p hop-server -- --config ./hop.local.yaml serve
 ```
 
-默认 SSH 监听 `0.0.0.0:2222`，Control API 不启动。
+一份 `hop.yaml` 同时包含监听地址、数据目录、网页管理 Token、SSH 运行参数、目标凭据、资产和入口公钥。启动时 Hop 先用内部原子 Apply 引擎应用文件中的资源；任何错误都会阻止监听器启动，不会留下半套 Catalog。
 
-## 原生 SSH 使用
-
-```bash
-# TUI 资产选择器
-ssh -p 2222 menu@hop-host
-
-# 资产名直连与远程命令
-ssh -p 2222 nas@hop-host
-ssh -p 2222 nas@hop-host 'uname -a'
-
-# SCP / SFTP 使用 Hop 托管的目标凭据
-scp -P 2222 file.txt nas@hop-host:/tmp/file.txt
-sftp -P 2222 nas@hop-host
-
-# 将已登记的 RDP 资产映射到本机
-ssh -p 2222 -L 13389:desktop.hop:3389 menu@hop-host
-```
-
-ProxyJump 示例：
-
-```sshconfig
-Host hop
-  HostName hop-host
-  Port 2222
-  IdentityFile ~/.ssh/id_ed25519
-
-Host *.hop
-  ProxyJump hop
-```
-
-Hop 在 TUI 列表、资产名直连、托管交互会话、远程命令、SCP/SFTP、ProxyJump 和 TCP 转发入口使用同一 Key-to-Asset 授权查询；手工构造目标不会绕过白名单。普通白名单变更只影响新连接，紧急阻断使用 Control API 的显式会话终止接口。
-
-## 声明式资源
-
-资源 manifest 支持严格 YAML 或 TOML，拒绝未知字段和重复资源。Secret 默认只允许 `file` 或 `env` 来源，解析后使用 Master Key 加密写入 SQLite。
+## 最小配置
 
 ```yaml
-api_version: hop/v1alpha1
+listen: 0.0.0.0:2222
+data_dir: ./data
+
+api:
+  enabled: true
+  listen: 127.0.0.1:8083
+  token: change-me
 
 credentials:
-  homelab:
-    type: password
+  nas-root:
     username: root
-    password:
-      file: /etc/hop/secrets/homelab.password
+    password: replace-this-password
 
 assets:
   nas:
-    type: ssh
     host: 192.168.1.20
-    port: 22
-    credential: homelab
+    credential: nas-root
 
-  desktop:
-    type: tcp
-    host: 192.168.1.30
-    port: 3389
-
-access:
+access_keys:
   laptop:
-    public_key:
-      file: /etc/hop/keys/laptop.pub
-    assets: [nas, desktop]
+    public_key_file: ./laptop.pub
+    assets: [nas]
 ```
+
+`password`、`private_key`、`passphrase` 都是 YAML 直接字符串；因此配置文件必须使用 `chmod 0600` 并排除在版本控制之外。入口公钥必须在 `public_key` 与 `public_key_file` 中二选一。相对路径以配置文件所在目录为基准。
+
+`api.token` 缺失或为空时，仅禁用 Control API，SSH 仍正常启动。`change-me` 只用于首次体验；后端与面板都会警告，生产环境必须替换。
+
+## 资源归属
+
+- 面板或本地命令创建的资源归属为 `local`，可在面板编辑和删除。
+- `hop.yaml` 声明的资源归属为 `config`，面板在显示操作按钮前就将其标为只读。
+- 修改配置管理的资源后重启 Hop；启动 Apply 会更新它们，并删除配置中已移除的同归属资源，不影响本地资源。
+
+## 连接
 
 ```bash
-# 纯离线语法、secret 和引用校验
-hop-server config validate -f resources.yaml --offline --json
-
-# 针对现有 Catalog 的只读校验与 diff
-hop-server --config config.toml config validate -f resources.yaml --json
-hop-server --config config.toml config diff -f resources.yaml --source home --json
-
-# 原子提交；可选 revision 乐观锁、dry-run 和显式 prune
-hop-server --config config.toml apply -f resources.yaml \
-  --source home --base-revision 0 --json
-hop-server --config config.toml apply -f resources.yaml --source home --dry-run
-hop-server --config config.toml apply -f resources.yaml --source home --prune
-
-hop-server --config config.toml config status --json
+ssh -p 2222 <asset-name>@<hop-host>
 ```
 
-同一内容重复 apply 不增加 Catalog revision。完整 source 扫描中缺失的资源默认只标记 orphan 并继续可用；只有显式 `state: absent` 或 `--prune` 才删除。启动配置中的 watcher 同样调用这套 Apply engine，等待 scope 稳定后重扫；错误只记录状态并保留上一代有效 Catalog，且默认不 prune。
-
-## 启动配置与 Control API
-
-`config.example.toml` 展示所有启动边界：SSH listen、数据库、Host Key、Master Key、超时、keepalive、banner、proxy policy、API、inventory source/watcher 和运行设置。YAML 配置使用相同字段。
-
-Catalog 资源可以动态 apply；监听地址、数据库和密钥路径等启动字段需要重启；白名单和凭据变化只影响新连接。
-
-启用 API 时必须显式创建 Token 文件：
-
-```toml
-[api]
-enabled = true
-listen = "127.0.0.1:8083"
-token_file = "/etc/hop/control-api.token"
-cors_allowlist = []
-```
-
-所有 `/api/v1` 请求使用 `Authorization: Bearer <token>`。API 提供状态、Catalog revision、资源和本地 CRUD、会话终止、source/status、validate、diff、apply 与 reload；凭据响应只包含 `configured`/`missing` 状态，不返回密文或明文。非 loopback 监听必须配置明确的 CORS allowlist。
-
-## 验证
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
-./scripts/manual_e2e_key_asset_access.sh
-./scripts/e2e_local_openssh.sh
-```
-
-第二个 E2E 会启动隔离的 OpenSSH 目标，验证远程命令、stdin/stdout/stderr、退出码、PTY、SCP、SFTP、ProxyJump、Host Key 首次记录与变更拒绝，以及凭据密文。
+Hop 的入口 SSH 只宣告 `publickey` 认证。未登记的公钥会直接得到 `Permission denied (publickey)`，不会回退到密码提示。
 
 ## 文档
 
-- [SSH 与 TCP 代理](docs/proxying.zh-CN.md)
-- [配置参考](docs/configuration.zh-CN.md)
 - [部署指南](docs/deployment.zh-CN.md)
-- [Deployment, backup, rebuild, and recovery](docs/deployment.md)
-- [Control API 与本地管理](docs/admin-guide.zh-CN.md)
-- [声明式 Apply 规范](docs/product/declarative-apply-spec.md)
-- [Access Key 与资产白名单](docs/product/lightweight-access-control.md)
-- [v0.2 管理面板交付边界](docs/product/management-panel-v0.2.md)
-- [OpenWrt 打包与资源测量](docs/openwrt.md)
-- [v0.2 产品方向](docs/product/product-direction-v0.2.md)
-- [文档索引](docs/README.md)
+- [配置参考](docs/configuration.zh-CN.md)
+- [管理员指南](docs/admin-guide.zh-CN.md)
+- [English README](README-EN.md)
 
-## License
+## 开发验证
 
-MIT
+```bash
+cargo fmt --all --check
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+shellcheck docker-entrypoint.sh scripts/*.sh
+docker compose config
+```
+
+许可证：MIT。

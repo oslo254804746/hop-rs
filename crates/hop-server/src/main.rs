@@ -1,5 +1,4 @@
 mod control_api;
-mod inventory;
 mod local_cli;
 mod manifest_io;
 mod ssh;
@@ -94,10 +93,6 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum ConfigCommand {
     Validate {
-        #[arg(short = 'f', long = "file", required = true)]
-        files: Vec<PathBuf>,
-        #[arg(long)]
-        offline: bool,
         #[arg(long)]
         json: bool,
     },
@@ -443,28 +438,15 @@ async fn main() -> Result<()> {
 
 async fn run_config_command(config_path: Option<PathBuf>, command: ConfigCommand) -> Result<()> {
     match command {
-        ConfigCommand::Validate {
-            files,
-            offline,
-            json,
-        } => {
-            let manifest = match manifest_io::load_manifest_scope(&files) {
-                Ok(manifest) => manifest,
-                Err(error) => return finish_catalog_result::<ValidationOutput>(Err(error), json),
-            };
-            let result = if offline {
-                manifest.validate_offline()
+        ConfigCommand::Validate { json } => {
+            load_config(config_path)?;
+            let output = ValidationOutput { valid: true };
+            if json {
+                println!("{}", serde_json::to_string(&output)?);
             } else {
-                let catalog = open_catalog_db_read_only(config_path).await?;
-                catalog.validate_manifest(&manifest).await
-            };
-            finish_catalog_result(
-                result.map(|()| ValidationOutput {
-                    valid: true,
-                    offline,
-                }),
-                json,
-            )
+                println!("startup config valid");
+            }
+            Ok(())
         }
         ConfigCommand::Diff {
             files,
@@ -519,7 +501,6 @@ async fn run_apply_command(
 #[derive(Debug, Serialize)]
 struct ValidationOutput {
     valid: bool,
-    offline: bool,
 }
 
 fn finish_catalog_result<T>(result: std::result::Result<T, CatalogError>, json: bool) -> Result<()>
@@ -575,22 +556,24 @@ where
 
 async fn open_catalog(config_path: Option<PathBuf>) -> Result<(Catalog, Arc<MasterKey>)> {
     let config = load_config(config_path)?;
-    let catalog = Catalog::connect(&config.database.path).await?;
-    let master_key = Arc::new(load_or_create_master_key(&config.security.master_key_file)?);
+    fs::create_dir_all(&config.data_dir)
+        .with_context(|| format!("create data directory {}", config.data_dir.display()))?;
+    let catalog = Catalog::connect(config.database_path()).await?;
+    let master_key = Arc::new(load_or_create_master_key(&config.master_key_path())?);
     Ok((catalog, master_key))
 }
 
 async fn open_catalog_db_read_only(config_path: Option<PathBuf>) -> Result<Catalog> {
     let config = load_config(config_path)?;
-    Catalog::connect_read_only(&config.database.path)
+    Catalog::connect_read_only(config.database_path())
         .await
         .map_err(Into::into)
 }
 
 async fn open_catalog_read_only(config_path: Option<PathBuf>) -> Result<(Catalog, Arc<MasterKey>)> {
     let config = load_config(config_path)?;
-    let catalog = Catalog::connect_read_only(&config.database.path).await?;
-    let master_key = Arc::new(load_master_key(&config.security.master_key_file)?);
+    let catalog = Catalog::connect_read_only(config.database_path()).await?;
+    let master_key = Arc::new(load_master_key(&config.master_key_path())?);
     Ok((catalog, master_key))
 }
 
@@ -707,44 +690,68 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
     } else if config.runtime.session_retention_days == 0 {
         warn!("automatic finished-session retention is disabled");
     }
-    inventory::apply_startup_sources(&db, &master_key, &config.inventory.sources).await;
+    let summary = apply_startup_resources(&db, &master_key, &config).await?;
+    if summary.new_revision != summary.base_revision {
+        info!(
+            created = summary.created,
+            updated = summary.updated,
+            deleted = summary.deleted,
+            revision = summary.new_revision,
+            "applied startup-config resources"
+        );
+    }
     let active_sessions = ssh::session_registry::ActiveSessionRegistry::default();
     info!("starting hop-server SSH listener on {ssh_bind}");
-    if config.api.enabled {
+    let api_token = config
+        .api
+        .enabled
+        .then(|| config.api.token.as_ref().filter(|token| !token.is_empty()))
+        .flatten();
+    if config.api.enabled && api_token.is_none() {
+        warn!("Control API disabled because api.token is missing or empty; SSH remains available");
+    }
+    if config.api.enabled && api_token.is_some_and(|token| token.is_placeholder()) {
+        warn!("api.token still uses the insecure 'change-me' placeholder; replace it before exposing the panel");
+    }
+    if let Some(token) = api_token {
         let api_bind = config.api_bind_addr()?;
-        if !api_bind.ip().is_loopback() && config.api.cors_allowlist.is_empty() {
-            bail!("api.cors_allowlist must be explicit when api.listen is not loopback");
-        }
-        let token = control_api::load_token(&config.api.token_file)?;
         let api_state = control_api::ControlApiState::new(
             db.clone(),
             master_key.clone(),
-            &token,
-            config.inventory.sources.clone(),
+            token.expose(),
             active_sessions.clone(),
         )?;
         info!("starting Hop Control API on {api_bind}");
         let cors_allowlist = config.api.cors_allowlist.clone();
         let api = control_api::serve(api_bind, api_state, &cors_allowlist);
-        let watcher = inventory::watch_sources(
-            db.clone(),
-            master_key.clone(),
-            config.inventory.sources.clone(),
-        );
         let ssh = ssh::server::serve_ssh(ssh_bind, config, db, master_key, active_sessions);
-        tokio::try_join!(api, ssh, watcher)?;
+        tokio::try_join!(api, ssh)?;
         Ok(())
     } else {
         info!("Control API disabled; no HTTP listener will be created");
-        let watcher = inventory::watch_sources(
-            db.clone(),
-            master_key.clone(),
-            config.inventory.sources.clone(),
-        );
         let ssh = ssh::server::serve_ssh(ssh_bind, config, db, master_key, active_sessions);
-        tokio::try_join!(ssh, watcher)?;
+        ssh.await?;
         Ok(())
     }
+}
+
+async fn apply_startup_resources(
+    catalog: &Catalog,
+    master_key: &MasterKey,
+    config: &HopConfig,
+) -> Result<hop_core::ApplySummary> {
+    catalog
+        .apply(
+            &config.startup_manifest(),
+            "startup-config",
+            master_key,
+            ApplyOptions {
+                prune: true,
+                ..ApplyOptions::default()
+            },
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("startup config apply failed: {error}"))
 }
 
 async fn open_runtime(
@@ -755,8 +762,10 @@ async fn open_runtime(
             .with_context(|| format!("load config {}", path.display()))?,
         None => HopConfig::load(None)?,
     };
-    let db = Catalog::connect(&config.database.path).await?;
-    let master_key = Arc::new(load_or_create_master_key(&config.security.master_key_file)?);
+    fs::create_dir_all(&config.data_dir)
+        .with_context(|| format!("create data directory {}", config.data_dir.display()))?;
+    let db = Catalog::connect(config.database_path()).await?;
+    let master_key = Arc::new(load_or_create_master_key(&config.master_key_path())?);
     Ok((db, config, master_key))
 }
 
@@ -771,22 +780,17 @@ mod tests {
     fn config_and_apply_commands_parse_v0_2_contract() {
         let validate = Cli::try_parse_from([
             "hop-server",
+            "--config",
+            "hop.yaml",
             "config",
             "validate",
-            "-f",
-            "resources.yaml",
-            "--offline",
             "--json",
         ])
         .unwrap();
         assert!(matches!(
             validate.command,
             Some(Command::Config {
-                command: ConfigCommand::Validate {
-                    offline: true,
-                    json: true,
-                    ..
-                }
+                command: ConfigCommand::Validate { json: true }
             })
         ));
 
@@ -820,7 +824,6 @@ mod tests {
     async fn apply_command_initializes_and_updates_the_v0_2_catalog() {
         let directory = tempfile::tempdir().unwrap();
         let database = directory.path().join("hop.db");
-        let master_key = directory.path().join("hop.secret");
         let password = directory.path().join("password");
         let public_key = directory.path().join("id.pub");
         let manifest = directory.path().join("resources.yaml");
@@ -853,14 +856,7 @@ access:
             ),
         )
         .unwrap();
-        fs::write(
-            &config,
-            format!(
-                "[database]\npath = {:?}\n\n[security]\nmaster_key_file = {:?}\n",
-                database, master_key
-            ),
-        )
-        .unwrap();
+        fs::write(&config, format!("data_dir = {:?}\n", directory.path())).unwrap();
 
         run_apply_command(
             Some(config),
@@ -884,22 +880,21 @@ access:
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let api_address = occupied.local_addr().unwrap();
         let config_path = directory.path().join("config.toml");
-        let database = directory.path().join("hop.db");
-        let master_key = directory.path().join("hop.secret");
-        let host_key = directory.path().join("host_key");
-        let token = directory.path().join("api.token");
-        let write_config = |enabled: bool| {
+        let write_config = |enabled: bool, token: Option<&str>| {
+            let token = token
+                .map(|token| format!("token = {token:?}\n"))
+                .unwrap_or_default();
             fs::write(
                 &config_path,
                 format!(
-                    "[server]\nssh_listen = '127.0.0.1:0'\n\n[database]\npath = {:?}\n\n[api]\nenabled = {enabled}\nlisten = '{api_address}'\ntoken_file = {:?}\n\n[ssh]\nhost_key_file = {:?}\n\n[security]\nmaster_key_file = {:?}\n",
-                    database, token, host_key, master_key
+                    "listen = '127.0.0.1:0'\ndata_dir = {:?}\n\n[api]\nenabled = {enabled}\nlisten = '{api_address}'\n{token}",
+                    directory.path(),
                 ),
             )
             .unwrap();
         };
 
-        write_config(false);
+        write_config(false, None);
         let disabled = tokio::time::timeout(
             std::time::Duration::from_millis(150),
             serve(Some(config_path.clone())),
@@ -910,8 +905,40 @@ access:
             "disabled API must not try the occupied HTTP port"
         );
 
-        fs::write(&token, "management-token\n").unwrap();
-        write_config(true);
+        write_config(false, Some("configured-but-disabled"));
+        let disabled_with_token = tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            serve(Some(config_path.clone())),
+        )
+        .await;
+        assert!(
+            disabled_with_token.is_err(),
+            "disabled API must ignore a configured token and leave SSH running"
+        );
+
+        write_config(true, None);
+        let missing_token = tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            serve(Some(config_path.clone())),
+        )
+        .await;
+        assert!(
+            missing_token.is_err(),
+            "missing API token must leave SSH running without binding HTTP"
+        );
+
+        write_config(true, Some(""));
+        let empty_token = tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            serve(Some(config_path.clone())),
+        )
+        .await;
+        assert!(
+            empty_token.is_err(),
+            "empty API token must leave SSH running without binding HTTP"
+        );
+
+        write_config(true, Some("management-token"));
         let enabled =
             tokio::time::timeout(std::time::Duration::from_secs(2), serve(Some(config_path)))
                 .await
@@ -919,6 +946,97 @@ access:
         assert!(
             enabled.is_err(),
             "enabled API must try the occupied HTTP port"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_config_apply_is_atomic_idempotent_and_prunes_only_its_resources() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("hop.yaml");
+        let write_config = |password: Option<&str>, host: &str| {
+            let resources = password
+                .map(|password| {
+                    format!(
+                        r#"credentials:
+  root:
+    username: root
+    password: "{password}"
+assets:
+  nas:
+    host: {host}
+    credential: root
+access_keys:
+  laptop:
+    public_key: "{PUBLIC_KEY}"
+    assets: [nas]
+"#
+                    )
+                })
+                .unwrap_or_default();
+            fs::write(
+                &config_path,
+                format!(
+                    "listen: 127.0.0.1:0\ndata_dir: {}\n{resources}",
+                    directory.path().display()
+                ),
+            )
+            .unwrap();
+        };
+
+        write_config(Some("first-password"), "192.0.2.10");
+        let config = HopConfig::load(Some(&config_path)).unwrap();
+        let catalog = Catalog::connect(config.database_path()).await.unwrap();
+        let master_key = load_or_create_master_key(&config.master_key_path()).unwrap();
+        let first = apply_startup_resources(&catalog, &master_key, &config)
+            .await
+            .unwrap();
+        assert_eq!((first.created, first.new_revision), (3, 1));
+        assert_eq!(
+            catalog
+                .resource_ownership("asset", &catalog.list_assets().await.unwrap()[0].id)
+                .await
+                .unwrap(),
+            hop_core::ResourceOwnership::Config
+        );
+
+        let same = apply_startup_resources(&catalog, &master_key, &config)
+            .await
+            .unwrap();
+        assert_eq!(same.new_revision, 1);
+
+        write_config(Some("second-password"), "192.0.2.11");
+        let changed = HopConfig::load(Some(&config_path)).unwrap();
+        let changed = apply_startup_resources(&catalog, &master_key, &changed)
+            .await
+            .unwrap();
+        assert_eq!((changed.updated, changed.new_revision), (2, 2));
+
+        let local = catalog
+            .add_asset(NewAsset::new("local-console", "192.0.2.30", 22))
+            .await
+            .unwrap();
+        write_config(None, "unused");
+        let empty = HopConfig::load(Some(&config_path)).unwrap();
+        let pruned = apply_startup_resources(&catalog, &master_key, &empty)
+            .await
+            .unwrap();
+        assert_eq!(pruned.deleted, 3);
+        assert_eq!(
+            catalog
+                .list_assets()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|asset| asset.name)
+                .collect::<Vec<_>>(),
+            vec!["local-console"]
+        );
+        assert_eq!(
+            catalog
+                .resource_ownership("asset", &local.id)
+                .await
+                .unwrap(),
+            hop_core::ResourceOwnership::Local
         );
     }
 

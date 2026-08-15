@@ -1,4 +1,4 @@
-use std::{fs, net::SocketAddr, path::Path, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -9,27 +9,22 @@ use axum::{
     Json, Router,
 };
 use hop_core::{
-    config::InventorySourceConfig, encrypt_envelope, new_id, ApplyOptions, ApplySummary, Asset,
-    AssetAccessMode, AuthType, Catalog, CatalogError, CatalogErrorCode, ConfigSourceStatus,
-    Credential, HopCoreError, Manifest, MasterKey, NewAsset, NewAuthorizedKey, NewCredential,
-    Session,
+    encrypt_envelope, new_id, ApplyOptions, ApplySummary, Asset, AssetAccessMode, AuthType,
+    Catalog, CatalogError, CatalogErrorCode, Credential, HopCoreError, Manifest, MasterKey,
+    NewAsset, NewAuthorizedKey, NewCredential, ResourceOwnership, Session,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-use crate::{
-    inventory,
-    ssh::session_registry::{ActiveSessionRegistry, TerminateSessionResult},
-};
+use crate::ssh::session_registry::{ActiveSessionRegistry, TerminateSessionResult};
 
 #[derive(Clone)]
 pub struct ControlApiState {
     catalog: Catalog,
     master_key: Arc<MasterKey>,
     token_hash: [u8; 32],
-    inventory_sources: Arc<Vec<InventorySourceConfig>>,
     active_sessions: ActiveSessionRegistry,
 }
 
@@ -38,7 +33,6 @@ impl ControlApiState {
         catalog: Catalog,
         master_key: Arc<MasterKey>,
         token: &str,
-        inventory_sources: Vec<InventorySourceConfig>,
         active_sessions: ActiveSessionRegistry,
     ) -> Result<Self> {
         let token = token.trim();
@@ -49,20 +43,9 @@ impl ControlApiState {
             catalog,
             master_key,
             token_hash: Sha256::digest(token.as_bytes()).into(),
-            inventory_sources: Arc::new(inventory_sources),
             active_sessions,
         })
     }
-}
-
-pub fn load_token(path: &Path) -> Result<String> {
-    let token = fs::read_to_string(path)
-        .with_context(|| format!("read Control API token file {}", path.display()))?;
-    let token = token.trim().to_string();
-    if token.is_empty() {
-        bail!("Control API token file {} is empty", path.display());
-    }
-    Ok(token)
 }
 
 pub async fn serve(
@@ -78,18 +61,27 @@ pub async fn serve(
 }
 
 fn cors_layer(cors_allowlist: &[String]) -> Result<CorsLayer> {
-    let origins = cors_allowlist
-        .iter()
-        .map(|origin| {
-            HeaderValue::from_str(origin)
-                .with_context(|| format!("invalid api.cors_allowlist origin {origin}"))
-        })
-        .collect::<Result<Vec<_>>>()?;
     let mut cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
         .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
-    if !origins.is_empty() {
-        cors = cors.allow_origin(AllowOrigin::list(origins));
+    match cors_allowlist {
+        [] => {}
+        [origin] if origin == "*" => {
+            cors = cors.allow_origin(AllowOrigin::any());
+        }
+        origins => {
+            if origins.iter().any(|origin| origin == "*") {
+                bail!("api.cors_allowlist wildcard '*' must be the only entry");
+            }
+            let origins = origins
+                .iter()
+                .map(|origin| {
+                    HeaderValue::from_str(origin)
+                        .with_context(|| format!("invalid api.cors_allowlist origin {origin}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            cors = cors.allow_origin(AllowOrigin::list(origins));
+        }
     }
     Ok(cors)
 }
@@ -129,12 +121,9 @@ pub fn router(state: ControlApiState) -> Router {
         .route("/api/v1/sessions", get(sessions))
         .route("/api/v1/sessions/{id}/terminate", post(terminate_session))
         .route("/api/v1/catalog/revision", get(revision))
-        .route("/api/v1/config/sources", get(config_sources))
-        .route("/api/v1/config/status", get(config_status))
         .route("/api/v1/config/validate", post(validate))
         .route("/api/v1/config/diff", post(diff))
         .route("/api/v1/config/apply", post(apply))
-        .route("/api/v1/config/reload", post(reload))
         .with_state(state)
 }
 
@@ -163,25 +152,31 @@ async fn revision(
 async fn assets(
     State(state): State<ControlApiState>,
     headers: HeaderMap,
-) -> ApiResult<Json<Vec<Asset>>> {
+) -> ApiResult<Json<Vec<AssetView>>> {
     authenticate(&state, &headers)?;
-    Ok(Json(
-        state
-            .catalog
-            .list_assets()
-            .await
-            .map_err(ApiError::internal)?,
-    ))
+    let assets = state
+        .catalog
+        .list_assets()
+        .await
+        .map_err(ApiError::internal)?;
+    let mut views = Vec::with_capacity(assets.len());
+    for asset in assets {
+        views.push(asset_view(&state.catalog, asset).await?);
+    }
+    Ok(Json(views))
 }
 
 async fn create_asset(
     State(state): State<ControlApiState>,
     headers: HeaderMap,
     Json(request): Json<AssetWriteRequest>,
-) -> ApiResult<(StatusCode, Json<Asset>)> {
+) -> ApiResult<(StatusCode, Json<AssetView>)> {
     authenticate(&state, &headers)?;
     let asset = state.catalog.add_asset(request.into()).await?;
-    Ok((StatusCode::CREATED, Json(asset)))
+    Ok((
+        StatusCode::CREATED,
+        Json(asset_view(&state.catalog, asset).await?),
+    ))
 }
 
 async fn update_asset(
@@ -189,7 +184,7 @@ async fn update_asset(
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
     Json(request): Json<AssetWriteRequest>,
-) -> ApiResult<Json<Asset>> {
+) -> ApiResult<Json<AssetView>> {
     authenticate(&state, &headers)?;
     state.catalog.update_asset(&id, request.into()).await?;
     let asset = state
@@ -197,7 +192,7 @@ async fn update_asset(
         .get_asset_by_id(&id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(asset))
+    Ok(Json(asset_view(&state.catalog, asset).await?))
 }
 
 async fn delete_asset(
@@ -220,9 +215,11 @@ async fn credentials(
         .list_credentials()
         .await
         .map_err(ApiError::internal)?;
-    Ok(Json(
-        credentials.into_iter().map(CredentialView::from).collect(),
-    ))
+    let mut views = Vec::with_capacity(credentials.len());
+    for credential in credentials {
+        views.push(credential_view(&state.catalog, credential).await?);
+    }
+    Ok(Json(views))
 }
 
 async fn create_credential(
@@ -234,7 +231,10 @@ async fn create_credential(
     let id = new_id();
     let credential = build_credential(&state.master_key, &id, request, None)?;
     let credential = state.catalog.add_credential(credential).await?;
-    Ok((StatusCode::CREATED, Json(credential.into())))
+    Ok((
+        StatusCode::CREATED,
+        Json(credential_view(&state.catalog, credential).await?),
+    ))
 }
 
 async fn update_credential(
@@ -256,7 +256,7 @@ async fn update_credential(
         .get_credential(&id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    Ok(Json(credential.into()))
+    Ok(Json(credential_view(&state.catalog, credential).await?))
 }
 
 async fn delete_credential(
@@ -390,22 +390,6 @@ async fn terminate_session(
     Ok(Json(TerminateResponse { id, terminated }))
 }
 
-async fn config_sources(
-    State(state): State<ControlApiState>,
-    headers: HeaderMap,
-) -> ApiResult<Json<Vec<ConfigSourceStatus>>> {
-    authenticate(&state, &headers)?;
-    Ok(Json(state.catalog.status().await?.sources))
-}
-
-async fn config_status(
-    State(state): State<ControlApiState>,
-    headers: HeaderMap,
-) -> ApiResult<Json<hop_core::CatalogStatus>> {
-    authenticate(&state, &headers)?;
-    Ok(Json(state.catalog.status().await?))
-}
-
 async fn validate(
     State(state): State<ControlApiState>,
     headers: HeaderMap,
@@ -494,19 +478,6 @@ async fn apply(
             Err(error.into())
         }
     }
-}
-
-async fn reload(
-    State(state): State<ControlApiState>,
-    headers: HeaderMap,
-) -> ApiResult<Json<ReloadResponse>> {
-    authenticate(&state, &headers)?;
-    let mut applied = Vec::new();
-    for source in state.inventory_sources.iter() {
-        applied
-            .push(inventory::apply_source(&state.catalog, &state.master_key, source, "api").await?);
-    }
-    Ok(Json(ReloadResponse { applied }))
 }
 
 fn authenticate(state: &ControlApiState, headers: &HeaderMap) -> ApiResult<()> {
@@ -685,6 +656,21 @@ struct ValidationResponse {
 }
 
 #[derive(Serialize)]
+struct AssetView {
+    #[serde(flatten)]
+    asset: Asset,
+    ownership: ResourceOwnership,
+}
+
+async fn asset_view(catalog: &Catalog, asset: Asset) -> ApiResult<AssetView> {
+    let ownership = catalog
+        .resource_ownership("asset", &asset.id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(AssetView { asset, ownership })
+}
+
+#[derive(Serialize)]
 struct CredentialView {
     id: String,
     name: String,
@@ -693,20 +679,24 @@ struct CredentialView {
     password: SecretStatus,
     private_key: SecretStatus,
     passphrase: SecretStatus,
+    ownership: ResourceOwnership,
 }
 
-impl From<Credential> for CredentialView {
-    fn from(credential: Credential) -> Self {
-        Self {
-            id: credential.id,
-            name: credential.name,
-            username: credential.username,
-            auth_type: credential.auth_type,
-            password: SecretStatus::from(credential.password_enc.is_some()),
-            private_key: SecretStatus::from(credential.private_key_enc.is_some()),
-            passphrase: SecretStatus::from(credential.passphrase_enc.is_some()),
-        }
-    }
+async fn credential_view(catalog: &Catalog, credential: Credential) -> ApiResult<CredentialView> {
+    let ownership = catalog
+        .resource_ownership("credential", &credential.id)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(CredentialView {
+        id: credential.id,
+        name: credential.name,
+        username: credential.username,
+        auth_type: credential.auth_type,
+        password: SecretStatus::from(credential.password_enc.is_some()),
+        private_key: SecretStatus::from(credential.private_key_enc.is_some()),
+        passphrase: SecretStatus::from(credential.passphrase_enc.is_some()),
+        ownership,
+    })
 }
 
 #[derive(Serialize)]
@@ -734,17 +724,13 @@ struct AccessKeyView {
     enabled: bool,
     access_mode: String,
     assets: Option<Vec<String>>,
+    ownership: ResourceOwnership,
 }
 
 #[derive(Serialize)]
 struct TerminateResponse {
     id: String,
     terminated: bool,
-}
-
-#[derive(Serialize)]
-struct ReloadResponse {
-    applied: Vec<ApplySummary>,
 }
 
 fn build_credential(
@@ -823,6 +809,10 @@ async fn access_key_view(
         AssetAccessMode::All => None,
         AssetAccessMode::Restricted => Some(catalog.list_asset_ids_for_key(&key.id).await?),
     };
+    let ownership = catalog
+        .resource_ownership("access_key", &key.id)
+        .await
+        .map_err(ApiError::internal)?;
     Ok(AccessKeyView {
         id: key.id,
         name: key.name,
@@ -830,6 +820,7 @@ async fn access_key_view(
         enabled: key.is_active,
         access_mode: key.asset_access_mode.to_string(),
         assets,
+        ownership,
     })
 }
 
@@ -951,6 +942,8 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
 
@@ -962,7 +955,6 @@ mod tests {
             Catalog::in_memory().await.unwrap(),
             Arc::new(MasterKey::generate()),
             "test-token",
-            Vec::new(),
             ActiveSessionRegistry::default(),
         )
         .unwrap();
@@ -999,7 +991,6 @@ mod tests {
             Catalog::in_memory().await.unwrap(),
             Arc::new(MasterKey::generate()),
             "test-token",
-            Vec::new(),
             ActiveSessionRegistry::default(),
         )
         .unwrap();
@@ -1039,6 +1030,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cors_wildcard_allows_any_origin_without_panicking() {
+        let state = ControlApiState::new(
+            Catalog::in_memory().await.unwrap(),
+            Arc::new(MasterKey::generate()),
+            "test-token",
+            ActiveSessionRegistry::default(),
+        )
+        .unwrap();
+        let app = router(state).layer(cors_layer(&["*".to_string()]).unwrap());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/api/v1/assets")
+                    .header(header::ORIGIN, "https://any-origin.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, Method::GET.as_str())
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&HeaderValue::from_static("*"))
+        );
+    }
+
+    #[test]
+    fn cors_wildcard_cannot_be_mixed_with_explicit_origins() {
+        let error =
+            cors_layer(&["*".to_string(), "https://panel.example".to_string()]).unwrap_err();
+        assert!(error.to_string().contains("must be the only entry"));
+    }
+
+    #[tokio::test]
     async fn api_apply_uses_catalog_revision_and_never_returns_secret_material() {
         let directory = tempfile::tempdir().unwrap();
         let password = directory.path().join("password");
@@ -1051,7 +1081,6 @@ mod tests {
             Catalog::in_memory().await.unwrap(),
             Arc::new(MasterKey::generate()),
             "test-token",
-            Vec::new(),
             ActiveSessionRegistry::default(),
         )
         .unwrap();
@@ -1105,7 +1134,6 @@ mod tests {
             catalog.clone(),
             Arc::new(MasterKey::generate()),
             "test-token",
-            Vec::new(),
             ActiveSessionRegistry::default(),
         )
         .unwrap();
@@ -1127,6 +1155,7 @@ mod tests {
         assert_eq!(credential.status(), StatusCode::CREATED);
         let credential = response_json(credential).await;
         assert_eq!(credential["password"], "configured");
+        assert_eq!(credential["ownership"], "local");
         assert!(!credential.to_string().contains("never-return-this"));
         let credential_id = credential["id"].as_str().unwrap();
 
@@ -1146,6 +1175,7 @@ mod tests {
             .unwrap();
         assert_eq!(asset.status(), StatusCode::CREATED);
         let asset = response_json(asset).await;
+        assert_eq!(asset["ownership"], "local");
         let asset_id = asset["id"].as_str().unwrap();
 
         let access_key = app
@@ -1163,6 +1193,7 @@ mod tests {
             .unwrap();
         assert_eq!(access_key.status(), StatusCode::CREATED);
         let access_key = response_json(access_key).await;
+        assert_eq!(access_key["ownership"], "local");
         assert_eq!(access_key["access_mode"], "restricted");
         assert_eq!(access_key["assets"], serde_json::json!([]));
         assert!(!access_key.to_string().contains("AAAAC3"));
@@ -1229,7 +1260,6 @@ mod tests {
             catalog.clone(),
             Arc::new(MasterKey::generate()),
             "test-token",
-            Vec::new(),
             active_sessions,
         )
         .unwrap();
@@ -1305,14 +1335,25 @@ mod tests {
             .unwrap();
         let asset = catalog.list_assets().await.unwrap().remove(0);
         let state = ControlApiState::new(
-            catalog,
+            catalog.clone(),
             Arc::new(MasterKey::generate()),
             "test-token",
-            Vec::new(),
             ActiveSessionRegistry::default(),
         )
         .unwrap();
-        let response = router(state)
+        let app = router(state);
+        let listed = app
+            .clone()
+            .oneshot(api_request(
+                Method::GET,
+                "/api/v1/assets",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response_json(listed).await[0]["ownership"], "config");
+
+        let response = app
             .oneshot(api_request(
                 Method::PUT,
                 &format!("/api/v1/assets/{}", asset.id),
@@ -1347,16 +1388,5 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&body).unwrap()
-    }
-
-    #[test]
-    fn token_file_must_exist_and_not_be_empty() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("token");
-        assert!(load_token(&path).is_err());
-        fs::write(&path, "  \n").unwrap();
-        assert!(load_token(&path).is_err());
-        fs::write(&path, "secret-token\n").unwrap();
-        assert_eq!(load_token(&path).unwrap(), "secret-token");
     }
 }
