@@ -276,7 +276,8 @@ if [[ -z "$disconnect_log" ]]; then
 	cat "$run_dir/hop.log" >&2
 	exit 1
 fi
-grep -q 'client_ip=' <<<"$disconnect_log"
+grep -q 'client_ip' <<<"$disconnect_log"
+grep -Eq '127\.0\.0\.1:[0-9]+' <<<"$disconnect_log"
 if grep 'ssh session error' "$run_dir/hop.log" | grep -q 'early eof'; then
 	echo "benign early EOF was logged as an SSH session error" >&2
 	exit 1
@@ -287,7 +288,8 @@ if [[ -z "$authenticated_log" ]]; then
 	cat "$run_dir/hop.log" >&2
 	exit 1
 fi
-grep -q 'client_ip=' <<<"$authenticated_log"
+grep -q 'client_ip' <<<"$authenticated_log"
+grep -Eq '127\.0\.0\.1:[0-9]+' <<<"$authenticated_log"
 
 rm -f "$run_dir/scp-remote.txt"
 echo "Single-YAML OpenSSH publickey/exec/PTY/SCP/SFTP/ProxyJump/Host-Key end-to-end test passed"
