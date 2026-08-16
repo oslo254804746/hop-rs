@@ -4,23 +4,32 @@
 
 ### Prepare and start
 
-Use Docker Engine 24+ with Compose v2. Place `hop-rs` and `hop-rs-frontend` next to each other, then:
+Use Docker Engine 24+ with Compose v2. Only this repository's `compose.yaml` and `examples/` are required; no frontend checkout is needed.
 
 ```bash
 cd hop-rs
-cp hop.yaml hop.local.yaml
+cp examples/panel-first.yaml hop.yaml
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 ```
 
 Put the generated value in `api.token`, then run:
 
 ```bash
-chmod 0600 hop.local.yaml
-HOP_CONFIG_FILE=./hop.local.yaml docker compose config
-HOP_CONFIG_FILE=./hop.local.yaml docker compose up -d --build
+chmod 0600 hop.yaml
+docker compose config
+docker compose pull
+docker compose up -d
 ```
 
-Compose publishes only `${HOP_SSH_PORT:-2222}` and `${HOP_PANEL_PORT:-8080}`. Backend port 8083 is visible only inside the Compose network. The panel proxies exactly `/api/v1` to `http://hop:8083`; every other `/api` path returns 404.
+Compose pulls both CI-published images and contains no source `build`. It publishes only `${HOP_SSH_PORT:-2222}` and `${HOP_PANEL_PORT:-8080}`. The Control API must listen on container port 8083, which is visible only inside the Compose network. To publish the panel on host port 8081, set `HOP_PANEL_PORT=8081`; do not change `api.listen`.
+
+An optional GHCR mirror can be selected consistently for both services:
+
+```bash
+export HOP_REGISTRY=ghcr.nju.edu.cn
+docker compose pull
+docker compose up -d
+```
 
 Open `http://<hop-host>:8080` and enter the webpage management Token. No API URL is needed. The initial Catalog is empty; add an ingress key, target credential, and asset in the panel. The `change-me` placeholder triggers warnings and must be replaced.
 
@@ -31,8 +40,8 @@ Open `http://<hop-host>:8080` and enter the webpage management Token. No API URL
 - Hop and panel use the same `HOP_VERSION` image tag.
 
 ```bash
-HOP_VERSION=v0.2.1 HOP_CONFIG_FILE=./hop.local.yaml docker compose pull
-HOP_VERSION=v0.2.1 HOP_CONFIG_FILE=./hop.local.yaml docker compose up -d
+HOP_VERSION=v0.2.1 docker compose pull
+HOP_VERSION=v0.2.1 docker compose up -d
 ```
 
 Back up the YAML and data volume before upgrading. Roll back both images together.
@@ -42,10 +51,10 @@ Back up the YAML and data volume before upgrading. Roll back both images togethe
 ### Binary
 
 ```bash
-cp config.example.yaml hop.local.yaml
-chmod 0600 hop.local.yaml
-hop-server --config ./hop.local.yaml config validate
-hop-server --config ./hop.local.yaml serve
+cp examples/config-first.yaml hop.yaml
+chmod 0600 hop.yaml
+hop-server --config ./hop.yaml config validate
+hop-server --config ./hop.yaml serve
 ```
 
 When `api.token` is missing or empty, only the Control API is disabled; SSH still starts.
@@ -55,7 +64,7 @@ When `api.token` is missing or empty, only the Control API is disabled; SSH stil
 ```bash
 docker run -d --name hop --restart unless-stopped \
   -p 2222:2222 \
-  -v "$PWD/hop.local.yaml:/etc/hop/hop.yaml:ro" \
+  -v "$PWD/hop.yaml:/etc/hop/hop.yaml:ro" \
   -v hop-data:/data \
   ghcr.io/oslo254804746/hop-rs:v0.2.1 \
   hop-server --config /etc/hop/hop.yaml serve

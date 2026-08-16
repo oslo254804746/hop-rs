@@ -1,0 +1,8 @@
+# Internal fallback used only when a standalone container has no mounted config.
+listen: 0.0.0.0:2222
+data_dir: /data
+
+api:
+  enabled: false
+  listen: 0.0.0.0:8083
+  token: change-me # Replace before enabling the API.

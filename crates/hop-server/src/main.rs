@@ -30,7 +30,7 @@ use crate::transfer::{ConflictPolicy, TransferFormat, TransferKind};
     about = "Hop lightweight SSH jump server"
 )]
 struct Cli {
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "HOP_CONFIG")]
     config: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -775,6 +775,18 @@ mod tests {
 
     const PUBLIC_KEY: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ test";
+
+    #[test]
+    fn config_argument_honors_hop_config_environment_variable() {
+        use clap::CommandFactory;
+
+        let command = Cli::command();
+        let config = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "config")
+            .unwrap();
+        assert_eq!(config.get_env(), Some(std::ffi::OsStr::new("HOP_CONFIG")));
+    }
 
     #[test]
     fn config_and_apply_commands_parse_v0_2_contract() {

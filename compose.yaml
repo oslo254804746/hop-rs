@@ -2,9 +2,7 @@ name: hop
 
 services:
   hop:
-    image: ghcr.io/oslo254804746/hop-rs:${HOP_VERSION:-v0.2.1}
-    build:
-      context: .
+    image: ${HOP_REGISTRY:-ghcr.io}/oslo254804746/hop-rs:${HOP_VERSION:-v0.2.2}
     command: ["hop-server", "--config", "/etc/hop/hop.yaml", "serve"]
     environment:
       HOP_CONFIG: /etc/hop/hop.yaml
@@ -15,15 +13,13 @@ services:
     expose:
       - "8083"
     volumes:
-      - ${HOP_CONFIG_FILE:-./hop.yaml}:/etc/hop/hop.yaml:ro
+      - ./hop.yaml:/etc/hop/hop.yaml:ro
       - hop-data:/data
     networks:
       - hop-private
 
   panel:
-    image: ghcr.io/oslo254804746/hop-rs-frontend:${HOP_VERSION:-v0.2.1}
-    build:
-      context: ../hop-rs-frontend
+    image: ${HOP_REGISTRY:-ghcr.io}/oslo254804746/hop-rs-frontend:${HOP_VERSION:-v0.2.2}
     depends_on:
       - hop
     restart: unless-stopped

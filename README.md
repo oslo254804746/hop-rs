@@ -4,13 +4,14 @@ Hop 是一个轻量、自托管的 SSH 跳板机：入口只接受已登记的�
 
 ## 快速开始：网页面板（推荐）
 
-把 `hop-rs` 与 `hop-rs-frontend` 放在同一父目录，然后在后端仓库执行：
+不需要前端源码或本地构建。下载本仓库的 `compose.yaml` 和 `examples/`，然后执行：
 
 ```bash
-cp hop.yaml hop.local.yaml
-sed -i 's/token: change-me/token: 请替换为随机长字符串/' hop.local.yaml
-chmod 0600 hop.local.yaml
-HOP_CONFIG_FILE=./hop.local.yaml docker compose up -d --build
+cp examples/panel-first.yaml hop.yaml
+sed -i 's/token: change-me/token: 请替换为随机长字符串/' hop.yaml
+chmod 0600 hop.yaml
+docker compose pull
+docker compose up -d
 ```
 
 默认打开：
@@ -18,49 +19,28 @@ HOP_CONFIG_FILE=./hop.local.yaml docker compose up -d --build
 - 面板：`http://localhost:8080`
 - SSH：`localhost:2222`
 
-首次打开面板时，只需输入 `hop.local.yaml` 中的网页管理 Token。面板与后端使用同源 `/api/v1`，后端管理端口不会发布到宿主机。初始 Catalog 为空，可直接在网页中添加入口公钥、目标凭据和资产。
+首次打开面板时，只需输入 `hop.yaml` 中的网页管理 Token。面板与后端使用同源 `/api/v1`，后端管理端口不会发布到宿主机。初始 Catalog 为空，可直接在网页中添加入口公钥、目标凭据和资产。
 
-仓库自带的 `compose.yaml` 目前默认挂载 `./hop.yaml`。若使用上面的本地副本，可在启动前设置 `HOP_CONFIG_FILE`；也可以直接安全地修改并保护 `hop.yaml`。
+Compose 始终只读挂载当前目录中的一份 `hop.yaml`。`examples/panel-first.yaml` 和 `examples/config-first.yaml` 只是二选一的起始模板，不会同时加载、继承或合并。
 
 ## 单 YAML、无面板
 
 复制完整示例并填写入口公钥与目标信息：
 
 ```bash
-cp config.example.yaml hop.local.yaml
-chmod 0600 hop.local.yaml
-cargo run --release -p hop-server -- --config ./hop.local.yaml config validate
-cargo run --release -p hop-server -- --config ./hop.local.yaml serve
+cp examples/config-first.yaml hop.yaml
+chmod 0600 hop.yaml
+cargo run --release -p hop-server -- --config ./hop.yaml config validate
+cargo run --release -p hop-server -- --config ./hop.yaml serve
 ```
 
 一份 `hop.yaml` 同时包含监听地址、数据目录、网页管理 Token、SSH 运行参数、目标凭据、资产和入口公钥。启动时 Hop 先用内部原子 Apply 引擎应用文件中的资源；任何错误都会阻止监听器启动，不会留下半套 Catalog。
 
-## 最小配置
+## 配置文件与示例
 
-```yaml
-listen: 0.0.0.0:2222
-data_dir: ./data
-
-api:
-  enabled: true
-  listen: 127.0.0.1:8083
-  token: change-me
-
-credentials:
-  nas-root:
-    username: root
-    password: replace-this-password
-
-assets:
-  nas:
-    host: 192.168.1.20
-    credential: nas-root
-
-access_keys:
-  laptop:
-    public_key_file: ./laptop.pub
-    assets: [nas]
-```
+- [`examples/panel-first.yaml`](examples/panel-first.yaml)：启用面板 API，Catalog 初始为空，资源由网页创建。
+- [`examples/config-first.yaml`](examples/config-first.yaml)：在 YAML 中声明凭据、资产和入口公钥，适合无面板部署。
+- `hop.yaml`：从其中一个示例复制出来的唯一运行配置；已被 `.gitignore` 排除。
 
 `password`、`private_key`、`passphrase` 都是 YAML 直接字符串；因此配置文件必须使用 `chmod 0600` 并排除在版本控制之外。入口公钥必须在 `public_key` 与 `public_key_file` 中二选一。相对路径以配置文件所在目录为基准。
 

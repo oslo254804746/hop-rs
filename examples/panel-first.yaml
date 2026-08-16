@@ -1,4 +1,4 @@
-# Panel-first Compose configuration. Change this token before remote use.
+# Panel-first example. Copy this file to ./hop.yaml, then change the Token.
 listen: 0.0.0.0:2222
 data_dir: /data
 

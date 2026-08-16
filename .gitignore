@@ -6,3 +6,4 @@
 hop.secret
 hop_host_key
 config.toml
+/hop.yaml

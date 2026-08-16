@@ -14,7 +14,7 @@ RUN useradd --system --create-home --home-dir /data hop \
 WORKDIR /data
 
 COPY --from=build /usr/local/bin/hop-server /usr/local/bin/hop-server
-COPY config.docker.yaml /usr/share/hop/config.docker.yaml
+COPY docker/default-hop.yaml /usr/share/hop/default-hop.yaml
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
@@ -23,4 +23,4 @@ VOLUME ["/data"]
 EXPOSE 2222 8083
 
 ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["hop-server", "--config", "/data/hop.yaml", "serve"]
+CMD ["hop-server", "serve"]

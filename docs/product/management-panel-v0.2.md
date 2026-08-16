@@ -2,7 +2,7 @@
 
 ## 当前交付
 
-Hop 官方面板由相邻的 `hop-rs-frontend` 仓库提供，并由后端仓库根目录的 `compose.yaml` 组合交付。生产容器是静态 Nginx 运行时，不包含 Node。
+Hop 官方面板由独立的 `hop-rs-frontend` 仓库构建发布，后端仓库根目录的 `compose.yaml` 直接拉取匹配版本镜像。部署不需要相邻源码目录；生产容器是静态 Nginx 运行时，不包含 Node。
 
 默认拓扑：
 

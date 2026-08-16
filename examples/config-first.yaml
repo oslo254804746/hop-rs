@@ -1,4 +1,5 @@
-# Protect this file with chmod 0600 and do not commit real credentials.
+# Config-first example. Copy this file to ./hop.yaml and replace every example value.
+# Protect the resulting hop.yaml with chmod 0600 and do not commit it.
 listen: 0.0.0.0:2222
 data_dir: ./data
 

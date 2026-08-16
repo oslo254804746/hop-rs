@@ -3,7 +3,8 @@ set -eu
 
 HOP_DATA_DIR="${HOP_DATA_DIR:-/data}"
 HOP_CONFIG="${HOP_CONFIG:-$HOP_DATA_DIR/hop.yaml}"
-HOP_CONFIG_TEMPLATE="${HOP_CONFIG_TEMPLATE:-/usr/share/hop/config.docker.yaml}"
+HOP_CONFIG_TEMPLATE="${HOP_CONFIG_TEMPLATE:-/usr/share/hop/default-hop.yaml}"
+export HOP_CONFIG
 HOP_RUN_UID="$(id -u hop)"
 HOP_RUN_GID="$(id -g hop)"
 

@@ -4,6 +4,20 @@ All notable user-visible changes to Hop are recorded here.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-16
+
+### Fixed
+
+- Made the container default command honor `HOP_CONFIG`, so a read-only config
+  mounted outside `/data` is used without repeating CLI arguments.
+
+### Changed
+
+- Made the official Compose file pull released backend and panel images without
+  source build contexts.
+- Reduced deployment to one ignored runtime `hop.yaml`; panel-first and
+  config-first YAML files now live under `examples/` as alternative templates.
+
 ## [0.2.1] - 2026-08-15
 
 ### Added
@@ -143,7 +157,8 @@ See the [full v0.1.6 release notes](docs/releases/v0.1.6.md).
 
 See the [full v0.1.5 release notes](docs/releases/v0.1.5.md).
 
-[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/oslo254804746/hop-rs/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/oslo254804746/hop-rs/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/oslo254804746/hop-rs/releases/tag/v0.2.0
 [0.1.7]: https://github.com/oslo254804746/hop-rs/releases/tag/v0.1.7

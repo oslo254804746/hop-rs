@@ -6,8 +6,8 @@ Hop 是小型、自托管、默认安全的 SSH/TCP 跳板：入口公钥认证�
 
 ## 两条清晰路径
 
-1. **Compose + 面板（推荐）**：复制最小 `hop.yaml`、更换网页管理 Token、启动 Compose，在空 Catalog 中从网页创建本地资源。
-2. **单 YAML、无面板**：在一份文件中声明运行参数与资源，验证后直接启动。
+1. **Compose + 面板（推荐）**：把 `examples/panel-first.yaml` 复制为唯一的 `hop.yaml`、更换网页管理 Token、启动 Compose，在空 Catalog 中从网页创建本地资源。
+2. **单 YAML、无面板**：把 `examples/config-first.yaml` 复制为同一个 `hop.yaml`，在其中声明运行参数与资源，验证后直接启动。
 
 两条路径共享同一个 Catalog 与权限模型，不要求用户理解内部数据库或 Apply 实现。
 
