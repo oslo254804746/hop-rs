@@ -101,6 +101,16 @@ for _ in $(seq 1 100); do
 	sleep 0.05
 done
 
+# Exercise a deterministic early EOF instead of relying on the readiness probe's
+# close timing, which can be observed as either a clean disconnect or an EOF.
+python3 - "$hop_port" <<'PY'
+import socket
+import sys
+
+with socket.create_connection(("127.0.0.1", int(sys.argv[1]))) as connection:
+    connection.sendall(b"SSH-2.0-hop-e2e")
+PY
+
 common_client_options=(
 	-i "$run_dir/hop_ingress_key"
 	-o IdentitiesOnly=yes
@@ -236,13 +246,30 @@ PY
 )
 test "$stored_host_fingerprint" = "$original_host_fingerprint"
 
-disconnect_log=$(grep -m1 'ssh client disconnected' "$run_dir/hop.log")
+disconnect_log=
+for _ in $(seq 1 100); do
+	disconnect_log=$(grep -m1 'ssh client disconnected' "$run_dir/hop.log" || true)
+	if [[ -n "$disconnect_log" ]]; then
+		break
+	fi
+	sleep 0.05
+done
+if [[ -z "$disconnect_log" ]]; then
+	echo "missing SSH disconnect log" >&2
+	cat "$run_dir/hop.log" >&2
+	exit 1
+fi
 grep -q 'client_ip=' <<<"$disconnect_log"
 if grep 'ssh session error' "$run_dir/hop.log" | grep -q 'early eof'; then
 	echo "benign early EOF was logged as an SSH session error" >&2
 	exit 1
 fi
-authenticated_log=$(grep -m1 'ssh ingress authenticated' "$run_dir/hop.log")
+authenticated_log=$(grep -m1 'ssh ingress authenticated' "$run_dir/hop.log" || true)
+if [[ -z "$authenticated_log" ]]; then
+	echo "missing SSH authentication log" >&2
+	cat "$run_dir/hop.log" >&2
+	exit 1
+fi
 grep -q 'client_ip=' <<<"$authenticated_log"
 
 rm -f "$run_dir/scp-remote.txt"
