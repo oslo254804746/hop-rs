@@ -4,6 +4,16 @@ All notable user-visible changes to Hop are recorded here.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-08-16
+
+### Fixed
+
+- Classified wrapped SSH EOF/reset errors as client disconnects instead of
+  session failures, and added the client address to disconnect, failure, and
+  ingress-authentication logs.
+- Refreshed the active panel route immediately after first authentication, so
+  instance status and Catalog resources no longer require a tab change.
+
 ## [0.2.2] - 2026-08-16
 
 ### Fixed
@@ -157,7 +167,8 @@ See the [full v0.1.6 release notes](docs/releases/v0.1.6.md).
 
 See the [full v0.1.5 release notes](docs/releases/v0.1.5.md).
 
-[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/oslo254804746/hop-rs/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/oslo254804746/hop-rs/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/oslo254804746/hop-rs/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/oslo254804746/hop-rs/releases/tag/v0.2.0

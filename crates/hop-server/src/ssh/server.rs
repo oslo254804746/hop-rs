@@ -4,12 +4,13 @@ use anyhow::{bail, Context, Result};
 use hop_core::{Asset, Catalog, HopConfig, MasterKey, NewSession};
 use russh::{
     keys::{ssh_key::HashAlg, PublicKey},
-    server::{self, Msg, Server as _, Session},
+    server::{self, Msg, Session},
     Channel, ChannelId, MethodKind, MethodSet, Pty,
 };
 use tokio::{
     net::TcpListener,
     sync::{mpsc, Mutex},
+    task::JoinSet,
 };
 use tracing::{error, info, warn};
 
@@ -109,7 +110,7 @@ pub async fn serve_ssh(
         nodelay: true,
         ..Default::default()
     };
-    let mut server = HopSshServer {
+    let server = HopSshServer {
         db,
         config,
         master_key,
@@ -117,10 +118,49 @@ pub async fn serve_ssh(
     };
     let listener = TcpListener::bind(bind).await?;
     info!(%bind, "ssh server listening");
-    server
-        .run_on_socket(Arc::new(russh_config), &listener)
-        .await?;
-    Ok(())
+    serve_ssh_connections(listener, Arc::new(russh_config), server).await
+}
+
+async fn serve_ssh_connections(
+    listener: TcpListener,
+    config: Arc<server::Config>,
+    server: HopSshServer,
+) -> Result<()> {
+    let mut sessions = JoinSet::new();
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (socket, client_ip) = accepted?;
+                if config.nodelay {
+                    if let Err(error) = socket.set_nodelay(true) {
+                        warn!(%client_ip, ?error, "failed to enable TCP_NODELAY for SSH client");
+                    }
+                }
+                let handler = server.new_client(client_ip);
+                let session_config = Arc::clone(&config);
+                sessions.spawn(async move {
+                    let result = match server::run_stream(session_config, socket, handler).await {
+                        Ok(session) => session.await,
+                        Err(error) => Err(error),
+                    };
+                    (client_ip, result)
+                });
+            }
+            Some(result) = sessions.join_next(), if !sessions.is_empty() => {
+                match result {
+                    Ok((client_ip, Ok(()))) => {
+                        tracing::debug!(%client_ip, "ssh client disconnected");
+                    }
+                    Ok((client_ip, Err(error))) => {
+                        log_ssh_session_error(client_ip, &error);
+                    }
+                    Err(error) => {
+                        error!(?error, "ssh session task failed");
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn ingress_auth_methods() -> MethodSet {
@@ -134,10 +174,8 @@ fn ssh_keepalive_interval(config: &HopConfig) -> Option<Duration> {
     }
 }
 
-impl server::Server for HopSshServer {
-    type Handler = HopSshHandler;
-
-    fn new_client(&mut self, peer_addr: Option<SocketAddr>) -> Self::Handler {
+impl HopSshServer {
+    fn new_client(&self, peer_addr: SocketAddr) -> HopSshHandler {
         HopSshHandler {
             db: self.db.clone(),
             config: self.config.clone(),
@@ -145,17 +183,9 @@ impl server::Server for HopSshServer {
             active_sessions: self.active_sessions.clone(),
             auth: None,
             direct_asset: None,
-            client_ip: peer_addr.map(|addr| addr.to_string()),
+            client_ip: Some(peer_addr.to_string()),
             channels: Arc::new(Mutex::new(HashMap::new())),
             ptys: HashMap::new(),
-        }
-    }
-
-    fn handle_session_error(&mut self, error: <Self::Handler as server::Handler>::Error) {
-        if is_client_disconnect(&error) {
-            warn!(?error, "ssh client disconnected");
-        } else {
-            error!(?error, "ssh session error");
         }
     }
 }
@@ -407,13 +437,23 @@ impl server::Handler for HopSshHandler {
             .get_active_authorized_key_by_fingerprint(&fingerprint)
             .await?
         else {
+            warn!(
+                client_ip = %self.client_ip.as_deref().unwrap_or("unknown"),
+                user,
+                fingerprint,
+                "rejected unregistered ingress public key"
+            );
             return Ok(server::Auth::reject());
         };
-        if self
-            .resolve_direct_asset_for_key(user, &key.id)
-            .await
-            .is_err()
-        {
+        if let Err(error) = self.resolve_direct_asset_for_key(user, &key.id).await {
+            warn!(
+                client_ip = %self.client_ip.as_deref().unwrap_or("unknown"),
+                user,
+                key_id = key.id,
+                key_name = key.name,
+                ?error,
+                "rejected direct login request"
+            );
             return Ok(server::Auth::reject());
         }
         Ok(server::Auth::Accept)
@@ -434,10 +474,26 @@ impl server::Handler for HopSshHandler {
                 let direct_asset = match self.resolve_direct_asset_for_key(user, &key.id).await {
                     Ok(asset) => asset,
                     Err(err) => {
-                        warn!(?err, user, "rejected direct login request");
+                        warn!(
+                            client_ip = %self.client_ip.as_deref().unwrap_or("unknown"),
+                            user,
+                            key_id = key.id,
+                            key_name = key.name,
+                            ?err,
+                            "rejected direct login request"
+                        );
                         return Ok(server::Auth::reject());
                     }
                 };
+                info!(
+                    client_ip = %self.client_ip.as_deref().unwrap_or("unknown"),
+                    user,
+                    key_id = key.id,
+                    key_name = key.name,
+                    fingerprint,
+                    target = direct_asset.as_ref().map(|asset| asset.name.as_str()).unwrap_or("tui"),
+                    "ssh ingress authenticated"
+                );
                 self.auth = Some(AuthInfo {
                     key_id: key.id,
                     fingerprint,
@@ -823,18 +879,34 @@ fn authentication_banner(config: &HopConfig) -> Option<String> {
     }
 }
 
+fn log_ssh_session_error(client_ip: SocketAddr, error: &anyhow::Error) {
+    if is_client_disconnect(error) {
+        warn!(%client_ip, %error, "ssh client disconnected");
+    } else {
+        error!(%client_ip, %error, "ssh session error");
+    }
+}
+
 fn is_client_disconnect(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<io::Error>()
-        .map(|err| {
-            matches!(
-                err.kind(),
-                io::ErrorKind::ConnectionReset
-                    | io::ErrorKind::BrokenPipe
-                    | io::ErrorKind::UnexpectedEof
-            ) || matches!(err.raw_os_error(), Some(10054) | Some(104))
-        })
-        .unwrap_or(false)
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(is_disconnect_io_error)
+            || cause
+                .downcast_ref::<russh::Error>()
+                .is_some_and(|error| match error {
+                    russh::Error::IO(error) => is_disconnect_io_error(error),
+                    russh::Error::Disconnect | russh::Error::HUP => true,
+                    _ => false,
+                })
+    })
+}
+
+fn is_disconnect_io_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe | io::ErrorKind::UnexpectedEof
+    ) || matches!(error.raw_os_error(), Some(10054) | Some(104))
 }
 
 #[cfg(test)]
@@ -846,7 +918,7 @@ mod tests {
     use russh::{
         client::Msg as ClientMsg,
         keys::{key::safe_rng, Algorithm, PrivateKeyWithHashAlg},
-        server::Msg as ServerMsg,
+        server::{Msg as ServerMsg, Server as _},
         ChannelMsg,
     };
     use std::sync::Mutex as StdMutex;
@@ -1228,6 +1300,25 @@ mod tests {
         let error = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
 
         assert!(is_client_disconnect(&error));
+    }
+
+    #[test]
+    fn wrapped_early_eof_is_treated_as_client_disconnect() {
+        let error = anyhow::Error::new(russh::Error::IO(std::io::Error::from(
+            std::io::ErrorKind::UnexpectedEof,
+        )));
+
+        assert!(is_client_disconnect(&error));
+    }
+
+    #[test]
+    fn protocol_disconnect_is_treated_as_client_disconnect() {
+        assert!(is_client_disconnect(&anyhow::Error::new(
+            russh::Error::Disconnect
+        )));
+        assert!(!is_client_disconnect(&anyhow::anyhow!(
+            "catalog query failed"
+        )));
     }
 
     #[test]

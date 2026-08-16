@@ -236,5 +236,14 @@ PY
 )
 test "$stored_host_fingerprint" = "$original_host_fingerprint"
 
+disconnect_log=$(grep -m1 'ssh client disconnected' "$run_dir/hop.log")
+grep -q 'client_ip=' <<<"$disconnect_log"
+if grep 'ssh session error' "$run_dir/hop.log" | grep -q 'early eof'; then
+	echo "benign early EOF was logged as an SSH session error" >&2
+	exit 1
+fi
+authenticated_log=$(grep -m1 'ssh ingress authenticated' "$run_dir/hop.log")
+grep -q 'client_ip=' <<<"$authenticated_log"
+
 rm -f "$run_dir/scp-remote.txt"
 echo "Single-YAML OpenSSH publickey/exec/PTY/SCP/SFTP/ProxyJump/Host-Key end-to-end test passed"
