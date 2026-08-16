@@ -4,6 +4,17 @@ All notable user-visible changes to Hop are recorded here.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-08-16
+
+### Added
+
+- Restored Known Hosts inspection and explicit TOFU trust reset through the
+  Control API and official panel. Resets require the exact host, port, and key
+  type plus an explicit server-side confirmation flag.
+- Added matching desktop/mobile host-trust views with complete SHA256
+  fingerprints, first-seen timestamps, matching SSH assets, and a guarded
+  rebuild/key-rotation workflow.
+
 ## [0.2.3] - 2026-08-16
 
 ### Fixed
@@ -167,7 +178,8 @@ See the [full v0.1.6 release notes](docs/releases/v0.1.6.md).
 
 See the [full v0.1.5 release notes](docs/releases/v0.1.5.md).
 
-[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/oslo254804746/hop-rs/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/oslo254804746/hop-rs/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/oslo254804746/hop-rs/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/oslo254804746/hop-rs/compare/v0.2.0...v0.2.1

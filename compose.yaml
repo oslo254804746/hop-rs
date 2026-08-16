@@ -2,7 +2,7 @@ name: hop
 
 services:
   hop:
-    image: ${HOP_REGISTRY:-ghcr.io}/oslo254804746/hop-rs:${HOP_VERSION:-v0.2.3}
+    image: ${HOP_REGISTRY:-ghcr.io}/oslo254804746/hop-rs:${HOP_VERSION:-v0.2.4}
     command: ["hop-server", "--config", "/etc/hop/hop.yaml", "serve"]
     environment:
       HOP_CONFIG: /etc/hop/hop.yaml
@@ -19,7 +19,7 @@ services:
       - hop-private
 
   panel:
-    image: ${HOP_REGISTRY:-ghcr.io}/oslo254804746/hop-rs-frontend:${HOP_VERSION:-v0.2.3}
+    image: ${HOP_REGISTRY:-ghcr.io}/oslo254804746/hop-rs-frontend:${HOP_VERSION:-v0.2.4}
     depends_on:
       - hop
     restart: unless-stopped

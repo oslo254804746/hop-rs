@@ -530,6 +530,15 @@ impl Catalog {
         .map_err(Into::into)
     }
 
+    pub async fn list_known_hosts(&self) -> Result<Vec<KnownHost>> {
+        sqlx::query_as::<_, KnownHost>(
+            "SELECT hostname, port, key_type, fingerprint, first_seen FROM known_hosts ORDER BY hostname ASC, port ASC, key_type ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     pub async fn upsert_known_host(&self, host: NewKnownHost) -> Result<()> {
         sqlx::query(
             r#"
@@ -545,6 +554,23 @@ impl Catalog {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn delete_known_host(
+        &self,
+        hostname: &str,
+        port: i64,
+        key_type: &str,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM known_hosts WHERE hostname = ?1 AND port = ?2 AND key_type = ?3",
+        )
+        .bind(hostname)
+        .bind(port)
+        .bind(key_type)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 }
 
@@ -754,6 +780,47 @@ fn row_not_found() -> HopCoreError {
 mod tests {
     use super::*;
     use crate::{AuthType, NewCredential, ASSET_PROTOCOL_TCP};
+
+    #[tokio::test]
+    async fn known_hosts_can_be_listed_and_precisely_reset() {
+        let catalog = Catalog::in_memory().await.unwrap();
+        for (key_type, fingerprint) in
+            [("ssh-ed25519", "SHA256:ed25519"), ("ssh-rsa", "SHA256:rsa")]
+        {
+            catalog
+                .upsert_known_host(NewKnownHost {
+                    hostname: "192.0.2.10".to_string(),
+                    port: 22,
+                    key_type: key_type.to_string(),
+                    fingerprint: fingerprint.to_string(),
+                })
+                .await
+                .unwrap();
+        }
+
+        let hosts = catalog.list_known_hosts().await.unwrap();
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].key_type, "ssh-ed25519");
+
+        assert!(catalog
+            .delete_known_host("192.0.2.10", 22, "ssh-ed25519")
+            .await
+            .unwrap());
+        assert!(catalog
+            .get_known_host("192.0.2.10", 22, "ssh-ed25519")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(catalog
+            .get_known_host("192.0.2.10", 22, "ssh-rsa")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(!catalog
+            .delete_known_host("192.0.2.10", 22, "ssh-ed25519")
+            .await
+            .unwrap());
+    }
 
     #[tokio::test]
     async fn local_crud_uses_catalog_revision_and_ownership() {

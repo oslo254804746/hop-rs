@@ -58,6 +58,17 @@ ssh -p 2222 nas@hop.example.com
 
 The panel shows the latest 100 session records. Termination can signal only a `started` session with an active in-memory transport. A stale record may return not active while remaining in history.
 
+## Host trust (Known Hosts)
+
+Hop records an SSH target host-key fingerprint through TOFU on the first managed connection and verifies it on every later connection. Reinstalling a target or intentionally rotating its SSH host key makes the stored record reject the new key.
+
+Verify the new fingerprint through an independent trusted path first. Then open **Host trust** in the panel, select the exact host, port, and key algorithm, and choose **Reset trust**. The server requires an explicit confirmation field. The next managed connection establishes the new TOFU fingerprint automatically.
+
+Control API operations:
+
+- `GET /api/v1/known-hosts` lists trusted records.
+- `DELETE /api/v1/known-hosts` requires `hostname`, `port`, `key_type`, and `confirm_reset: true` in its JSON body.
+
 ## Backup and restore
 
 Back up together:

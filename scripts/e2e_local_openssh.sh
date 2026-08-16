@@ -31,7 +31,7 @@ report_error() {
 trap cleanup EXIT
 trap report_error ERR
 
-for command in cargo ssh scp sftp sshd ssh-keygen python3 timeout; do
+for command in cargo curl ssh scp sftp sshd ssh-keygen python3 timeout; do
 	command -v "$command" >/dev/null || {
 		echo "missing required command: $command" >&2
 		exit 2
@@ -44,6 +44,7 @@ free_port() {
 
 target_port=$(free_port)
 hop_port=$(free_port)
+api_port=$(free_port)
 current_user=$(id -un)
 bin="$repo_dir/target/debug/hop-server"
 sshd_bin=$(command -v sshd)
@@ -79,6 +80,10 @@ target_pid=$!
 cat >"$run_dir/hop.yaml" <<EOF
 listen: 127.0.0.1:$hop_port
 data_dir: $run_dir
+api:
+  enabled: true
+  listen: 127.0.0.1:$api_port
+  token: e2e-control-token
 ssh:
   banner: ""
   keepalive_interval: 30
@@ -110,6 +115,19 @@ for _ in $(seq 1 100); do
 	fi
 	if ! kill -0 "$hop_pid" 2>/dev/null || ! kill -0 "$target_pid" 2>/dev/null; then
 		cat "$run_dir/hop.log" "$run_dir/target.log" >&2
+		exit 1
+	fi
+	sleep 0.05
+done
+
+for _ in $(seq 1 100); do
+	if curl --silent --fail \
+		--header 'Authorization: Bearer e2e-control-token' \
+		"http://127.0.0.1:$api_port/api/v1/status" >/dev/null; then
+		break
+	fi
+	if ! kill -0 "$hop_pid" 2>/dev/null; then
+		cat "$run_dir/hop.log" >&2
 		exit 1
 	fi
 	sleep 0.05
@@ -262,6 +280,53 @@ print(connection.execute("SELECT fingerprint FROM known_hosts").fetchone()[0])
 PY
 )
 test "$stored_host_fingerprint" = "$original_host_fingerprint"
+
+known_hosts_json=$(curl --silent --show-error --fail \
+	--header 'Authorization: Bearer e2e-control-token' \
+	"http://127.0.0.1:$api_port/api/v1/known-hosts")
+python3 - "$original_host_fingerprint" "$target_port" "$known_hosts_json" <<'PY'
+import json
+import sys
+
+fingerprint, port, payload = sys.argv[1:]
+hosts = json.loads(payload)
+assert hosts == [{
+    "hostname": "127.0.0.1",
+    "port": int(port),
+    "key_type": "ssh-ed25519",
+    "fingerprint": fingerprint,
+    "first_seen": hosts[0]["first_seen"],
+}]
+PY
+
+unconfirmed_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+	--request DELETE \
+	--header 'Authorization: Bearer e2e-control-token' \
+	--header 'Content-Type: application/json' \
+	--data "{\"hostname\":\"127.0.0.1\",\"port\":$target_port,\"key_type\":\"ssh-ed25519\",\"confirm_reset\":false}" \
+	"http://127.0.0.1:$api_port/api/v1/known-hosts")
+test "$unconfirmed_status" = 422
+
+reset_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+	--request DELETE \
+	--header 'Authorization: Bearer e2e-control-token' \
+	--header 'Content-Type: application/json' \
+	--data "{\"hostname\":\"127.0.0.1\",\"port\":$target_port,\"key_type\":\"ssh-ed25519\",\"confirm_reset\":true}" \
+	"http://127.0.0.1:$api_port/api/v1/known-hosts")
+test "$reset_status" = 204
+test "$(ssh "${ssh_options[@]}" managed-target@127.0.0.1 'printf rotated-ok')" = rotated-ok
+
+rotated_host_fingerprint=$(python3 - "$run_dir/hop.db" <<'PY'
+import sqlite3
+import sys
+
+connection = sqlite3.connect(sys.argv[1])
+rows = connection.execute("SELECT fingerprint FROM known_hosts").fetchall()
+assert len(rows) == 1
+print(rows[0][0])
+PY
+)
+test "$rotated_host_fingerprint" != "$original_host_fingerprint"
 
 disconnect_log=
 for _ in $(seq 1 100); do

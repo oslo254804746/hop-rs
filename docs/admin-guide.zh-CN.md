@@ -58,6 +58,17 @@ ssh -p 2222 nas@hop.example.com
 
 面板展示最近 100 条会话记录。只有仍为 `started` 且存在活动内存传输的会话能收到终止信号；过期记录可能返回“不活跃”，但历史记录仍保留。
 
+## 主机信任（Known Hosts）
+
+Hop 首次连接 SSH 目标时通过 TOFU 保存目标的主机密钥指纹，之后每次托管连接都会核验该指纹。目标机器重装或有意轮换 SSH Host Key 后，原记录会阻止连接。
+
+先通过目标机器的独立可信通道核实新指纹，再在面板打开“主机信任”，选择准确的主机、端口和密钥算法，然后使用“重置信任”。服务端要求请求包含显式确认；删除后，下一次托管连接会自动建立新的 TOFU 指纹。
+
+对应 Control API：
+
+- `GET /api/v1/known-hosts`：列出当前信任记录；
+- `DELETE /api/v1/known-hosts`：请求体必须包含 `hostname`、`port`、`key_type` 和 `confirm_reset: true`。
+
 ## 备份与恢复
 
 至少备份：

@@ -19,7 +19,7 @@ Open:
 - Panel: `http://localhost:8080`
 - SSH: `localhost:2222`
 
-On first load, enter only the webpage management Token from `hop.yaml`. The panel uses same-origin `/api/v1`; the backend management port is not published to the host. The initial Catalog is empty, so add an ingress public key, target credential, and asset in the panel.
+On first load, enter only the webpage management Token from `hop.yaml`. The panel uses same-origin `/api/v1`; the backend management port is not published to the host. The initial Catalog is empty, so add an ingress public key, target credential, and asset in the panel. After a verified target rebuild or Host Key rotation, inspect and reset its Known Hosts record under **Host trust**.
 
 Compose always mounts the single `./hop.yaml` read-only. `examples/panel-first.yaml` and `examples/config-first.yaml` are alternative starting templates; they are never loaded, inherited, or merged together.
 

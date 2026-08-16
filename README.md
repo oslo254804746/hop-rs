@@ -19,7 +19,7 @@ docker compose up -d
 - 面板：`http://localhost:8080`
 - SSH：`localhost:2222`
 
-首次打开面板时，只需输入 `hop.yaml` 中的网页管理 Token。面板与后端使用同源 `/api/v1`，后端管理端口不会发布到宿主机。初始 Catalog 为空，可直接在网页中添加入口公钥、目标凭据和资产。
+首次打开面板时，只需输入 `hop.yaml` 中的网页管理 Token。面板与后端使用同源 `/api/v1`，后端管理端口不会发布到宿主机。初始 Catalog 为空，可直接在网页中添加入口公钥、目标凭据和资产；目标重装或 Host Key 轮换后，也可在“主机信任”中核实并重置 Known Hosts 记录。
 
 Compose 始终只读挂载当前目录中的一份 `hop.yaml`。`examples/panel-first.yaml` 和 `examples/config-first.yaml` 只是二选一的起始模板，不会同时加载、继承或合并。
 

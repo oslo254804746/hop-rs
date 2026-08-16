@@ -10,8 +10,8 @@ use axum::{
 };
 use hop_core::{
     encrypt_envelope, new_id, ApplyOptions, ApplySummary, Asset, AssetAccessMode, AuthType,
-    Catalog, CatalogError, CatalogErrorCode, Credential, HopCoreError, Manifest, MasterKey,
-    NewAsset, NewAuthorizedKey, NewCredential, ResourceOwnership, Session,
+    Catalog, CatalogError, CatalogErrorCode, Credential, HopCoreError, KnownHost, Manifest,
+    MasterKey, NewAsset, NewAuthorizedKey, NewCredential, ResourceOwnership, Session,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -120,6 +120,10 @@ pub fn router(state: ControlApiState) -> Router {
         )
         .route("/api/v1/sessions", get(sessions))
         .route("/api/v1/sessions/{id}/terminate", post(terminate_session))
+        .route(
+            "/api/v1/known-hosts",
+            get(known_hosts).delete(reset_known_host),
+        )
         .route("/api/v1/catalog/revision", get(revision))
         .route("/api/v1/config/validate", post(validate))
         .route("/api/v1/config/diff", post(diff))
@@ -368,6 +372,49 @@ async fn sessions(
             .await
             .map_err(ApiError::internal)?,
     ))
+}
+
+async fn known_hosts(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<KnownHost>>> {
+    authenticate(&state, &headers)?;
+    let hosts = state
+        .catalog
+        .list_known_hosts()
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(hosts))
+}
+
+async fn reset_known_host(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+    Json(request): Json<KnownHostResetRequest>,
+) -> ApiResult<StatusCode> {
+    authenticate(&state, &headers)?;
+    if !request.confirm_reset {
+        return Err(ApiError::validation(
+            "confirm_reset must be true to reset known-host trust",
+        ));
+    }
+    let hostname = request.hostname.trim();
+    if hostname.is_empty() {
+        return Err(ApiError::validation("hostname must not be empty"));
+    }
+    if request.key_type.trim().is_empty() {
+        return Err(ApiError::validation("key_type must not be empty"));
+    }
+    hop_core::validate_tcp_port(request.port).map_err(ApiError::from)?;
+    let deleted = state
+        .catalog
+        .delete_known_host(hostname, request.port, request.key_type.trim())
+        .await
+        .map_err(ApiError::internal)?;
+    if !deleted {
+        return Err(ApiError::not_found());
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn terminate_session(
@@ -635,6 +682,15 @@ struct AccessKeyEnabledRequest {
 struct AccessKeyAccessRequest {
     #[serde(default)]
     assets: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KnownHostResetRequest {
+    hostname: String,
+    port: i64,
+    key_type: String,
+    confirm_reset: bool,
 }
 
 #[derive(Serialize)]
@@ -1315,6 +1371,106 @@ mod tests {
                 .status,
             "terminated"
         );
+    }
+
+    #[tokio::test]
+    async fn known_host_trust_reset_requires_confirmation_and_exact_identity() {
+        let catalog = Catalog::in_memory().await.unwrap();
+        for (key_type, fingerprint) in
+            [("ssh-ed25519", "SHA256:ed25519"), ("ssh-rsa", "SHA256:rsa")]
+        {
+            catalog
+                .upsert_known_host(hop_core::NewKnownHost {
+                    hostname: "192.0.2.10".to_string(),
+                    port: 22,
+                    key_type: key_type.to_string(),
+                    fingerprint: fingerprint.to_string(),
+                })
+                .await
+                .unwrap();
+        }
+        let state = ControlApiState::new(
+            catalog.clone(),
+            Arc::new(MasterKey::generate()),
+            "test-token",
+            ActiveSessionRegistry::default(),
+        )
+        .unwrap();
+        let app = router(state);
+
+        let listed = app
+            .clone()
+            .oneshot(api_request(
+                Method::GET,
+                "/api/v1/known-hosts",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        assert_eq!(response_json(listed).await.as_array().unwrap().len(), 2);
+
+        let rejected = app
+            .clone()
+            .oneshot(api_request(
+                Method::DELETE,
+                "/api/v1/known-hosts",
+                serde_json::json!({
+                    "hostname": "192.0.2.10",
+                    "port": 22,
+                    "key_type": "ssh-ed25519",
+                    "confirm_reset": false
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(catalog
+            .get_known_host("192.0.2.10", 22, "ssh-ed25519")
+            .await
+            .unwrap()
+            .is_some());
+
+        let reset = app
+            .clone()
+            .oneshot(api_request(
+                Method::DELETE,
+                "/api/v1/known-hosts",
+                serde_json::json!({
+                    "hostname": "192.0.2.10",
+                    "port": 22,
+                    "key_type": "ssh-ed25519",
+                    "confirm_reset": true
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reset.status(), StatusCode::NO_CONTENT);
+        assert!(catalog
+            .get_known_host("192.0.2.10", 22, "ssh-ed25519")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(catalog
+            .get_known_host("192.0.2.10", 22, "ssh-rsa")
+            .await
+            .unwrap()
+            .is_some());
+
+        let missing = app
+            .oneshot(api_request(
+                Method::DELETE,
+                "/api/v1/known-hosts",
+                serde_json::json!({
+                    "hostname": "192.0.2.10",
+                    "port": 22,
+                    "key_type": "ssh-ed25519",
+                    "confirm_reset": true
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

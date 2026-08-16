@@ -18,7 +18,8 @@ ssh client :2222 -------------> hop:2222
 1. 打开面板；
 2. 输入 `hop.yaml` 的网页管理 Token；
 3. 在空 Catalog 中添加入口公钥、目标凭据和资产；
-4. 查看与终止活跃会话。
+4. 查看与终止活跃会话；
+5. 检查 Known Hosts，并在核实目标重装或 Host Key 轮换后显式重置信任。
 
 API 地址默认是当前 Origin。连接独立远程实例是折叠的高级选项。Token 只在页面内存中持有，不进入 localStorage、静态产物、Nginx 配置或访问日志。
 
