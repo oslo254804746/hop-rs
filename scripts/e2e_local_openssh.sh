@@ -15,7 +15,21 @@ cleanup() {
 	done
 	rm -rf "$run_dir"
 }
+
+report_error() {
+	local status=$?
+	printf 'OpenSSH E2E failed at line %s: %s\n' "${BASH_LINENO[0]}" "$BASH_COMMAND" >&2
+	for log in "$run_dir/hop.log" "$run_dir/target.log" "$run_dir/rotated-target.log"; do
+		if [[ -f "$log" ]]; then
+			printf '\n===== %s =====\n' "$(basename "$log")" >&2
+			cat "$log" >&2
+		fi
+	done
+	exit "$status"
+}
+
 trap cleanup EXIT
+trap report_error ERR
 
 for command in cargo ssh scp sftp sshd ssh-keygen python3 timeout; do
 	command -v "$command" >/dev/null || {
@@ -122,16 +136,17 @@ ssh_options=(-p "$hop_port" "${common_client_options[@]}")
 scp_options=(-P "$hop_port" "${common_client_options[@]}")
 sftp_options=(-P "$hop_port" "${common_client_options[@]}")
 
-set +e
-wrong_key_output=$(timeout 5 ssh -p "$hop_port" \
+if wrong_key_output=$(timeout 5 ssh -p "$hop_port" \
 	-i "$run_dir/wrong_ingress_key" \
 	-o IdentitiesOnly=yes \
 	-o PreferredAuthentications=publickey,password,keyboard-interactive \
 	-o StrictHostKeyChecking=no \
 	-o UserKnownHostsFile=/dev/null \
-	managed-target@127.0.0.1 true 2>&1)
-wrong_key_status=$?
-set -e
+	managed-target@127.0.0.1 true 2>&1); then
+	wrong_key_status=0
+else
+	wrong_key_status=$?
+fi
 if [[ $wrong_key_status -eq 0 ]] || ! grep -q 'Permission denied (publickey)' <<<"$wrong_key_output"; then
 	echo "unmatched key did not fail with publickey-only authentication" >&2
 	printf '%s\n' "$wrong_key_output" >&2
@@ -145,10 +160,11 @@ fi
 test "$(ssh "${ssh_options[@]}" managed-target@127.0.0.1 'printf managed-ok')" = managed-ok
 test "$(printf 'stdin-roundtrip' | ssh "${ssh_options[@]}" managed-target@127.0.0.1 cat)" = stdin-roundtrip
 test "$(ssh "${ssh_options[@]}" managed-target@127.0.0.1 'printf stderr-ok >&2' 2>&1)" = stderr-ok
-set +e
-ssh "${ssh_options[@]}" managed-target@127.0.0.1 'exit 42'
-exit_status=$?
-set -e
+if ssh "${ssh_options[@]}" managed-target@127.0.0.1 'exit 42'; then
+	exit_status=0
+else
+	exit_status=$?
+fi
 test "$exit_status" -eq 42
 timeout 10 ssh -tt "${ssh_options[@]}" managed-target@127.0.0.1 tty 2>&1 | grep -q '/dev/pts/'
 
@@ -227,11 +243,12 @@ for _ in $(seq 1 100); do
 	sleep 0.05
 done
 
-set +e
-rotated_output=$(timeout 10 ssh "${ssh_options[@]}" managed-target@127.0.0.1 \
-	'printf should-not-connect' 2>&1)
-rotated_status=$?
-set -e
+if rotated_output=$(timeout 10 ssh "${ssh_options[@]}" managed-target@127.0.0.1 \
+	'printf should-not-connect' 2>&1); then
+	rotated_status=0
+else
+	rotated_status=$?
+fi
 if [[ $rotated_status -eq 0 ]] || grep -q 'should-not-connect' <<<"$rotated_output"; then
 	echo "managed connection accepted a changed target Host Key" >&2
 	exit 1
