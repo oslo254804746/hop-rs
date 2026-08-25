@@ -5,7 +5,7 @@ use hop_core::{Asset, Catalog, HopConfig, MasterKey, NewSession};
 use russh::{
     keys::{ssh_key::HashAlg, PublicKey},
     server::{self, Msg, Session},
-    Channel, ChannelId, MethodKind, MethodSet, Pty,
+    Channel, ChannelId, ChannelOpenFailure, MethodKind, MethodSet, Pty,
 };
 use tokio::{
     net::TcpListener,
@@ -509,9 +509,11 @@ impl server::Handler for HopSshHandler {
     async fn channel_open_session(
         &mut self,
         _channel: Channel<Msg>,
+        reply: server::ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
-        Ok(true)
+    ) -> Result<(), Self::Error> {
+        reply.accept().await;
+        Ok(())
     }
 
     async fn channel_open_direct_tcpip(
@@ -521,10 +523,14 @@ impl server::Handler for HopSshHandler {
         port_to_connect: u32,
         _originator_address: &str,
         _originator_port: u32,
+        reply: server::ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         let Some(auth) = self.auth_info() else {
-            return Ok(false);
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
         };
         let target = self
             .db
@@ -548,9 +554,13 @@ impl server::Handler for HopSshHandler {
                 client_ip = ?self.client_ip,
                 "rejected proxy target: {AUTHORIZATION_DENIED}"
             );
-            return Ok(false);
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
         };
 
+        reply.accept().await;
         let db = self.db.clone();
         let active_sessions = self.active_sessions.clone();
         let client_ip = self.client_ip.clone();
@@ -562,7 +572,7 @@ impl server::Handler for HopSshHandler {
                 warn!(?err, "proxy bridge failed");
             }
         });
-        Ok(true)
+        Ok(())
     }
 
     async fn pty_request(
@@ -917,7 +927,7 @@ mod tests {
     };
     use russh::{
         client::Msg as ClientMsg,
-        keys::{key::safe_rng, Algorithm, PrivateKeyWithHashAlg},
+        keys::{key::safe_rng, Algorithm, PrivateKeyWithHashAlg, PublicKeyOrCertificate},
         server::{Msg as ServerMsg, Server as _},
         ChannelMsg,
     };
@@ -971,9 +981,11 @@ mod tests {
         async fn channel_open_session(
             &mut self,
             _channel: Channel<ServerMsg>,
+            reply: server::ChannelOpenHandle,
             _session: &mut Session,
-        ) -> Result<bool, Self::Error> {
-            Ok(true)
+        ) -> Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
         }
 
         async fn pty_request(
@@ -1035,7 +1047,7 @@ mod tests {
 
         async fn check_server_key(
             &mut self,
-            _server_public_key: &PublicKey,
+            _server_public_key: &PublicKeyOrCertificate,
         ) -> Result<bool, Self::Error> {
             Ok(true)
         }

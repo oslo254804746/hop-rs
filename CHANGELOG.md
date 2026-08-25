@@ -4,6 +4,31 @@ All notable user-visible changes to Hop are recorded here.
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-08-25
+
+### Fixed
+
+- Fixed SSH key-exchange interoperability with Termius on iOS. russh now
+  correctly ignores the guessed first KEX packet when `first_kex_packet_follows`
+  names an unsupported algorithm, instead of parsing that packet as the next
+  SSH message and failing with `SshEncoding: character encoding invalid`.
+
+### Changed
+
+- Upgraded russh from 0.61.1 to the exact 0.63.1 release. This includes the
+  upstream KEXINIT regression test and security fixes for invalid channel IDs
+  and MAC-required cipher negotiation.
+
+### Compatibility and upgrade
+
+- No SQLite migration, configuration-key change, or database-format change is
+  included. Back up persistent data and configuration, then deploy the backend
+  with `HOP_VERSION=v0.2.5`.
+- The panel has no functional changes in this release. Compose continues to
+  use the same matching `HOP_VERSION` tag for the backend and panel images.
+- If a rollback is needed, stop Hop, restore the backup if necessary, and set
+  `HOP_VERSION=v0.2.4` to use the previous matching backend/panel images.
+
 ## [0.2.4] - 2026-08-16
 
 ### Added
@@ -178,7 +203,8 @@ See the [full v0.1.6 release notes](docs/releases/v0.1.6.md).
 
 See the [full v0.1.5 release notes](docs/releases/v0.1.5.md).
 
-[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/oslo254804746/hop-rs/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/oslo254804746/hop-rs/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/oslo254804746/hop-rs/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/oslo254804746/hop-rs/compare/v0.2.1...v0.2.2

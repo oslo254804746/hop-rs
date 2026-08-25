@@ -2,6 +2,7 @@
 
 ## Start here
 
+- [v0.2.5 release notes](releases/v0.2.5.md) / [简体中文](releases/v0.2.5.zh-CN.md)
 - [SSH 与 TCP 代理](proxying.zh-CN.md)
 - [配置参考](configuration.zh-CN.md)
 - Deployment: [简体中文](deployment.zh-CN.md) | [English](deployment.md)

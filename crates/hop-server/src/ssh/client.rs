@@ -6,7 +6,7 @@ use hop_core::{
 };
 use russh::{
     client,
-    keys::{decode_secret_key, ssh_key::PublicKey, PrivateKeyWithHashAlg},
+    keys::{decode_secret_key, PrivateKeyWithHashAlg, PublicKeyOrCertificate},
     Channel, ChannelMsg,
 };
 
@@ -24,9 +24,15 @@ impl client::Handler for TofuClient {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        tofu::verify_or_learn(&self.db, &self.hostname, self.port, server_public_key).await
+        tofu::verify_or_learn(
+            &self.db,
+            &self.hostname,
+            self.port,
+            &server_public_key.public_key(),
+        )
+        .await
     }
 }
 
