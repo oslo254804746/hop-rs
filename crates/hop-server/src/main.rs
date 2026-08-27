@@ -19,6 +19,7 @@ use hop_core::{
     CatalogError, HopConfig, MasterKey, NewAsset, ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
 };
 use serde::Serialize;
+use tokio::sync::watch;
 use tracing::{info, warn};
 
 use crate::transfer::{ConflictPolicy, TransferFormat, TransferKind};
@@ -681,6 +682,16 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
             config.runtime.temp_dir.display()
         )
     })?;
+    let recovered = db
+        .mark_started_sessions_failed("Hop server restarted before session completed")
+        .await
+        .context("recover unfinished runtime sessions")?;
+    if recovered > 0 {
+        warn!(
+            recovered,
+            "marked unfinished sessions from a previous process as failed"
+        );
+    }
     let pruned = db
         .prune_finished_sessions(config.runtime.session_retention_days)
         .await
@@ -713,6 +724,12 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
     if config.api.enabled && api_token.is_some_and(|token| token.is_placeholder()) {
         warn!("api.token still uses the insecure 'change-me' placeholder; replace it before exposing the panel");
     }
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let shutdown_task = tokio::spawn(async move {
+        shutdown_signal().await;
+        info!("shutdown signal received");
+        let _ = shutdown_tx.send(true);
+    });
     if let Some(token) = api_token {
         let api_bind = config.api_bind_addr()?;
         let api_state = control_api::ControlApiState::new(
@@ -723,15 +740,79 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
         )?;
         info!("starting Hop Control API on {api_bind}");
         let cors_allowlist = config.api.cors_allowlist.clone();
-        let api = control_api::serve(api_bind, api_state, &cors_allowlist);
-        let ssh = ssh::server::serve_ssh(ssh_bind, config, db, master_key, active_sessions);
-        tokio::try_join!(api, ssh)?;
-        Ok(())
+        let api = control_api::serve_with_shutdown(
+            api_bind,
+            api_state,
+            &cors_allowlist,
+            shutdown_rx.clone(),
+        );
+        let ssh = ssh::server::serve_ssh_with_shutdown(
+            ssh_bind,
+            config,
+            db,
+            master_key,
+            active_sessions,
+            shutdown_rx,
+        );
+        let result = tokio::try_join!(api, ssh).map(|_| ());
+        shutdown_task.abort();
+        result
     } else {
         info!("Control API disabled; no HTTP listener will be created");
-        let ssh = ssh::server::serve_ssh(ssh_bind, config, db, master_key, active_sessions);
-        ssh.await?;
-        Ok(())
+        let result = ssh::server::serve_ssh_with_shutdown(
+            ssh_bind,
+            config,
+            db,
+            master_key,
+            active_sessions,
+            shutdown_rx,
+        )
+        .await;
+        shutdown_task.abort();
+        result
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut interrupt = match signal(SignalKind::interrupt()) {
+            Ok(signal) => signal,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    "failed to install SIGINT handler; waiting for SIGTERM"
+                );
+                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler")
+            }
+        };
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    "failed to install SIGTERM handler; waiting for SIGINT"
+                );
+                signal(SignalKind::interrupt()).expect("failed to install SIGINT handler")
+            }
+        };
+        tokio::select! {
+            _ = interrupt.recv() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            warn!(
+                ?error,
+                "failed to install Ctrl-C handler; continuing until process exit"
+            );
+            std::future::pending::<()>().await;
+        }
     }
 }
 

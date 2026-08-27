@@ -482,6 +482,20 @@ impl Catalog {
         Ok(())
     }
 
+    /// Close session records left in the `started` state by a previous
+    /// process lifetime. This is intentionally an explicit startup recovery
+    /// operation: the server calls it before opening either listener, so no
+    /// session created by the current process can be selected.
+    pub async fn mark_started_sessions_failed(&self, error: &str) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE sessions SET status = 'failed', error = ?1, ended_at = CURRENT_TIMESTAMP WHERE status = 'started' AND ended_at IS NULL",
+        )
+        .bind(error)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn get_session(&self, id: &str) -> Result<Option<Session>> {
         sqlx::query_as::<_, Session>(&session_select("WHERE id = ?1"))
             .bind(id)
@@ -1041,5 +1055,46 @@ mod tests {
         assert!(catalog.get_session(&expired.id).await.unwrap().is_none());
         assert!(catalog.get_session(&recent.id).await.unwrap().is_some());
         assert!(catalog.get_session(&active.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_marks_only_unfinished_started_sessions_failed() {
+        let catalog = Catalog::in_memory().await.unwrap();
+        let session = || NewSession {
+            key_finger: "SHA256:test".to_string(),
+            key_name: Some("laptop".to_string()),
+            mode: "direct".to_string(),
+            asset_name: Some("server".to_string()),
+            target_host: Some("192.0.2.10".to_string()),
+            target_port: Some(22),
+            client_ip: Some("127.0.0.1".to_string()),
+        };
+
+        let stale = catalog.start_session(session()).await.unwrap();
+        let finished = catalog.start_session(session()).await.unwrap();
+        catalog
+            .finish_session(&finished.id, "ok", None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            catalog
+                .mark_started_sessions_failed("Hop server restarted before session completed")
+                .await
+                .unwrap(),
+            1
+        );
+
+        let stale = catalog.get_session(&stale.id).await.unwrap().unwrap();
+        assert_eq!(stale.status, "failed");
+        assert_eq!(
+            stale.error.as_deref(),
+            Some("Hop server restarted before session completed")
+        );
+        assert!(stale.ended_at.is_some());
+
+        let finished = catalog.get_session(&finished.id).await.unwrap().unwrap();
+        assert_eq!(finished.status, "ok");
+        assert_eq!(finished.error, None);
     }
 }

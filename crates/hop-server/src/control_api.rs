@@ -16,6 +16,7 @@ use hop_core::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use tokio::sync::watch;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::ssh::session_registry::{ActiveSessionRegistry, TerminateSessionResult};
@@ -48,16 +49,26 @@ impl ControlApiState {
     }
 }
 
-pub async fn serve(
+pub async fn serve_with_shutdown(
     bind: SocketAddr,
     state: ControlApiState,
     cors_allowlist: &[String],
+    shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .with_context(|| format!("bind Control API at {bind}"))?;
-    axum::serve(listener, router(state).layer(cors_layer(cors_allowlist)?)).await?;
+    axum::serve(listener, router(state).layer(cors_layer(cors_allowlist)?))
+        .with_graceful_shutdown(wait_for_shutdown(shutdown))
+        .await?;
     Ok(())
+}
+
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    let _ = shutdown.changed().await;
 }
 
 fn cors_layer(cors_allowlist: &[String]) -> Result<CorsLayer> {
@@ -1039,6 +1050,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authorized.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn control_api_stops_accepting_after_shutdown_notification() {
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+        let state = ControlApiState::new(
+            Catalog::in_memory().await.unwrap(),
+            Arc::new(MasterKey::generate()),
+            "test-token",
+            ActiveSessionRegistry::default(),
+        )
+        .unwrap();
+        let (shutdown_tx, shutdown) = watch::channel(false);
+        let task = tokio::spawn(serve_with_shutdown(address, state, &[], shutdown));
+
+        let mut connected = false;
+        for _ in 0..100 {
+            if tokio::net::TcpStream::connect(address).await.is_ok() {
+                connected = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(connected, "Control API did not bind its listener");
+
+        shutdown_tx.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("Control API did not shut down")
+            .unwrap()
+            .unwrap();
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
     }
 
     #[tokio::test]

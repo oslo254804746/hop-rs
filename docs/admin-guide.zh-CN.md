@@ -4,7 +4,7 @@
 
 ## 网页面板
 
-打开 Compose 的 `http://<host>:8080`，输入 `api.token`。面板默认请求当前 Origin 的 `/api/v1`，Token 只保存在当前页面内存中；刷新页面后需重新输入。独立远程 API URL 位于连接对话框的高级入口。
+打开 Compose 的 `http://<host>:8080`，输入 `api.token`。面板默认请求当前 Origin 的 `/api/v1`。验证成功后，Token 保存在当前标签页的 `sessionStorage` 中；刷新页面会先校验并自动重连。关闭标签页或选择“忘记连接”会清除 Token。独立远程 API URL 位于连接对话框的高级入口。
 
 使用 `change-me` 时面板和后端都会警告。更换 Token 后，重新打开连接对话框认证。
 
@@ -57,6 +57,12 @@ ssh -p 2222 nas@hop.example.com
 ## 会话
 
 面板展示最近 100 条会话记录。只有仍为 `started` 且存在活动内存传输的会话能收到终止信号；过期记录可能返回“不活跃”，但历史记录仍保留。
+
+Hop 启动时，会将上一个进程遗留的 `started` 会话标记为 `failed`，并写入
+服务重启导致会话未完成的原因。该恢复发生在 SSH 和 Control API 监听器打开
+之前，因此不会选中当前进程新建的会话。收到 SIGINT 或 SIGTERM 后，Hop 会停止
+接受新的 HTTP/SSH 连接，通知活动传输退出，并最多等待 5 秒让 SSH 连接排空，
+然后终止仍未退出的连接。
 
 ## 主机信任（Known Hosts）
 

@@ -16,7 +16,7 @@ Hop 是小型、自托管、默认安全的 SSH/TCP 跳板：入口公钥认证�
 - 入口 SSH 只宣告 `publickey`；
 - Control API 默认关闭，Compose 中仅在私有网络可达；
 - 面板同源代理只开放 `/api/v1`；
-- 网页管理 Token 只在浏览器内存；
+- 网页管理 Token 只保存在当前标签页的 `sessionStorage`，刷新时先校验并重连，关闭标签页或忘记连接时清除；
 - 目标 secret 加密保存且永不回读；
 - YAML secret 采用直接字符串，因此文件权限与备份被视为部署安全边界。
 

@@ -52,8 +52,8 @@ docker compose up -d
 - 两个镜像使用同一个 `HOP_VERSION` 标签，避免 API/面板版本漂移。
 
 ```bash
-HOP_VERSION=v0.2.1 docker compose pull
-HOP_VERSION=v0.2.1 docker compose up -d
+HOP_VERSION=v0.2.8 docker compose pull
+HOP_VERSION=v0.2.8 docker compose up -d
 ```
 
 升级前备份配置与数据卷。回滚时同时回滚 hop 与 panel 镜像。
@@ -78,7 +78,7 @@ docker run -d --name hop --restart unless-stopped \
   -p 2222:2222 \
   -v "$PWD/hop.yaml:/etc/hop/hop.yaml:ro" \
   -v hop-data:/data \
-  ghcr.io/oslo254804746/hop-rs:v0.2.1 \
+  ghcr.io/oslo254804746/hop-rs:v0.2.8 \
   hop-server --config /etc/hop/hop.yaml serve
 ```
 
@@ -115,4 +115,4 @@ docker compose logs hop panel
 ssh -p 2222 <asset-name>@<hop-host>
 ```
 
-未匹配的入口公钥必须只得到 `Permission denied (publickey)`。面板刷新后 Token 从浏览器内存清除，这是预期行为；重新输入即可。
+未匹配的入口公钥必须只得到 `Permission denied (publickey)`。验证成功后，面板只将 Token 保存在当前标签页的 `sessionStorage` 中；刷新会先校验并自动重连，关闭标签页或选择“忘记连接”则清除 Token。

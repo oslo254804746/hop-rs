@@ -21,7 +21,7 @@ ssh client :2222 -------------> hop:2222
 4. 查看与终止活跃会话；
 5. 检查 Known Hosts，并在核实目标重装或 Host Key 轮换后显式重置信任。
 
-API 地址默认是当前 Origin。连接独立远程实例是折叠的高级选项。Token 只在页面内存中持有，不进入 localStorage、静态产物、Nginx 配置或访问日志。
+API 地址默认是当前 Origin。连接独立远程实例是折叠的高级选项。Token 只保存在当前标签页的 `sessionStorage` 中，不进入 `localStorage`、静态产物、Nginx 配置或访问日志；刷新时先校验并重连，关闭标签页或选择忘记连接时清除。
 
 ## 资源归属
 
@@ -41,11 +41,11 @@ API 地址默认是当前 Origin。连接独立远程实例是折叠的高级选
 
 ## 设置页
 
-设置页只解释连接模式、Token 内存边界、同源代理、浏览器安全头与资源归属。它不承担 Catalog 声明文件的编辑器角色。
+设置页只解释连接模式、Token 的当前标签页 `sessionStorage` 边界、同源代理、浏览器安全头与资源归属。它不承担 Catalog 声明文件的编辑器角色。
 
 ## 国际化
 
-面板提供 English / 简体中文即时切换。语言偏好是唯一写入 localStorage 的面板状态；管理 Token 永不持久化。
+面板提供 English / 简体中文即时切换。语言偏好是唯一写入 localStorage 的面板状态；管理 Token 只存在当前标签页的 `sessionStorage`，关闭标签页或忘记连接即清除。
 
 ## 发布与验证
 

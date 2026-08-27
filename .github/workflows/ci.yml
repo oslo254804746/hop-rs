@@ -32,6 +32,30 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Verify release tag matches workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace_version=$(cargo metadata --no-deps --format-version=1 \
+            | python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "hop-server"))')
+          test "$GITHUB_REF_NAME" = "v$workspace_version" || {
+            echo "release tag $GITHUB_REF_NAME does not match workspace version v$workspace_version" >&2
+            exit 1
+          }
+
+      - name: Verify Compose defaults match workspace version
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace_version=$(cargo metadata --no-deps --format-version=1 \
+            | python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "hop-server"))')
+          compose_versions=$(python3 -c 'import pathlib, re; print("\n".join(sorted(set(re.findall(r"HOP_VERSION:-([^}]+)", pathlib.Path("compose.yaml").read_text())))))')
+          test "$compose_versions" = "v$workspace_version" || {
+            echo "Compose defaults $compose_versions do not match workspace version v$workspace_version" >&2
+            exit 1
+          }
+
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 

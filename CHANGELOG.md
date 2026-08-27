@@ -4,6 +4,22 @@ All notable user-visible changes to Hop are recorded here.
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-08-27
+
+### Changed
+
+- Added graceful shutdown handling for SIGINT and SIGTERM. The HTTP listener
+  stops accepting requests, while SSH connections receive a short drain window
+  before remaining transports are terminated.
+- Session records left in `started` state by an interrupted process are
+  recovered as `failed` during startup with an explanatory error message.
+- Bumped the workspace version to `0.2.8`.
+
+### Compatibility and upgrade
+
+- No SQLite schema or configuration-key change is included. Existing
+  deployments can be upgraded in place after backing up persistent data.
+
 ## [0.2.5] - 2026-08-25
 
 ### Fixed
@@ -203,7 +219,8 @@ See the [full v0.1.6 release notes](docs/releases/v0.1.6.md).
 
 See the [full v0.1.5 release notes](docs/releases/v0.1.5.md).
 
-[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.8...HEAD
+[0.2.8]: https://github.com/oslo254804746/hop-rs/compare/v0.2.5...v0.2.8
 [0.2.5]: https://github.com/oslo254804746/hop-rs/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/oslo254804746/hop-rs/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/oslo254804746/hop-rs/compare/v0.2.2...v0.2.3

@@ -9,7 +9,7 @@ use russh::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{mpsc, Mutex},
+    sync::{mpsc, watch, Mutex},
     task::JoinSet,
 };
 use tracing::{error, info, warn};
@@ -91,12 +91,13 @@ pub struct HopSshServer {
     active_sessions: ActiveSessionRegistry,
 }
 
-pub async fn serve_ssh(
+pub async fn serve_ssh_with_shutdown(
     bind: SocketAddr,
     config: HopConfig,
     db: Catalog,
     master_key: Arc<MasterKey>,
     active_sessions: ActiveSessionRegistry,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let host_key =
         host_key::load_or_generate(&config.ssh_host_key_path(), &config.ssh.host_key_type)?;
@@ -118,13 +119,14 @@ pub async fn serve_ssh(
     };
     let listener = TcpListener::bind(bind).await?;
     info!(%bind, "ssh server listening");
-    serve_ssh_connections(listener, Arc::new(russh_config), server).await
+    serve_ssh_connections(listener, Arc::new(russh_config), server, &mut shutdown).await
 }
 
 async fn serve_ssh_connections(
     listener: TcpListener,
     config: Arc<server::Config>,
     server: HopSshServer,
+    shutdown: &mut watch::Receiver<bool>,
 ) -> Result<()> {
     let mut sessions = JoinSet::new();
     loop {
@@ -159,7 +161,48 @@ async fn serve_ssh_connections(
                     }
                 }
             }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    let signaled = server.active_sessions.terminate_all().await;
+                    info!(signaled, "SSH shutdown requested; draining existing connections");
+                    drain_ssh_sessions(&mut sessions).await;
+                    return Ok(());
+                }
+            }
         }
+    }
+}
+
+const SSH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn drain_ssh_sessions(sessions: &mut JoinSet<(SocketAddr, Result<()>)>) {
+    let drain = async {
+        while let Some(result) = sessions.join_next().await {
+            match result {
+                Ok((client_ip, Ok(()))) => {
+                    tracing::debug!(%client_ip, "ssh client disconnected during shutdown");
+                }
+                Ok((client_ip, Err(error))) => {
+                    log_ssh_session_error(client_ip, &error);
+                }
+                Err(error) => {
+                    error!(?error, "ssh session task failed during shutdown");
+                }
+            }
+        }
+    };
+
+    if tokio::time::timeout(SSH_DRAIN_TIMEOUT, drain)
+        .await
+        .is_err()
+    {
+        warn!(
+            timeout_seconds = SSH_DRAIN_TIMEOUT.as_secs(),
+            remaining = sessions.len(),
+            "SSH connection drain timed out; terminating remaining connections"
+        );
+        sessions.abort_all();
+        while sessions.join_next().await.is_some() {}
     }
 }
 
@@ -1176,12 +1219,14 @@ mod tests {
             },
             ..HopConfig::default()
         };
-        let hop_task = tokio::spawn(serve_ssh(
+        let (_shutdown_tx, shutdown) = watch::channel(false);
+        let hop_task = tokio::spawn(serve_ssh_with_shutdown(
             hop_addr,
             config,
             db.clone(),
             master_key,
             ActiveSessionRegistry::default(),
+            shutdown,
         ));
 
         let mut hop_client = tokio::time::timeout(Duration::from_secs(5), async {
@@ -1243,6 +1288,46 @@ mod tests {
             .ok();
         hop_task.abort();
         target_task.abort();
+    }
+
+    #[tokio::test]
+    async fn ssh_listener_stops_accepting_after_shutdown_notification() {
+        let temp = tempfile::tempdir().unwrap();
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+        let config = HopConfig {
+            listen: address.to_string(),
+            data_dir: temp.path().to_path_buf(),
+            ..HopConfig::default()
+        };
+        let (shutdown_tx, shutdown) = watch::channel(false);
+        let task = tokio::spawn(serve_ssh_with_shutdown(
+            address,
+            config,
+            Catalog::in_memory().await.unwrap(),
+            Arc::new(MasterKey::from_bytes([9; 32])),
+            ActiveSessionRegistry::default(),
+            shutdown,
+        ));
+
+        let mut connected = false;
+        for _ in 0..100 {
+            if tokio::net::TcpStream::connect(address).await.is_ok() {
+                connected = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(connected, "SSH server did not bind its listener");
+
+        shutdown_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("SSH server did not shut down")
+            .unwrap()
+            .unwrap();
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
     }
 
     #[tokio::test]

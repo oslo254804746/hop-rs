@@ -4,7 +4,7 @@ Use the official panel for day-to-day local resources. Resources declared in `ho
 
 ## Web panel
 
-Open the Compose panel at `http://<host>:8080` and enter `api.token`. The panel calls same-origin `/api/v1` by default. The Token stays only in page memory and is cleared on refresh. A separate remote API URL is available under the advanced connection disclosure.
+Open the Compose panel at `http://<host>:8080` and enter `api.token`. The panel calls same-origin `/api/v1` by default. After a successful validation, the Token is held in the current tab's `sessionStorage`; a refresh verifies it and reconnects automatically. Closing the tab or choosing **Forget connection** clears the Token. A separate remote API URL is available under the advanced connection disclosure.
 
 Both backend and panel warn when `change-me` is used. After rotating the Token, reopen the connection dialog and authenticate again.
 
@@ -57,6 +57,13 @@ ssh -p 2222 nas@hop.example.com
 ## Sessions
 
 The panel shows the latest 100 session records. Termination can signal only a `started` session with an active in-memory transport. A stale record may return not active while remaining in history.
+
+When Hop starts, any `started` record left by an earlier process is closed as
+`failed` with an error explaining that the server restarted. This recovery runs
+before the SSH and Control API listeners open, so sessions created by the
+current process are not selected. On SIGINT or SIGTERM, Hop stops accepting
+new HTTP/SSH connections, signals active transports, and allows up to five
+seconds for SSH connections to drain before terminating anything remaining.
 
 ## Host trust (Known Hosts)
 
