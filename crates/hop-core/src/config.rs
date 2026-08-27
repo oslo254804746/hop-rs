@@ -1,12 +1,13 @@
 use std::{
     collections::BTreeMap,
     fmt, fs,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use http::Uri;
+use ipnet::IpNet;
 use serde::Deserialize;
 use zeroize::Zeroize;
 
@@ -250,6 +251,7 @@ impl HopConfig {
                 "ssh.proxy_policy must be assets_only".to_string(),
             ));
         }
+        validate_allowed_client_ip_ranges(&self.ssh.allowed_client_ip_ranges)?;
         if self.runtime.temp_dir.as_os_str().is_empty() {
             return Err(HopCoreError::Config(
                 "runtime.temp_dir must not be empty".to_string(),
@@ -380,6 +382,24 @@ fn invalid_origin(index: usize, guidance: &str) -> HopCoreError {
     HopCoreError::Config(format!("api.cors_allowlist[{index}] {guidance}"))
 }
 
+fn validate_allowed_client_ip_ranges(ranges: &[String]) -> Result<()> {
+    for (index, range) in ranges.iter().enumerate() {
+        range.parse::<IpNet>().map_err(|error| {
+            HopCoreError::Config(format!(
+                "ssh.allowed_client_ip_ranges[{index}]: invalid CIDR {range:?}: {error}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn default_allowed_client_ip_ranges() -> Vec<String> {
+    ["0.0.0.0/0", "::/0"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ApiConfig {
@@ -408,6 +428,29 @@ pub struct SshConfig {
     pub keepalive_interval: u64,
     pub connect_timeout: u64,
     pub proxy_policy: String,
+    #[serde(default = "default_allowed_client_ip_ranges")]
+    pub allowed_client_ip_ranges: Vec<String>,
+}
+
+impl SshConfig {
+    /// Returns whether an SSH peer IP is covered by the configured CIDR ranges.
+    ///
+    /// Configuration loading validates every range. Invalid ranges are treated as
+    /// non-matching here as a fail-closed safeguard for programmatically-created
+    /// configurations.
+    pub fn allows_client_ip(&self, ip: IpAddr) -> bool {
+        self.allowed_client_ip_ranges
+            .iter()
+            .filter_map(|range| range.parse::<IpNet>().ok())
+            .any(|network| match (network, ip) {
+                (IpNet::V4(network), IpAddr::V4(ip)) => network.contains(&ip),
+                (IpNet::V6(network), IpAddr::V6(ip)) => network.contains(&ip),
+                (IpNet::V4(network), IpAddr::V6(ip)) => ip
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped_ip| network.contains(&mapped_ip)),
+                (IpNet::V6(_), IpAddr::V4(_)) => false,
+            })
+    }
 }
 
 impl Default for SshConfig {
@@ -418,6 +461,7 @@ impl Default for SshConfig {
             keepalive_interval: 30,
             connect_timeout: 10,
             proxy_policy: "assets_only".to_string(),
+            allowed_client_ip_ranges: default_allowed_client_ip_ranges(),
         }
     }
 }
@@ -483,6 +527,56 @@ mod tests {
         assert!(!config.api.enabled);
         assert_eq!(config.api.listen, "127.0.0.1:8083");
         assert_eq!(config.listen, "0.0.0.0:2222");
+        assert_eq!(
+            config.ssh.allowed_client_ip_ranges,
+            vec!["0.0.0.0/0", "::/0"]
+        );
+        assert!(config.ssh.allows_client_ip("192.0.2.10".parse().unwrap()));
+        assert!(config.ssh.allows_client_ip("2001:db8::10".parse().unwrap()));
+    }
+
+    #[test]
+    fn client_ip_ranges_match_ipv4_ipv6_and_ipv4_mapped_ipv6() {
+        let ssh = SshConfig {
+            allowed_client_ip_ranges: vec!["192.0.2.0/24".to_string(), "2001:db8::/32".to_string()],
+            ..SshConfig::default()
+        };
+
+        assert!(ssh.allows_client_ip("192.0.2.10".parse().unwrap()));
+        assert!(ssh.allows_client_ip("::ffff:192.0.2.10".parse().unwrap()));
+        assert!(ssh.allows_client_ip("2001:db8::10".parse().unwrap()));
+        assert!(!ssh.allows_client_ip("::192.0.2.10".parse().unwrap()));
+        assert!(!ssh.allows_client_ip("192.0.3.10".parse().unwrap()));
+        assert!(!ssh.allows_client_ip("2001:db9::10".parse().unwrap()));
+    }
+
+    #[test]
+    fn explicit_empty_client_ip_ranges_reject_every_address() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("empty.yaml");
+        fs::write(&path, "ssh:\n  allowed_client_ip_ranges: []\n").unwrap();
+
+        let config = HopConfig::load(Some(&path)).unwrap();
+
+        assert!(config.ssh.allowed_client_ip_ranges.is_empty());
+        assert!(!config.ssh.allows_client_ip("127.0.0.1".parse().unwrap()));
+        assert!(!config.ssh.allows_client_ip("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn invalid_client_ip_range_reports_the_list_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("invalid.yaml");
+        fs::write(
+            &path,
+            "ssh:\n  allowed_client_ip_ranges:\n    - 192.0.2.0/24\n    - not-a-cidr\n",
+        )
+        .unwrap();
+
+        let error = HopConfig::load(Some(&path)).unwrap_err().to_string();
+
+        assert!(error.contains("ssh.allowed_client_ip_ranges[1]"));
+        assert!(error.contains("invalid CIDR"));
     }
 
     #[test]

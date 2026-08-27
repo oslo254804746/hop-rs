@@ -20,6 +20,9 @@ ssh:
   keepalive_interval: 30
   connect_timeout: 10
   proxy_policy: assets_only
+  allowed_client_ip_ranges:
+    - "0.0.0.0/0"
+    - "::/0"
 
 runtime:
   temp_dir: /tmp/hop
@@ -116,6 +119,9 @@ api:
 | `keepalive_interval` | `30` | 秒 |
 | `connect_timeout` | `10` | 目标连接超时秒数 |
 | `proxy_policy` | `assets_only` | 当前只能是 `assets_only` |
+| `allowed_client_ip_ranges` | `["0.0.0.0/0", "::/0"]` | SSH 客户端来源 IP 允许的 CIDR 列表，同时支持 IPv4/IPv6 |
+
+`allowed_client_ip_ranges` 在 SSH TCP 连接刚建立时依据 TCP 对端地址过滤，早于 SSH 握手和公钥认证，不读取或信任代理头。缺省字段等价于同时允许 `0.0.0.0/0` 和 `::/0`，因此兼容旧配置；显式写空列表 `[]` 则拒绝所有客户端。每一项必须是有效 CIDR，非法值会在 `config validate` 阶段指出其索引。IPv4-mapped IPv6 地址也会按对应 IPv4 地址与 IPv4 CIDR 匹配。若前置了 TCP 代理或 NAT，应将 Hop 实际看到的对端 IP 加入允许范围。
 
 入口认证只宣告公钥，不提供 password 或 keyboard-interactive 回退。
 

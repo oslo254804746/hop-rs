@@ -133,6 +133,10 @@ async fn serve_ssh_connections(
         tokio::select! {
             accepted = listener.accept() => {
                 let (socket, client_ip) = accepted?;
+                if !server.config.ssh.allows_client_ip(client_ip.ip()) {
+                    warn!(%client_ip, "rejected SSH client outside allowed IP ranges");
+                    continue;
+                }
                 if config.nodelay {
                     if let Err(error) = socket.set_nodelay(true) {
                         warn!(%client_ip, ?error, "failed to enable TCP_NODELAY for SSH client");
@@ -975,6 +979,7 @@ mod tests {
         ChannelMsg,
     };
     use std::sync::Mutex as StdMutex;
+    use tokio::io::AsyncReadExt;
 
     use super::*;
 
@@ -1328,6 +1333,58 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(tokio::net::TcpStream::connect(address).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn ssh_listener_drops_disallowed_clients_before_handshake() {
+        let temp = tempfile::tempdir().unwrap();
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = probe.local_addr().unwrap();
+        drop(probe);
+        let config = HopConfig {
+            listen: address.to_string(),
+            data_dir: temp.path().to_path_buf(),
+            ssh: hop_core::config::SshConfig {
+                allowed_client_ip_ranges: Vec::new(),
+                ..hop_core::config::SshConfig::default()
+            },
+            ..HopConfig::default()
+        };
+        let (shutdown_tx, shutdown) = watch::channel(false);
+        let db = Catalog::in_memory().await.unwrap();
+        let task = tokio::spawn(serve_ssh_with_shutdown(
+            address,
+            config,
+            db.clone(),
+            Arc::new(MasterKey::from_bytes([8; 32])),
+            ActiveSessionRegistry::default(),
+            shutdown,
+        ));
+
+        let mut client = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match tokio::net::TcpStream::connect(address).await {
+                    Ok(client) => break client,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                }
+            }
+        })
+        .await
+        .expect("SSH server did not bind its listener");
+        let mut buffer = [0; 1];
+        let read = tokio::time::timeout(Duration::from_secs(2), client.read(&mut buffer))
+            .await
+            .expect("disallowed SSH client was not closed")
+            .expect("reading disallowed SSH client failed");
+        assert_eq!(read, 0, "disallowed client received an SSH handshake");
+        assert!(db.list_sessions(10).await.unwrap().is_empty());
+
+        shutdown_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("SSH server did not shut down")
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
