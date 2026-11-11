@@ -214,6 +214,7 @@ struct AssetUpsert {
     port: u16,
     display_name: Option<String>,
     description: Option<String>,
+    tags: Vec<String>,
     credential_id: Option<String>,
     hash: String,
 }
@@ -414,6 +415,7 @@ async fn build_plan(
                 port,
                 display_name,
                 description,
+                tags,
                 credential,
             } => {
                 let credential_id = credential
@@ -433,6 +435,7 @@ async fn build_plan(
                     *port,
                     display_name.as_deref(),
                     description.as_deref(),
+                    tags,
                     credential.as_deref(),
                 );
                 let existing = existing_assets.get(name).map(ExistingAsset::resource);
@@ -448,6 +451,7 @@ async fn build_plan(
                         port: *port,
                         display_name: display_name.clone(),
                         description: description.clone(),
+                        tags: tags.clone(),
                         credential_id,
                         hash,
                     });
@@ -783,11 +787,12 @@ async fn execute_plan(
     }
 
     for asset in &plan.asset_upserts {
+        let tags_json = serde_json::to_string(&asset.tags).map_err(database_error)?;
         sqlx::query(
             r#"
             INSERT INTO assets
-                (id, name, asset_type, host, port, display_name, description, credential_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                (id, name, asset_type, host, port, display_name, description, tags_json, credential_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 asset_type = excluded.asset_type,
@@ -795,6 +800,7 @@ async fn execute_plan(
                 port = excluded.port,
                 display_name = excluded.display_name,
                 description = excluded.description,
+                tags_json = excluded.tags_json,
                 credential_id = excluded.credential_id,
                 updated_at = CURRENT_TIMESTAMP
             "#,
@@ -806,6 +812,7 @@ async fn execute_plan(
         .bind(i64::from(asset.port))
         .bind(&asset.display_name)
         .bind(&asset.description)
+        .bind(tags_json)
         .bind(&asset.credential_id)
         .execute(&mut **transaction)
         .await
@@ -1059,16 +1066,29 @@ fn asset_hash(
     port: u16,
     display_name: Option<&str>,
     description: Option<&str>,
+    tags: &[String],
     credential: Option<&str>,
 ) -> String {
-    hash_value(serde_json::json!({
-        "type": asset_type.as_str(),
-        "host": host,
-        "port": port,
-        "display_name": display_name,
-        "description": description,
-        "credential": credential,
-    }))
+    if tags.is_empty() {
+        hash_value(serde_json::json!({
+            "type": asset_type.as_str(),
+            "host": host,
+            "port": port,
+            "display_name": display_name,
+            "description": description,
+            "credential": credential,
+        }))
+    } else {
+        hash_value(serde_json::json!({
+            "type": asset_type.as_str(),
+            "host": host,
+            "port": port,
+            "display_name": display_name,
+            "description": description,
+            "tags": tags,
+            "credential": credential,
+        }))
+    }
 }
 
 fn access_hash(public_key: &str, enabled: bool, assets: Option<&[String]>) -> String {
@@ -1417,5 +1437,26 @@ access:
             .unwrap_err();
         assert_eq!(error.code, CatalogErrorCode::OwnershipConflict);
         assert_eq!(catalog.revision().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn declarative_asset_tags_and_display_name_round_trip() {
+        let catalog = Catalog::in_memory().await.unwrap();
+        let master_key = MasterKey::generate();
+        let fixture = Fixture::new("password");
+        let tagged = "  server:\n    type: ssh\n    host: 192.0.2.10\n    port: 22\n    display_name: HK Edge\n    tags: [' hk ', 'nat']\n    credential: root";
+        catalog
+            .apply(
+                &fixture.manifest(tagged),
+                "home",
+                &master_key,
+                ApplyOptions::default(),
+            )
+            .await
+            .unwrap();
+        let assets = catalog.list_assets().await.unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].display_name.as_deref(), Some("HK Edge"));
+        assert_eq!(assets[0].tags, vec!["hk".to_string(), "nat".to_string()]);
     }
 }

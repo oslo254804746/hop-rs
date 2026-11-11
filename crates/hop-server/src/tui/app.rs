@@ -27,6 +27,7 @@ use super::{
 pub enum TuiAction {
     None,
     Quit,
+    ProbeAll,
     Connect(Box<Asset>),
 }
 
@@ -67,6 +68,10 @@ impl TuiResources {
             app: TuiApp::new(assets),
             input: InputAdapter::default(),
         })
+    }
+
+    pub fn set_assets(&mut self, assets: Vec<Asset>) {
+        self.app.set_assets(assets);
     }
 
     pub fn enter_screen(&mut self) -> Result<Vec<u8>> {
@@ -139,6 +144,7 @@ pub struct TuiApp {
     pub query: String,
     pub selected: usize,
     pub searching: bool,
+    pub status_notice: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -165,7 +171,19 @@ impl TuiApp {
             query: String::new(),
             selected: 0,
             searching: false,
+            status_notice: None,
         }
+    }
+
+    pub fn set_assets(&mut self, assets: Vec<Asset>) {
+        self.assets = assets;
+        let refreshed = self.compute_filtered_assets();
+        let max_idx = refreshed.len().saturating_sub(1);
+        self.selected = self.selected.min(max_idx);
+        *self.filtered_cache.borrow_mut() = FilteredAssetCache {
+            query: self.query.clone(),
+            assets: refreshed,
+        };
     }
 
     pub fn filtered_assets(&self) -> Vec<Asset> {
@@ -247,8 +265,12 @@ impl TuiApp {
     pub fn handle_input(&mut self, input: TuiInput) -> TuiAction {
         match input {
             TuiInput::Char('q') if !self.searching => return TuiAction::Quit,
+            TuiInput::Char('r') | TuiInput::Char('R') if !self.searching => {
+                return TuiAction::ProbeAll;
+            }
             TuiInput::Char('/') if !self.searching => {
                 self.searching = true;
+                self.status_notice = None;
                 self.query.clear();
                 self.selected = 0;
             }
@@ -266,12 +288,15 @@ impl TuiApp {
             TuiInput::CtrlC => {
                 self.query.clear();
                 self.searching = false;
+                self.status_notice = None;
                 self.selected = 0;
             }
             TuiInput::Up => {
+                self.status_notice = None;
                 self.selected = self.selected.saturating_sub(1);
             }
             TuiInput::Down => {
+                self.status_notice = None;
                 let len = self.filtered_assets().len();
                 if len > 0 {
                     self.selected = (self.selected + 1).min(len - 1);
@@ -320,11 +345,13 @@ mod tests {
             protocol: hop_core::ASSET_PROTOCOL_SSH.to_string(),
             hostname: "127.0.0.1".to_string(),
             port: 22,
+            display_name: None,
             description: None,
             tags: tags.iter().map(|tag| tag.to_string()).collect(),
             credential_id: None,
             created_at: None,
             updated_at: None,
+            health: hop_core::AssetHealth::unknown(name),
         }
     }
 

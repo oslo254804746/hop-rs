@@ -7,11 +7,7 @@ architecture-independent control package. It contains LuCI, procd/UCI, the
 strict default-off startup config, and a verified core downloader. It does not
 fetch source or compile Rust inside an OpenWrt SDK.
 
-The current LuCI page is a service shell, not a Catalog resource-management
-panel: it can enable/restart Hop and download the core, but it cannot manage
-assets, credentials, Access Keys, allowlists, or sessions. The missing resource
-panel and its token-safe rpcd proxy are explicit follow-up deliverables in the
-[v0.2 management-panel contract](product/management-panel-v0.2.md).
+The [`luci-app-hop`](https://github.com/oslo254804746/luci-app-hop) package includes both the LuCI service/core-download shell and an embedded static build of the official Web Panel (`htdocs/hop`, `< 600 KiB`) backed by a token-safe LuCI `ucode` proxy (`ucode/controller/hop.uc`) that injects the local `api.token` server-side after verifying an authenticated LuCI administrator session. See the [v0.2 management-panel contract](product/management-panel-v0.2.md).
 
 The Hop core is built once per supported CPU family in this repository and
 published as GitHub Release assets:

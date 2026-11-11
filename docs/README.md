@@ -2,7 +2,7 @@
 
 ## Start here
 
-- [v0.2.8 release notes](releases/v0.2.8.md) / [简体中文](releases/v0.2.8.zh-CN.md)
+- [v0.2.9 release notes](releases/v0.2.9.md) / [简体中文](releases/v0.2.9.zh-CN.md)
 - [SSH 与 TCP 代理](proxying.zh-CN.md)
 - [配置参考](configuration.zh-CN.md)
 - Deployment: [简体中文](deployment.zh-CN.md) | [English](deployment.md)
@@ -24,6 +24,7 @@ These documents define current behavior and take precedence over historical plan
 
 The following documents record earlier releases or superseded implementation work. They do not define current behavior:
 
+- [v0.2.8 release notes](releases/v0.2.8.md) / [简体中文](releases/v0.2.8.zh-CN.md)
 - [v0.2.5 release notes](releases/v0.2.5.md) / [简体中文](releases/v0.2.5.zh-CN.md)
 - [v0.1.7 release notes](releases/v0.1.7.md) / [简体中文](releases/v0.1.7.zh-CN.md)
 - [v0.1.6 release notes](releases/v0.1.6.md) / [简体中文](releases/v0.1.6.zh-CN.md)

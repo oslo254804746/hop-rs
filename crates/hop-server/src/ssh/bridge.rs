@@ -48,6 +48,7 @@ pub struct ManagedBridgeOptions {
     pub channel_id: ChannelId,
     pub handle: Handle,
     pub pty: PtySize,
+    pub pty_term: String,
     pub pty_requested: bool,
     pub command: Option<Vec<u8>>,
     pub session_mode: ManagedSessionMode,
@@ -91,9 +92,11 @@ async fn run_managed_bridge(
     let session = options
         .db
         .start_session(NewSession {
+            key_id: Some(options.auth.key_id.clone()),
             key_finger: options.auth.fingerprint.clone(),
             key_name: Some(options.auth.name.clone()),
             mode: managed_session_mode(options.session_mode).to_string(),
+            asset_id: Some(options.asset.id.clone()),
             asset_name: Some(options.asset.name.clone()),
             target_host: Some(options.asset.hostname.clone()),
             target_port: Some(options.asset.port),
@@ -150,9 +153,11 @@ async fn run_managed_bridge(
                 ) => target
             }
         } else if is_exec {
-            let pty = options
-                .pty_requested
-                .then_some((options.pty.width as u32, options.pty.height as u32));
+            let pty = options.pty_requested.then_some((
+                options.pty_term.as_str(),
+                options.pty.width as u32,
+                options.pty.height as u32,
+            ));
             tokio::select! {
                 Some(()) = terminate.recv() => {
                     terminated = true;
@@ -177,6 +182,7 @@ async fn run_managed_bridge(
                     options.db.clone(),
                     options.master_key.clone(),
                     &options.asset,
+                    &options.pty_term,
                     options.pty.width as u32,
                     options.pty.height as u32,
                     options.connect_timeout,
@@ -339,6 +345,9 @@ async fn run_managed_bridge(
         }
         let should_return = channels.lock().await.contains_key(&options.channel_id);
         if should_return {
+            if let Ok(fresh_assets) = options.db.list_assets_for_key(&options.auth.key_id).await {
+                tui.set_assets(fresh_assets);
+            }
             match start_tui_session(&options.db, &options.auth, options.client_ip.clone()).await {
                 Ok(audit) => match tui.resume_after_target() {
                     Ok(output) => {

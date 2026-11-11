@@ -1,6 +1,7 @@
 mod control_api;
 mod local_cli;
 mod manifest_io;
+mod probe;
 mod ssh;
 mod transfer;
 mod tui;
@@ -10,19 +11,24 @@ use std::{
     io::{self, Read},
     path::PathBuf,
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use hop_core::{
     load_master_key, load_or_create_master_key, ApplyOptions, AssetAccessMode, AuthType, Catalog,
-    CatalogError, HopConfig, MasterKey, NewAsset, ASSET_PROTOCOL_SSH, ASSET_PROTOCOL_TCP,
+    CatalogError, HopConfig, MasterKey, NewAsset, NewAuditEvent, ASSET_PROTOCOL_SSH,
+    ASSET_PROTOCOL_TCP,
 };
 use serde::Serialize;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::transfer::{ConflictPolicy, TransferFormat, TransferKind};
+use crate::{
+    local_cli::SshConfigMode,
+    transfer::{ConflictPolicy, TransferFormat, TransferKind},
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -71,6 +77,24 @@ enum Command {
         #[command(subcommand)]
         command: AssetCommand,
     },
+    KnownHosts {
+        #[command(subcommand)]
+        command: KnownHostsCommand,
+    },
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
+    SshConfig {
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long)]
+        identity_file: Option<String>,
+        #[arg(long, value_enum, default_value = "relay")]
+        mode: SshConfigModeArg,
+    },
     Export {
         #[arg(long, value_enum, default_value = "assets")]
         kind: TransferKindArg,
@@ -88,6 +112,42 @@ enum Command {
         format: Option<TransferFormatArg>,
         #[arg(long, value_enum, default_value = "skip")]
         on_conflict: ConflictPolicyArg,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SshConfigModeArg {
+    Relay,
+    Proxyjump,
+}
+
+impl From<SshConfigModeArg> for SshConfigMode {
+    fn from(value: SshConfigModeArg) -> Self {
+        match value {
+            SshConfigModeArg::Relay => SshConfigMode::Relay,
+            SshConfigModeArg::Proxyjump => SshConfigMode::ProxyJump,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum KnownHostsCommand {
+    List,
+    Reset {
+        #[arg(long)]
+        hostname: String,
+        #[arg(long, default_value_t = 22)]
+        port: i64,
+        #[arg(long)]
+        key_type: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuditCommand {
+    List {
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
     },
 }
 
@@ -175,6 +235,9 @@ enum KeyCommand {
         id: String,
     },
     Activate {
+        id: String,
+    },
+    Delete {
         id: String,
     },
     Access {
@@ -280,15 +343,24 @@ enum AssetCommand {
         #[arg(long, default_value_t = 22)]
         port: i64,
         #[arg(long)]
+        display_name: Option<String>,
+        #[arg(long)]
         description: Option<String>,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "credential")]
         credential_id: Option<String>,
+        #[arg(long)]
+        credential: Option<String>,
     },
     List,
     Delete {
         id: String,
+    },
+    Probe {
+        target: Option<String>,
+        #[arg(long, default_value_t = 4)]
+        timeout_secs: u64,
     },
 }
 
@@ -341,6 +413,7 @@ async fn main() -> Result<()> {
                 KeyCommand::List => local_cli::list_keys(&db).await,
                 KeyCommand::Deactivate { id } => local_cli::set_key_active(&db, &id, false).await,
                 KeyCommand::Activate { id } => local_cli::set_key_active(&db, &id, true).await,
+                KeyCommand::Delete { id } => local_cli::delete_key(&db, &id).await,
                 KeyCommand::Access { command } => match command {
                     KeyAccessCommand::Show { id } => local_cli::show_key_access(&db, &id).await,
                     KeyAccessCommand::Set {
@@ -388,10 +461,24 @@ async fn main() -> Result<()> {
                     protocol,
                     hostname,
                     port,
+                    display_name,
                     description,
                     tags,
                     credential_id,
+                    credential,
                 } => {
+                    let resolved_credential_id = match (credential_id, credential) {
+                        (Some(id), None) => {
+                            Some(local_cli::resolve_credential_ref(&db, &id).await?)
+                        }
+                        (None, Some(reference)) => {
+                            Some(local_cli::resolve_credential_ref(&db, &reference).await?)
+                        }
+                        (None, None) => None,
+                        (Some(_), Some(_)) => {
+                            bail!("choose either --credential-id or --credential, not both")
+                        }
+                    };
                     local_cli::add_asset(
                         &db,
                         NewAsset {
@@ -399,16 +486,65 @@ async fn main() -> Result<()> {
                             protocol: protocol.as_str().to_string(),
                             hostname,
                             port,
+                            display_name,
                             description,
                             tags,
-                            credential_id,
+                            credential_id: resolved_credential_id,
                         },
                     )
                     .await
                 }
                 AssetCommand::List => local_cli::list_assets(&db).await,
                 AssetCommand::Delete { id } => local_cli::delete_asset(&db, &id).await,
+                AssetCommand::Probe {
+                    target,
+                    timeout_secs,
+                } => {
+                    local_cli::probe_assets(
+                        &db,
+                        target.as_deref(),
+                        Duration::from_secs(timeout_secs),
+                    )
+                    .await
+                }
             }
+        }
+        Command::KnownHosts { command } => {
+            let (db, _, _) = open_runtime(cli.config).await?;
+            match command {
+                KnownHostsCommand::List => local_cli::list_known_hosts(&db).await,
+                KnownHostsCommand::Reset {
+                    hostname,
+                    port,
+                    key_type,
+                } => local_cli::reset_known_host(&db, &hostname, port, &key_type).await,
+            }
+        }
+        Command::Audit { command } => {
+            let (db, _, _) = open_runtime(cli.config).await?;
+            match command {
+                AuditCommand::List { limit } => local_cli::list_audit_events(&db, limit).await,
+            }
+        }
+        Command::SshConfig {
+            host,
+            port,
+            identity_file,
+            mode,
+        } => {
+            let (db, config, _) = open_runtime(cli.config).await?;
+            let resolved_port = match port {
+                Some(port) => port,
+                None => config.ssh_bind_addr()?.port(),
+            };
+            local_cli::print_ssh_config(
+                &db,
+                &host,
+                resolved_port,
+                identity_file.as_deref(),
+                mode.into(),
+            )
+            .await
         }
         Command::Export {
             kind,
@@ -492,8 +628,32 @@ async fn run_apply_command(
         .apply(&manifest, &source, &master_key, options)
         .await;
     if !options.dry_run {
-        if let Err(error) = &result {
-            let _ = catalog.record_apply_failure(&source, "cli", error).await;
+        match &result {
+            Ok(summary) => {
+                let _ = catalog
+                    .record_audit_event(NewAuditEvent {
+                        actor_label: "local-cli".to_string(),
+                        action: "config.apply".to_string(),
+                        target_type: "source".to_string(),
+                        target_id: Some(source.clone()),
+                        target_label: Some(source.clone()),
+                        result: "succeeded".to_string(),
+                        source_ip: None,
+                        details_json: Some(
+                            serde_json::json!({
+                                "new_revision": summary.new_revision,
+                                "created": summary.created,
+                                "updated": summary.updated,
+                                "deleted": summary.deleted,
+                            })
+                            .to_string(),
+                        ),
+                    })
+                    .await;
+            }
+            Err(error) => {
+                let _ = catalog.record_apply_failure(&source, "cli", error).await;
+            }
         }
     }
     finish_catalog_result(result, json)
@@ -641,6 +801,30 @@ async fn import_data(
     for error in &summary.errors {
         eprintln!("import error: {error}");
     }
+    let _ = db
+        .record_audit_event(NewAuditEvent {
+            actor_label: "local-cli".to_string(),
+            action: format!("transfer.import_{}", export_kind_name(kind)),
+            target_type: export_kind_name(kind).to_string(),
+            target_id: None,
+            target_label: Some(file.display().to_string()),
+            result: if error_count == 0 {
+                "succeeded".to_string()
+            } else {
+                "partial_error".to_string()
+            },
+            source_ip: None,
+            details_json: Some(
+                serde_json::json!({
+                    "imported": summary.imported,
+                    "skipped": summary.skipped,
+                    "overwritten": summary.overwritten,
+                    "errors": error_count,
+                })
+                .to_string(),
+            ),
+        })
+        .await;
     if error_count > 0 {
         bail!("import completed with {error_count} error(s)");
     }
@@ -670,6 +854,41 @@ fn normalize_stdin_secret(value: &str) -> String {
     value.trim_end_matches(&['\r', '\n'][..]).to_string()
 }
 
+fn spawn_retention_maintenance(
+    db: Catalog,
+    retention_days: u32,
+    mut shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if retention_days == 0 {
+            return;
+        }
+        let mut ticker = tokio::time::interval(Duration::from_secs(6 * 60 * 60));
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if let Ok(pruned) = db.prune_finished_sessions(retention_days).await {
+                        if pruned > 0 {
+                            info!(pruned, "periodic maintenance removed expired finished sessions");
+                        }
+                    }
+                    if let Ok(pruned_audits) = db.prune_audit_events(retention_days).await {
+                        if pruned_audits > 0 {
+                            info!(pruned_audits, "periodic maintenance removed expired audit events");
+                        }
+                    }
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
 async fn serve(config_path: Option<PathBuf>) -> Result<()> {
     let (db, config, master_key) = open_runtime(config_path).await?;
     let ssh_bind = config.ssh_bind_addr()?;
@@ -692,14 +911,22 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
             "marked unfinished sessions from a previous process as failed"
         );
     }
+    let retention_days = config.runtime.session_retention_days;
     let pruned = db
-        .prune_finished_sessions(config.runtime.session_retention_days)
+        .prune_finished_sessions(retention_days)
         .await
         .context("apply runtime session retention")?;
-    if pruned > 0 {
-        info!(pruned, "removed expired finished sessions");
-    } else if config.runtime.session_retention_days == 0 {
-        warn!("automatic finished-session retention is disabled");
+    let pruned_audits = db
+        .prune_audit_events(retention_days)
+        .await
+        .context("apply runtime audit retention")?;
+    if pruned > 0 || pruned_audits > 0 {
+        info!(
+            pruned_sessions = pruned,
+            pruned_audits, "removed expired runtime history"
+        );
+    } else if retention_days == 0 {
+        warn!("automatic finished-session and audit retention is disabled");
     }
     let summary = apply_startup_resources(&db, &master_key, &config).await?;
     if summary.new_revision != summary.base_revision {
@@ -730,6 +957,8 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
         info!("shutdown signal received");
         let _ = shutdown_tx.send(true);
     });
+    let maintenance_task =
+        spawn_retention_maintenance(db.clone(), retention_days, shutdown_rx.clone());
     if let Some(token) = api_token {
         let api_bind = config.api_bind_addr()?;
         let api_state = control_api::ControlApiState::new(
@@ -737,7 +966,9 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
             master_key.clone(),
             token.expose(),
             active_sessions.clone(),
-        )?;
+        )?
+        .with_ssh_listen(config.listen.clone())
+        .with_probe_timeout(config.connect_timeout());
         info!("starting Hop Control API on {api_bind}");
         let cors_allowlist = config.api.cors_allowlist.clone();
         let api = control_api::serve_with_shutdown(
@@ -755,6 +986,7 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
             shutdown_rx,
         );
         let result = tokio::try_join!(api, ssh).map(|_| ());
+        maintenance_task.abort();
         shutdown_task.abort();
         result
     } else {
@@ -768,6 +1000,7 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
             shutdown_rx,
         )
         .await;
+        maintenance_task.abort();
         shutdown_task.abort();
         result
     }
@@ -1308,5 +1541,99 @@ access_keys:
     #[test]
     fn stdin_secret_strips_trailing_newlines_only() {
         assert_eq!(normalize_stdin_secret(" secret \r\n"), " secret ");
+    }
+
+    #[test]
+    fn v0_2_9_cli_commands_parse_probe_audit_known_hosts_and_ssh_config() {
+        let probe = Cli::try_parse_from([
+            "hop-server",
+            "asset",
+            "probe",
+            "hk-cn2",
+            "--timeout-secs",
+            "3",
+        ])
+        .unwrap();
+        assert!(matches!(
+            probe.command,
+            Some(Command::Asset {
+                command: AssetCommand::Probe {
+                    target: Some(_),
+                    timeout_secs: 3
+                }
+            })
+        ));
+
+        let asset_add = Cli::try_parse_from([
+            "hop-server",
+            "asset",
+            "add",
+            "--name",
+            "hk-cn2",
+            "--hostname",
+            "203.0.113.10",
+            "--display-name",
+            "HK CN2",
+            "--credential",
+            "prod-root",
+        ])
+        .unwrap();
+        assert!(matches!(
+            asset_add.command,
+            Some(Command::Asset {
+                command: AssetCommand::Add {
+                    display_name: Some(_),
+                    credential: Some(_),
+                    ..
+                }
+            })
+        ));
+
+        let ssh_cfg = Cli::try_parse_from([
+            "hop-server",
+            "ssh-config",
+            "--host",
+            "hop.example.com",
+            "--port",
+            "2222",
+            "--mode",
+            "proxyjump",
+        ])
+        .unwrap();
+        assert!(matches!(
+            ssh_cfg.command,
+            Some(Command::SshConfig {
+                port: Some(2222),
+                mode: SshConfigModeArg::Proxyjump,
+                ..
+            })
+        ));
+
+        let audit = Cli::try_parse_from(["hop-server", "audit", "list", "--limit", "50"]).unwrap();
+        assert!(matches!(
+            audit.command,
+            Some(Command::Audit {
+                command: AuditCommand::List { limit: 50 }
+            })
+        ));
+
+        let reset = Cli::try_parse_from([
+            "hop-server",
+            "known-hosts",
+            "reset",
+            "--hostname",
+            "203.0.113.10",
+            "--port",
+            "22",
+            "--key-type",
+            "ssh-ed25519",
+        ])
+        .unwrap();
+        assert!(matches!(
+            reset.command,
+            Some(Command::KnownHosts {
+                command: KnownHostsCommand::Reset { port: 22, .. }
+            })
+        ));
     }
 }

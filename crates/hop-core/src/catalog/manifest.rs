@@ -267,6 +267,8 @@ pub struct AssetSpec {
     pub port: Option<u16>,
     pub display_name: Option<String>,
     pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub credential: Option<String>,
 }
 
@@ -377,10 +379,12 @@ pub(crate) enum ResolvedAsset {
         port: u16,
         display_name: Option<String>,
         description: Option<String>,
+        tags: Vec<String>,
         credential: Option<String>,
     },
 }
 
+#[derive(Debug)]
 pub(crate) enum ResolvedAccess {
     Absent,
     Present {
@@ -483,6 +487,7 @@ fn resolve_asset(spec: &AssetSpec, path: &str) -> CatalogResult<ResolvedAsset> {
                 spec.port.is_some(),
                 spec.display_name.is_some(),
                 spec.description.is_some(),
+                !spec.tags.is_empty(),
                 spec.credential.is_some(),
             ],
         )?;
@@ -504,12 +509,20 @@ fn resolve_asset(spec: &AssetSpec, path: &str) -> CatalogResult<ResolvedAsset> {
             "tcp asset cannot reference an ssh credential",
         ));
     }
+    let tags = spec
+        .tags
+        .iter()
+        .map(|tag| tag.trim())
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_owned)
+        .collect();
     Ok(ResolvedAsset::Present {
         asset_type,
         host,
         port,
         display_name: trim_optional(spec.display_name.as_deref()),
         description: trim_optional(spec.description.as_deref()),
+        tags,
         credential,
     })
 }

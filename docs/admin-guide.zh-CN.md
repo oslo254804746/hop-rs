@@ -32,31 +32,35 @@ hop-server --config /etc/hop/hop.yaml key list
 
 ```bash
 hop-server --config /etc/hop/hop.yaml credential list
-hop-server --config /etc/hop/hop.yaml credential add-password \
-  --name nas-root --username root
+printf '%s\n' "$TARGET_PASSWORD" | hop-server --config /etc/hop/hop.yaml credential add \
+  --name nas-root --username root --auth-type password --password-stdin
 ```
 
-交互输入不会回显。配置文件中的 `password`、`private_key` 与 `passphrase` 是直接字符串，因此配置文件必须为 `0600`。
+配置文件中的 `password`、`private_key` 与 `passphrase` 是直接字符串，因此配置文件必须为 `0600`。
 
-## 资产
+## 资产、按需测延迟与 `~/.ssh/config`
 
 ```bash
-hop-server --config /etc/hop/hop.yaml asset add-ssh \
-  --name nas --host 192.168.1.20 --port 22 --credential nas-root
-hop-server --config /etc/hop/hop.yaml asset add-tcp \
-  --name metrics --host 192.168.1.30 --port 9090
+hop-server --config /etc/hop/hop.yaml asset add \
+  --name nas --protocol ssh --hostname 192.168.1.20 --port 22 \
+  --display-name "Home NAS" --tags home,storage --credential nas-root
+hop-server --config /etc/hop/hop.yaml asset add \
+  --name metrics --protocol tcp --hostname 192.168.1.30 --port 9090
 hop-server --config /etc/hop/hop.yaml asset list
+hop-server --config /etc/hop/hop.yaml asset probe
 ```
 
-用户通过资产名称连接：
+用户可直接通过资产名称连接，或一键生成终端直连 / Cursor、VS Code Remote-SSH（`ProxyJump`）的 `~/.ssh/config`：
 
 ```bash
 ssh -p 2222 nas@hop.example.com
+hop-server --config /etc/hop/hop.yaml ssh-config --host hop.example.com --mode relay
+hop-server --config /etc/hop/hop.yaml ssh-config --host hop.example.com --mode proxyjump
 ```
 
-## 会话
+## 会话与审计事件
 
-面板展示最近 100 条会话记录。只有仍为 `started` 且存在活动内存传输的会话能收到终止信号；过期记录可能返回“不活跃”，但历史记录仍保留。
+面板展示最近 100 条会话记录及审计事件流水（`GET /api/v1/audit-events` 或 `hop-server audit list`）。只有仍为 `started` 且存在活动内存传输的会话能收到终止信号；过期记录可能返回“不活跃”，但历史记录仍保留。已结束会话和审计事件按 `runtime.session_retention_days` 在启动时及运行期间每 6 小时自动清理。
 
 Hop 启动时，会将上一个进程遗留的 `started` 会话标记为 `failed`，并写入
 服务重启导致会话未完成的原因。该恢复发生在 SSH 和 Control API 监听器打开
@@ -68,7 +72,7 @@ Hop 启动时，会将上一个进程遗留的 `started` 会话标记为 `failed
 
 Hop 首次连接 SSH 目标时通过 TOFU 保存目标的主机密钥指纹，之后每次托管连接都会核验该指纹。目标机器重装或有意轮换 SSH Host Key 后，原记录会阻止连接。
 
-先通过目标机器的独立可信通道核实新指纹，再在面板打开“主机信任”，选择准确的主机、端口和密钥算法，然后使用“重置信任”。服务端要求请求包含显式确认；删除后，下一次托管连接会自动建立新的 TOFU 指纹。
+先通过目标机器的独立可信通道核实新指纹，再在面板打开“主机信任”（或执行 `hop-server known-hosts reset --hostname <host> --port <port> --key-type <type>`），选择准确的主机、端口和密钥算法，然后使用“重置信任”。服务端要求请求包含显式确认；删除后，下一次托管连接会自动建立新的 TOFU 指纹。
 
 对应 Control API：
 

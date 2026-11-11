@@ -1,6 +1,6 @@
 # Hop
 
-Hop 是一个轻量、自托管的 SSH 跳板机：入口只接受已登记的公钥，目标凭据加密保存，并提供官方网页面板。
+Hop 是一个约 3.7 MB、零目标端 Agent 的自托管 SSH 中继与凭据保险库：入口只接受已登记的公钥，目标 VPS 凭据加密保存，内置按需协议延迟探测、审计流水与 `~/.ssh/config` 生成器，适合个人开发者、多机（Multi-VPS）运维及 Cursor / VS Code Remote-SSH 工作流。
 
 ## 快速开始：网页面板（推荐）
 
@@ -19,7 +19,7 @@ docker compose up -d
 - 面板：`http://localhost:8080`
 - SSH：`localhost:2222`
 
-首次打开面板时，只需输入 `hop.yaml` 中的网页管理 Token。面板与后端使用同源 `/api/v1`，后端管理端口不会发布到宿主机。初始 Catalog 为空，可直接在网页中添加入口公钥、目标凭据和资产；目标重装或 Host Key 轮换后，也可在“主机信任”中核实并重置 Known Hosts 记录。
+首次打开面板时，只需输入 `hop.yaml` 中的网页管理 Token。面板与后端使用同源 `/api/v1`，后端管理端口不会发布到宿主机。初始 Catalog 为空，可直接在网页中添加入口公钥、目标凭据和资产，支持一键探测 SSH/TCP 协议握手延迟、查看审计事件、导出 `~/.ssh/config`，以及在目标重装或 Host Key 轮换后核实并重置 Known Hosts 记录。
 
 Compose 始终只读挂载当前目录中的一份 `hop.yaml`。`examples/panel-first.yaml` 和 `examples/config-first.yaml` 只是二选一的起始模板，不会同时加载、继承或合并。
 
@@ -34,7 +34,7 @@ cargo run --release -p hop-server -- --config ./hop.yaml config validate
 cargo run --release -p hop-server -- --config ./hop.yaml serve
 ```
 
-一份 `hop.yaml` 同时包含监听地址、数据目录、网页管理 Token、SSH 运行参数、目标凭据、资产和入口公钥。启动时 Hop 先用内部原子 Apply 引擎应用文件中的资源；任何错误都会阻止监听器启动，不会留下半套 Catalog。
+一份 `hop.yaml` 同时包含监听地址、数据目录、网页管理 Token、SSH 运行参数、目标凭据、资产（含 `tags` 与 `display_name`）和入口公钥。启动时 Hop 先用内部原子 Apply 引擎应用文件中的资源；任何错误都会阻止监听器启动，不会留下半套 Catalog。
 
 ## 配置文件与示例
 
@@ -52,10 +52,18 @@ cargo run --release -p hop-server -- --config ./hop.yaml serve
 - `hop.yaml` 声明的资源归属为 `config`，面板在显示操作按钮前就将其标为只读。
 - 修改配置管理的资源后重启 Hop；启动 Apply 会更新它们，并删除配置中已移除的同归属资源，不影响本地资源。
 
-## 连接
+## 连接与本地接入
 
 ```bash
+# 直连托管 SSH 资产（Hop 自动使用保险库凭据登录目标机）
 ssh -p 2222 <asset-name>@<hop-host>
+
+# 打开交互式 TUI 选择器（支持 / 搜索、#标签过滤、r 键测延迟）
+ssh -p 2222 menu@<hop-host>
+
+# 生成终端直连或 Cursor / VS Code Remote-SSH (ProxyJump) 的 ~/.ssh/config
+hop-server --config ./hop.yaml ssh-config --host <hop-host> --mode relay
+hop-server --config ./hop.yaml ssh-config --host <hop-host> --mode proxyjump
 ```
 
 Hop 的入口 SSH 只宣告 `publickey` 认证。未登记的公钥会直接得到 `Permission denied (publickey)`，不会回退到密码提示。

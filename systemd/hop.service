@@ -8,7 +8,7 @@ Type=simple
 User=hop
 Group=hop
 WorkingDirectory=/var/lib/hop
-ExecStart=/usr/local/bin/hop-server --config /etc/hop/config.toml serve
+ExecStart=/usr/local/bin/hop-server --config /etc/hop/hop.yaml serve
 Restart=on-failure
 RestartSec=2
 Environment=RUST_LOG=info

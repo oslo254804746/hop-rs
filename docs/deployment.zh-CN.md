@@ -52,8 +52,8 @@ docker compose up -d
 - 两个镜像使用同一个 `HOP_VERSION` 标签，避免 API/面板版本漂移。
 
 ```bash
-HOP_VERSION=v0.2.8 docker compose pull
-HOP_VERSION=v0.2.8 docker compose up -d
+HOP_VERSION=v0.2.9 docker compose pull
+HOP_VERSION=v0.2.9 docker compose up -d
 ```
 
 升级前备份配置与数据卷。回滚时同时回滚 hop 与 panel 镜像。
@@ -78,7 +78,7 @@ docker run -d --name hop --restart unless-stopped \
   -p 2222:2222 \
   -v "$PWD/hop.yaml:/etc/hop/hop.yaml:ro" \
   -v hop-data:/data \
-  ghcr.io/oslo254804746/hop-rs:v0.2.8 \
+  ghcr.io/oslo254804746/hop-rs:v0.2.9 \
   hop-server --config /etc/hop/hop.yaml serve
 ```
 

@@ -90,6 +90,7 @@ impl From<AssetTransferRow> for NewAsset {
             protocol: row.protocol,
             hostname: row.hostname,
             port: row.port,
+            display_name: None,
             description: row.description,
             tags: row.tags,
             credential_id: row.credential_id,
@@ -172,7 +173,9 @@ pub async fn import_assets(
                     summary.record_error(format!("asset already exists: {}", row.name))
                 }
                 ConflictPolicy::Overwrite => {
-                    db.update_asset(&existing.id, row.into()).await?;
+                    let mut updated: NewAsset = row.into();
+                    updated.display_name = existing.display_name;
+                    db.update_asset(&existing.id, updated).await?;
                     summary.record_overwritten();
                 }
             },
@@ -485,11 +488,13 @@ mod tests {
             protocol: hop_core::ASSET_PROTOCOL_SSH.to_string(),
             hostname: hostname.to_string(),
             port: 22,
+            display_name: None,
             description: None,
             tags: tags.iter().map(|tag| tag.to_string()).collect(),
             credential_id: None,
             created_at: None,
             updated_at: None,
+            health: hop_core::AssetHealth::unknown(name),
         }
     }
 

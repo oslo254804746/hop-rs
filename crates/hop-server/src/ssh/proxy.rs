@@ -139,6 +139,7 @@ pub async fn bridge_direct_tcpip(
             &db,
             &auth,
             "tcp-forward",
+            Some(asset.id.clone()),
             Some(asset.name.clone()),
             Some(asset.hostname.clone()),
             Some(asset.port),
@@ -149,9 +150,11 @@ pub async fn bridge_direct_tcpip(
     }
     let session = db
         .start_session(NewSession {
+            key_id: Some(auth.key_id.clone()),
             key_finger: auth.fingerprint.clone(),
             key_name: Some(auth.name.clone()),
             mode: "tcp-forward".to_string(),
+            asset_id: Some(asset.id.clone()),
             asset_name: Some(asset.name.clone()),
             target_host: Some(asset.hostname.clone()),
             target_port: Some(asset.port),

@@ -131,7 +131,7 @@ api:
 |---|---|---|
 | `temp_dir` | `/tmp/hop` | 临时文件目录 |
 | `log_level` | `info` | 日志级别 |
-| `session_retention_days` | `30` | 会话记录保留天数 |
+| `session_retention_days` | `30` | 已结束会话与审计事件保留天数（`0` 表示禁用自动清理） |
 
 ## `credentials`
 
@@ -148,6 +148,7 @@ api:
 | `port` | SSH 可选、TCP 必需 | SSH 默认 22 |
 | `display_name` | 可选 | 展示名称 |
 | `description` | 可选 | 描述 |
+| `tags` | 可选 | 字符串数组标签（如 `[hk, cn2]`），用于面板分组和 TUI `#标签` 过滤 |
 | `credential` | 可选 | 必须引用同文件 `credentials` 中的名称；TCP 不允许凭据 |
 
 ## `access_keys`
