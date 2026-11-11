@@ -11,6 +11,8 @@ credentials:
 assets:
   nas:
     host: 192.168.1.20
+    display_name: Home NAS
+    tags: [home, storage]
     credential: nas-root
 
 access_keys:

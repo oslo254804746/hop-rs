@@ -10,7 +10,7 @@ use ratatui::{
 use super::app::{AssetListItem, TuiApp};
 
 pub fn draw(frame: &mut Frame<'_>, app: &TuiApp) {
-    let status_height = if app.searching || !app.query.is_empty() {
+    let status_height = if app.searching || !app.query.is_empty() || app.status_notice.is_some() {
         1
     } else {
         0
@@ -87,20 +87,30 @@ fn draw_separator(frame: &mut Frame<'_>, area: Rect) {
 
 fn draw_status(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
     let available = area.width.saturating_sub(4) as usize;
-    let content = truncate_to_width(&app.query, available);
     let line = if app.searching {
+        let content = truncate_to_width(&app.query, available);
         Line::from(vec![
             Span::raw("  "),
             Span::styled("›", Style::default().fg(Color::Yellow)),
             Span::raw(" "),
             Span::raw(content),
         ])
-    } else {
+    } else if !app.query.is_empty() {
+        let content = truncate_to_width(&app.query, available);
         Line::from(vec![
             Span::raw("  "),
             Span::styled("filter", Style::default().fg(Color::Yellow)),
             Span::raw(" "),
             Span::raw(content),
+        ])
+    } else {
+        let notice = app.status_notice.as_deref().unwrap_or("");
+        let content = truncate_to_width(notice, available);
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("•", Style::default().fg(Color::Cyan)),
+            Span::raw(" "),
+            Span::styled(content, Style::default().fg(Color::Gray)),
         ])
     };
     frame.render_widget(Paragraph::new(line), area);
@@ -186,6 +196,18 @@ fn draw_empty_assets(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
+fn health_badge(asset: &Asset) -> (String, Color) {
+    match asset.health.status.as_str() {
+        "healthy" => match asset.health.latency_ms {
+            Some(ms) if ms < 120 => (format!("{ms}ms"), Color::Green),
+            Some(ms) => (format!("{ms}ms"), Color::Yellow),
+            None => ("ok".to_string(), Color::Green),
+        },
+        "failed" => ("ERR".to_string(), Color::Red),
+        _ => (String::new(), Color::DarkGray),
+    }
+}
+
 fn asset_lines(asset: &Asset, selected: bool, width: u16) -> (Line<'static>, Line<'static>) {
     let marker = if selected { "▸" } else { " " };
     let credential = if asset.credential_id.is_some() {
@@ -193,6 +215,7 @@ fn asset_lines(asset: &Asset, selected: bool, width: u16) -> (Line<'static>, Lin
     } else {
         "proxy-only"
     };
+    let (health_text, health_color) = health_badge(asset);
     let addr = format!("{}:{}", asset.hostname, asset.port);
     let tags = if asset.tags.is_empty() {
         String::new()
@@ -206,19 +229,30 @@ fn asset_lines(asset: &Asset, selected: bool, width: u16) -> (Line<'static>, Lin
         Style::default()
     };
 
-    // Line 1: "  ▸ name                    credential"
+    // Line 1: "  ▸ name               14ms managed"
     let line1_width = width as usize;
     let prefix_width = 4;
     let right_margin = 2;
-    let right = truncate_to_width(
-        credential,
-        line1_width
-            .saturating_sub(prefix_width)
-            .saturating_sub(right_margin),
-    );
-    let right_width = display_width(&right) + right_margin;
+    let max_right = line1_width
+        .saturating_sub(prefix_width)
+        .saturating_sub(right_margin);
+    let cred_str = truncate_to_width(credential, max_right);
+    let cred_width = display_width(&cred_str);
+    let (health_str, health_sep) =
+        if !health_text.is_empty() && cred_width + 2 + display_width(&health_text) <= max_right {
+            (health_text, "  ")
+        } else {
+            (String::new(), "")
+        };
+    let right_width = display_width(&health_str) + health_sep.len() + cred_width + right_margin;
+    let display_label = asset
+        .display_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|label| format!("{} ({label})", asset.name))
+        .unwrap_or_else(|| asset.name.clone());
     let name = truncate_to_width(
-        &asset.name,
+        &display_label,
         line1_width.saturating_sub(prefix_width + right_width),
     );
     let gap1 = line1_width.saturating_sub(prefix_width + display_width(&name) + right_width);
@@ -235,15 +269,20 @@ fn asset_lines(asset: &Asset, selected: bool, width: u16) -> (Line<'static>, Lin
     };
     let cred_style = bg;
 
-    let line1 = Line::from(vec![
+    let mut line1_spans = vec![
         Span::styled("  ", bg),
         Span::styled(marker, marker_style),
         Span::styled(" ", bg),
         Span::styled(name, name_style),
         Span::styled(" ".repeat(gap1), bg),
-        Span::styled(right, cred_style),
-        Span::styled("  ", bg),
-    ]);
+    ];
+    if !health_str.is_empty() {
+        line1_spans.push(Span::styled(health_str, bg.fg(health_color)));
+        line1_spans.push(Span::styled(health_sep, bg));
+    }
+    line1_spans.push(Span::styled(cred_str, cred_style));
+    line1_spans.push(Span::styled("  ", bg));
+    let line1 = Line::from(line1_spans);
 
     // Line 2: "    host:port                     [tags]"
     let line2_width = width as usize;
@@ -291,6 +330,10 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
         Span::styled("↑↓", key_style),
         Span::styled(" select  ", desc_style),
     ];
+    if !app.searching {
+        spans.push(Span::styled("r", key_style));
+        spans.push(Span::styled(" probe  ", desc_style));
+    }
     if app.searching {
         spans.push(Span::styled("Esc", key_style));
         spans.push(Span::styled(" close  ", desc_style));
@@ -352,11 +395,13 @@ mod tests {
             protocol: hop_core::ASSET_PROTOCOL_SSH.to_string(),
             hostname: "127.0.0.1".to_string(),
             port: 22,
+            display_name: None,
             description: None,
             tags: vec![],
             credential_id: None,
             created_at: None,
             updated_at: None,
+            health: hop_core::AssetHealth::unknown(name),
         }
     }
 

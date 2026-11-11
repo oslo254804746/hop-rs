@@ -6,9 +6,9 @@ use super::Catalog;
 use crate::{
     models::{AssetRow, AuthorizedKeyRow},
     new_id, protocol_supports_managed_credentials, validate_asset_protocol,
-    validate_credential_material, validate_tcp_port, Asset, AssetAccessMode, AuthorizedKey,
-    Credential, HopCoreError, KnownHost, NewAsset, NewAuthorizedKey, NewCredential, NewKnownHost,
-    NewSession, Result, Session,
+    validate_credential_material, validate_tcp_port, Asset, AssetAccessMode, AuditEvent,
+    AuthorizedKey, Credential, HopCoreError, KnownHost, NewAsset, NewAuditEvent, NewAuthorizedKey,
+    NewCredential, NewKnownHost, NewSession, Result, Session,
 };
 
 impl Catalog {
@@ -330,14 +330,14 @@ impl Catalog {
 
     pub async fn list_assets(&self) -> Result<Vec<Asset>> {
         asset_rows(
-            sqlx::query_as::<_, AssetRow>(&asset_select("ORDER BY name ASC"))
+            sqlx::query_as::<_, AssetRow>(&asset_select("ORDER BY a.name ASC"))
                 .fetch_all(&self.pool)
                 .await?,
         )
     }
 
     pub async fn get_asset_by_id(&self, id: &str) -> Result<Option<Asset>> {
-        let row = sqlx::query_as::<_, AssetRow>(&asset_select("WHERE id = ?1"))
+        let row = sqlx::query_as::<_, AssetRow>(&asset_select("WHERE a.id = ?1"))
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
@@ -345,7 +345,7 @@ impl Catalog {
     }
 
     pub async fn get_asset_by_name(&self, name: &str) -> Result<Option<Asset>> {
-        let row = sqlx::query_as::<_, AssetRow>(&asset_select("WHERE name = ?1"))
+        let row = sqlx::query_as::<_, AssetRow>(&asset_select("WHERE a.name = ?1"))
             .bind(name)
             .fetch_optional(&self.pool)
             .await?;
@@ -353,19 +353,15 @@ impl Catalog {
     }
 
     pub async fn list_assets_for_key(&self, key_id: &str) -> Result<Vec<Asset>> {
-        let rows = sqlx::query_as::<_, AssetRow>(
+        let rows = sqlx::query_as::<_, AssetRow>(&asset_select(
             r#"
-            SELECT a.id, a.name, a.asset_type AS protocol, a.host AS hostname,
-                   a.port, a.description, a.tags_json AS tags, a.credential_id,
-                   a.created_at, a.updated_at
-            FROM assets a
             JOIN access_keys k ON k.id = ?1 AND k.enabled = 1
             WHERE k.access_mode = 'all'
                OR EXISTS (SELECT 1 FROM access_key_assets aka
                           WHERE aka.key_id = k.id AND aka.asset_id = a.id)
             ORDER BY a.name ASC
             "#,
-        )
+        ))
         .bind(key_id)
         .fetch_all(&self.pool)
         .await?;
@@ -377,12 +373,8 @@ impl Catalog {
         key_id: &str,
         target: &str,
     ) -> Result<Option<Asset>> {
-        let row = sqlx::query_as::<_, AssetRow>(
+        let row = sqlx::query_as::<_, AssetRow>(&asset_select(
             r#"
-            SELECT a.id, a.name, a.asset_type AS protocol, a.host AS hostname,
-                   a.port, a.description, a.tags_json AS tags, a.credential_id,
-                   a.created_at, a.updated_at
-            FROM assets a
             JOIN access_keys k ON k.id = ?1 AND k.enabled = 1
             WHERE (k.access_mode = 'all' OR EXISTS (
                     SELECT 1 FROM access_key_assets aka
@@ -391,7 +383,7 @@ impl Catalog {
             ORDER BY CASE WHEN a.name = ?2 THEN 0 ELSE 1 END, a.name ASC
             LIMIT 1
             "#,
-        )
+        ))
         .bind(key_id)
         .bind(target)
         .fetch_optional(&self.pool)
@@ -426,21 +418,17 @@ impl Catalog {
         let normalized_name = host_to_connect
             .strip_suffix(".hop")
             .unwrap_or(host_to_connect);
-        let row = sqlx::query_as::<_, AssetRow>(
+        let row = sqlx::query_as::<_, AssetRow>(&asset_select(
             r#"
-            SELECT a.id, a.name, a.asset_type AS protocol, a.host AS hostname,
-                   a.port, a.description, a.tags_json AS tags, a.credential_id,
-                   a.created_at, a.updated_at
-            FROM assets a
             JOIN access_keys k ON k.id = ?1 AND k.enabled = 1
             WHERE (k.access_mode = 'all' OR EXISTS (
                     SELECT 1 FROM access_key_assets aka
                     WHERE aka.key_id = k.id AND aka.asset_id = a.id))
-              AND ((a.host = ?2 AND a.port = ?3) OR a.name = ?4)
+              AND ((a.host = ?2 AND a.port = ?3) OR (a.name = ?4 AND a.port = ?3))
             ORDER BY CASE WHEN a.host = ?2 AND a.port = ?3 THEN 0 ELSE 1 END, a.name ASC
             LIMIT 1
             "#,
-        )
+        ))
         .bind(key_id)
         .bind(host_to_connect)
         .bind(port)
@@ -455,14 +443,16 @@ impl Catalog {
         sqlx::query(
             r#"
             INSERT INTO sessions
-                (id, key_finger, key_name, mode, asset_name, target_host, target_port, client_ip, status)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'started')
+                (id, key_id, key_finger, key_name, mode, asset_id, asset_name, target_host, target_port, client_ip, status)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'started')
             "#,
         )
         .bind(&id)
+        .bind(session.key_id)
         .bind(session.key_finger)
         .bind(session.key_name)
         .bind(session.mode)
+        .bind(session.asset_id)
         .bind(session.asset_name)
         .bind(session.target_host)
         .bind(session.target_port)
@@ -586,11 +576,63 @@ impl Catalog {
         .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    pub async fn record_audit_event(&self, event: NewAuditEvent) -> Result<AuditEvent> {
+        let id = new_id();
+        sqlx::query(
+            r#"
+            INSERT INTO audit_events
+                (id, actor_label, action, target_type, target_id, target_label, result, source_ip, details_json)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+        )
+        .bind(&id)
+        .bind(event.actor_label)
+        .bind(event.action)
+        .bind(event.target_type)
+        .bind(event.target_id)
+        .bind(event.target_label)
+        .bind(event.result)
+        .bind(event.source_ip)
+        .bind(event.details_json)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query_as::<_, AuditEvent>(&audit_event_select("WHERE id = ?1"))
+            .bind(&id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(row_not_found)
+    }
+
+    pub async fn list_audit_events(&self, limit: i64) -> Result<Vec<AuditEvent>> {
+        sqlx::query_as::<_, AuditEvent>(&audit_event_select(
+            "ORDER BY occurred_at DESC, rowid DESC LIMIT ?1",
+        ))
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Remove audit event records older than the configured retention window.
+    /// A value of zero disables automatic cleanup.
+    pub async fn prune_audit_events(&self, retention_days: u32) -> Result<u64> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let result = sqlx::query(
+            "DELETE FROM audit_events WHERE occurred_at < datetime('now', '-' || ?1 || ' days')",
+        )
+        .bind(i64::from(retention_days))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
 }
 
 fn asset_select(suffix: &str) -> String {
     format!(
-        "SELECT id, name, asset_type AS protocol, host AS hostname, port, description, tags_json AS tags, credential_id, created_at, updated_at FROM assets {suffix}"
+        "SELECT a.id, a.name, a.asset_type AS protocol, a.host AS hostname, a.port, a.display_name, a.description, a.tags_json AS tags, a.credential_id, a.created_at, a.updated_at, COALESCE(h.status, 'unknown') AS health_status, h.checked_at AS health_checked_at, h.last_success_at AS health_last_success_at, h.latency_ms AS health_latency_ms, h.error_code AS health_error_code, h.error_message AS health_error_message FROM assets a LEFT JOIN asset_health h ON h.asset_id = a.id {suffix}"
     )
 }
 
@@ -602,7 +644,13 @@ fn credential_select(suffix: &str) -> String {
 
 fn session_select(suffix: &str) -> String {
     format!(
-        "SELECT id, key_finger, key_name, mode, asset_name, target_host, target_port, client_ip, status, error, started_at, ended_at FROM sessions {suffix}"
+        "SELECT id, key_id, key_finger, key_name, mode, asset_id, asset_name, target_host, target_port, client_ip, status, error, started_at, ended_at FROM sessions {suffix}"
+    )
+}
+
+fn audit_event_select(suffix: &str) -> String {
+    format!(
+        "SELECT id, occurred_at, actor_label, action, target_type, target_id, target_label, result, source_ip, details_json FROM audit_events {suffix}"
     )
 }
 
@@ -625,6 +673,14 @@ async fn write_asset(
 ) -> Result<()> {
     let protocol = validate_asset_protocol(&asset.protocol)?;
     let port = validate_tcp_port(asset.port)?;
+    let display_name = asset
+        .display_name
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let description = asset
+        .description
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
     let tags = serde_json::to_string(&asset.tags)?;
     let credential_id = if protocol_supports_managed_credentials(&protocol) {
         asset.credential_id
@@ -635,15 +691,16 @@ async fn write_asset(
         sqlx::query(
             r#"
             UPDATE assets SET name = ?1, asset_type = ?2, host = ?3,
-                port = ?4, description = ?5, tags_json = ?6, credential_id = ?7,
-                updated_at = CURRENT_TIMESTAMP WHERE id = ?8
+                port = ?4, display_name = ?5, description = ?6, tags_json = ?7, credential_id = ?8,
+                updated_at = CURRENT_TIMESTAMP WHERE id = ?9
             "#,
         )
         .bind(asset.name)
         .bind(protocol)
         .bind(asset.hostname)
         .bind(i64::from(port))
-        .bind(asset.description)
+        .bind(display_name)
+        .bind(description)
         .bind(tags)
         .bind(credential_id)
         .bind(id)
@@ -653,8 +710,8 @@ async fn write_asset(
         sqlx::query(
             r#"
             INSERT INTO assets
-                (id, name, asset_type, host, port, description, tags_json, credential_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                (id, name, asset_type, host, port, display_name, description, tags_json, credential_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             "#,
         )
         .bind(id)
@@ -662,7 +719,8 @@ async fn write_asset(
         .bind(protocol)
         .bind(asset.hostname)
         .bind(i64::from(port))
-        .bind(asset.description)
+        .bind(display_name)
+        .bind(description)
         .bind(tags)
         .bind(credential_id)
         .execute(&mut **transaction)
@@ -902,8 +960,9 @@ mod tests {
                 protocol: ASSET_PROTOCOL_TCP.to_string(),
                 hostname: "192.0.2.20".to_string(),
                 port: 3389,
+                display_name: Some("HK Desktop".to_string()),
                 description: None,
-                tags: Vec::new(),
+                tags: vec!["hk".to_string()],
                 credential_id: None,
             })
             .await
@@ -914,6 +973,7 @@ mod tests {
                 protocol: ASSET_PROTOCOL_TCP.to_string(),
                 hostname: "192.0.2.30".to_string(),
                 port: 5432,
+                display_name: None,
                 description: None,
                 tags: Vec::new(),
                 credential_id: None,
@@ -996,6 +1056,11 @@ mod tests {
             .unwrap()
             .is_some());
         assert!(catalog
+            .find_proxy_asset_for_key(&restricted.id, "desktop.hop", 22)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(catalog
             .find_proxy_asset_for_key(&restricted.id, "192.0.2.30", 5432)
             .await
             .unwrap()
@@ -1022,12 +1087,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn asset_health_and_audit_events_round_trip_and_prune() {
+        let catalog = Catalog::in_memory().await.unwrap();
+        let asset = catalog
+            .add_asset(NewAsset::new("hk-edge", "192.0.2.88", 22))
+            .await
+            .unwrap();
+        assert_eq!(asset.health.status, "unknown");
+        assert_eq!(asset.health.latency_ms, None);
+
+        catalog
+            .record_asset_health_success(&asset.id, Some(14))
+            .await
+            .unwrap();
+        let healthy = catalog.get_asset_by_id(&asset.id).await.unwrap().unwrap();
+        assert_eq!(healthy.health.status, "healthy");
+        assert_eq!(healthy.health.latency_ms, Some(14));
+        let first_success = healthy.health.last_success_at.clone();
+        assert!(first_success.is_some());
+
+        catalog
+            .record_asset_health_failure(&asset.id, Some("timeout"), Some("connect timed out"))
+            .await
+            .unwrap();
+        let failed = catalog.get_asset_by_id(&asset.id).await.unwrap().unwrap();
+        assert_eq!(failed.health.status, "failed");
+        assert_eq!(failed.health.last_success_at, first_success);
+        assert_eq!(failed.health.error_code.as_deref(), Some("timeout"));
+
+        let old_event = catalog
+            .record_audit_event(NewAuditEvent {
+                actor_label: "local-cli".to_string(),
+                action: "asset.create".to_string(),
+                target_type: "asset".to_string(),
+                target_id: Some(asset.id.clone()),
+                target_label: Some(asset.name.clone()),
+                result: "success".to_string(),
+                source_ip: None,
+                details_json: None,
+            })
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE audit_events SET occurred_at = datetime('now', '-45 days') WHERE id = ?1",
+        )
+        .bind(&old_event.id)
+        .execute(catalog.pool())
+        .await
+        .unwrap();
+        let recent_event = catalog
+            .record_audit_event(NewAuditEvent {
+                actor_label: "api-token".to_string(),
+                action: "asset.probe".to_string(),
+                target_type: "asset".to_string(),
+                target_id: Some(asset.id.clone()),
+                target_label: Some(asset.name.clone()),
+                result: "success".to_string(),
+                source_ip: Some("127.0.0.1".to_string()),
+                details_json: Some(r#"{"latency_ms":14}"#.to_string()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(catalog.list_audit_events(10).await.unwrap().len(), 2);
+        assert_eq!(catalog.prune_audit_events(30).await.unwrap(), 1);
+        let remaining = catalog.list_audit_events(10).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, recent_event.id);
+    }
+
+    #[tokio::test]
     async fn finished_session_retention_preserves_active_and_recent_records() {
         let catalog = Catalog::in_memory().await.unwrap();
         let session = || NewSession {
+            key_id: None,
             key_finger: "SHA256:test".to_string(),
             key_name: Some("laptop".to_string()),
             mode: "direct".to_string(),
+            asset_id: None,
             asset_name: Some("server".to_string()),
             target_host: Some("192.0.2.10".to_string()),
             target_port: Some(22),
@@ -1061,9 +1198,11 @@ mod tests {
     async fn startup_recovery_marks_only_unfinished_started_sessions_failed() {
         let catalog = Catalog::in_memory().await.unwrap();
         let session = || NewSession {
+            key_id: None,
             key_finger: "SHA256:test".to_string(),
             key_name: Some("laptop".to_string()),
             mode: "direct".to_string(),
+            asset_id: None,
             asset_name: Some("server".to_string()),
             target_host: Some("192.0.2.10".to_string()),
             target_port: Some(22),

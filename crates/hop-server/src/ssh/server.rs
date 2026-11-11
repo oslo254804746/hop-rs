@@ -233,6 +233,7 @@ impl HopSshServer {
             client_ip: Some(peer_addr.to_string()),
             channels: Arc::new(Mutex::new(HashMap::new())),
             ptys: HashMap::new(),
+            pty_terms: HashMap::new(),
         }
     }
 }
@@ -247,6 +248,7 @@ pub struct HopSshHandler {
     client_ip: Option<String>,
     channels: SharedChannels,
     ptys: HashMap<ChannelId, PtySize>,
+    pty_terms: HashMap<ChannelId, String>,
 }
 
 impl HopSshHandler {
@@ -256,6 +258,13 @@ impl HopSshHandler {
 
     fn pty_size(&self, channel: ChannelId) -> PtySize {
         self.ptys.get(&channel).copied().unwrap_or_default()
+    }
+
+    fn pty_term(&self, channel: ChannelId) -> String {
+        self.pty_terms
+            .get(&channel)
+            .cloned()
+            .unwrap_or_else(|| "xterm-256color".to_string())
     }
 
     async fn start_tui_session(&self) -> Result<ActiveTuiSession> {
@@ -278,8 +287,8 @@ impl HopSshHandler {
         else {
             return Ok(None);
         };
-        if asset.credential_id.is_none() {
-            bail!("direct target has no managed credential");
+        if !accepts_managed_ssh_asset(Some(&asset)) {
+            return Ok(None);
         }
         Ok(Some(asset))
     }
@@ -299,6 +308,7 @@ impl HopSshHandler {
                 &self.db,
                 &auth,
                 managed_session_mode_name(mode),
+                Some(asset.id.clone()),
                 Some(asset.name.clone()),
                 Some(asset.hostname.clone()),
                 Some(asset.port),
@@ -317,6 +327,7 @@ impl HopSshHandler {
             channel_id,
             handle,
             pty: self.pty_size(channel_id),
+            pty_term: self.pty_term(channel_id),
             pty_requested: self.ptys.contains_key(&channel_id),
             command,
             session_mode: mode,
@@ -352,10 +363,12 @@ fn managed_session_mode_name(mode: ManagedSessionMode) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn audit_denied_attempt(
     db: &Catalog,
     auth: &AuthInfo,
     mode: &str,
+    asset_id: Option<String>,
     asset_name: Option<String>,
     target_host: Option<String>,
     target_port: Option<i64>,
@@ -363,9 +376,11 @@ pub(crate) async fn audit_denied_attempt(
 ) {
     if let Ok(session) = db
         .start_session(NewSession {
+            key_id: Some(auth.key_id.clone()),
             key_finger: auth.fingerprint.clone(),
             key_name: Some(auth.name.clone()),
             mode: mode.to_string(),
+            asset_id,
             asset_name,
             target_host,
             target_port,
@@ -386,9 +401,11 @@ pub(crate) async fn start_tui_session(
 ) -> Result<ActiveTuiSession> {
     let session = db
         .start_session(NewSession {
+            key_id: Some(auth.key_id.clone()),
             key_finger: auth.fingerprint.clone(),
             key_name: Some(auth.name.clone()),
             mode: "tui".to_string(),
+            asset_id: None,
             asset_name: None,
             target_host: None,
             target_port: None,
@@ -460,6 +477,9 @@ fn parse_direct_username(user: &str) -> Result<Option<DirectLoginRequest>> {
     }
     if target.contains(char::is_whitespace) {
         bail!("direct username cannot contain whitespace");
+    }
+    if target.eq_ignore_ascii_case("menu") || target.eq_ignore_ascii_case("+tui") {
+        return Ok(None);
     }
     Ok(Some(DirectLoginRequest {
         target: target.to_string(),
@@ -589,6 +609,7 @@ impl server::Handler for HopSshHandler {
                 &auth,
                 "tcp-forward",
                 None,
+                None,
                 Some(host_to_connect.to_string()),
                 Some(i64::from(port_to_connect)),
                 self.client_ip.clone(),
@@ -625,7 +646,7 @@ impl server::Handler for HopSshHandler {
     async fn pty_request(
         &mut self,
         channel: ChannelId,
-        _term: &str,
+        term: &str,
         col_width: u32,
         row_height: u32,
         _pix_width: u32,
@@ -640,6 +661,8 @@ impl server::Handler for HopSshHandler {
                 height: row_height as u16,
             },
         );
+        self.pty_terms
+            .insert(channel, super::client::sanitize_pty_term(term));
         session.channel_success(channel)?;
         Ok(())
     }
@@ -756,6 +779,7 @@ impl server::Handler for HopSshHandler {
     ) -> Result<(), Self::Error> {
         let mut connect: Option<(Asset, TuiResources)> = None;
         let mut finish_tui: Option<(ActiveTuiSession, &'static str, Option<String>)> = None;
+        let mut probe_tui = false;
         let mut close = false;
         let mut output = Vec::new();
         {
@@ -785,6 +809,13 @@ impl server::Handler for HopSshHandler {
                     }
                     close = true;
                 }
+                Some(TuiAction::ProbeAll) => {
+                    if let Some(ChannelState::Tui { tui, .. }) = channels.get_mut(&channel) {
+                        tui.app.status_notice = Some("Probing authorized assets...".to_string());
+                        output.append(&mut tui.render()?);
+                        probe_tui = true;
+                    }
+                }
                 Some(TuiAction::Connect(asset)) => {
                     if asset.credential_id.is_none() {
                         output.extend_from_slice(
@@ -801,6 +832,39 @@ impl server::Handler for HopSshHandler {
             }
         }
         send_tui_output(session, channel, output)?;
+        if probe_tui {
+            if let Some(auth) = self.auth_info() {
+                let db = self.db.clone();
+                let channels = self.channels.clone();
+                let handle = session.handle();
+                let timeout = self.config.connect_timeout();
+                tokio::spawn(async move {
+                    let Ok(assets) = db.list_assets_for_key(&auth.key_id).await else {
+                        return;
+                    };
+                    let count = assets.len();
+                    let _ = crate::probe::probe_assets(&db, &assets, timeout).await;
+                    let Ok(fresh) = db.list_assets_for_key(&auth.key_id).await else {
+                        return;
+                    };
+                    let rendered = {
+                        let mut guard = channels.lock().await;
+                        if let Some(ChannelState::Tui { tui, .. }) = guard.get_mut(&channel) {
+                            tui.set_assets(fresh);
+                            tui.app.status_notice = Some(format!("Probed {count} asset(s)"));
+                            tui.render().ok()
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(bytes) = rendered {
+                        if !bytes.is_empty() {
+                            let _ = handle.data(channel, bytes).await;
+                        }
+                    }
+                });
+            }
+        }
         if let Some((audit, status, error)) = finish_tui {
             let session_id = audit.id().to_string();
             let _ = audit.finish(&self.db, status, error.as_deref()).await;
@@ -994,6 +1058,7 @@ mod tests {
             client_ip: None,
             channels: Arc::new(Mutex::new(HashMap::new())),
             ptys: HashMap::new(),
+            pty_terms: HashMap::new(),
         }
     }
 
@@ -1392,9 +1457,11 @@ mod tests {
         let db = Catalog::in_memory().await.unwrap();
         let session = db
             .start_session(NewSession {
+                key_id: None,
                 key_finger: "SHA256:test".to_string(),
                 key_name: Some("tester".to_string()),
                 mode: "tui".to_string(),
+                asset_id: None,
                 asset_name: None,
                 target_host: None,
                 target_port: None,
@@ -1476,10 +1543,12 @@ mod tests {
     }
 
     #[test]
-    fn direct_username_uses_asset_name_as_target() {
+    fn direct_username_uses_asset_name_as_target_and_reserves_menu() {
         let request = parse_direct_username("web-prod-01").unwrap().unwrap();
 
         assert_eq!(request.target, "web-prod-01");
+        assert!(parse_direct_username("menu").unwrap().is_none());
+        assert!(parse_direct_username("+tui").unwrap().is_none());
         assert!(parse_direct_username("alice@web-prod-01").is_err());
         assert!(parse_direct_username("").is_err());
     }
@@ -1492,11 +1561,13 @@ mod tests {
             protocol: hop_core::ASSET_PROTOCOL_SSH.to_string(),
             hostname: "10.0.0.10".to_string(),
             port: 22,
+            display_name: None,
             description: None,
             tags: Vec::new(),
             credential_id: Some("cred-1".to_string()),
             created_at: None,
             updated_at: None,
+            health: hop_core::AssetHealth::unknown("asset-1"),
         };
 
         assert!(accepts_sftp_request("sftp", Some(&asset)));
@@ -1508,6 +1579,29 @@ mod tests {
         asset.protocol = hop_core::ASSET_PROTOCOL_TCP.to_string();
         asset.credential_id = Some("cred-1".to_string());
         assert!(!accepts_sftp_request("sftp", Some(&asset)));
+    }
+
+    #[tokio::test]
+    async fn proxy_only_asset_username_falls_back_cleanly_for_proxyjump() {
+        let db = Catalog::in_memory().await.unwrap();
+        let key = db
+            .add_authorized_key(NewAuthorizedKey::new(
+                "laptop",
+                "ssh-ed25519 AAAA-test",
+                "SHA256:test",
+            ))
+            .await
+            .unwrap();
+        db.add_asset(NewAsset::new("proxy-box", "10.0.0.99", 22))
+            .await
+            .unwrap();
+        let handler = test_handler(db);
+
+        assert!(handler
+            .resolve_direct_asset_for_key("proxy-box", &key.id)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

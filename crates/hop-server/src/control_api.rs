@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -9,9 +9,9 @@ use axum::{
     Json, Router,
 };
 use hop_core::{
-    encrypt_envelope, new_id, ApplyOptions, ApplySummary, Asset, AssetAccessMode, AuthType,
-    Catalog, CatalogError, CatalogErrorCode, Credential, HopCoreError, KnownHost, Manifest,
-    MasterKey, NewAsset, NewAuthorizedKey, NewCredential, ResourceOwnership, Session,
+    encrypt_envelope, new_id, Asset, AssetAccessMode, AuditEvent, AuthType, Catalog, CatalogError,
+    CatalogErrorCode, Credential, HopCoreError, KnownHost, MasterKey, NewAsset, NewAuditEvent,
+    NewAuthorizedKey, NewCredential, ResourceOwnership, Session,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -27,6 +27,8 @@ pub struct ControlApiState {
     master_key: Arc<MasterKey>,
     token_hash: [u8; 32],
     active_sessions: ActiveSessionRegistry,
+    ssh_listen: String,
+    probe_timeout: Duration,
 }
 
 impl ControlApiState {
@@ -45,7 +47,19 @@ impl ControlApiState {
             master_key,
             token_hash: Sha256::digest(token.as_bytes()).into(),
             active_sessions,
+            ssh_listen: "0.0.0.0:2222".to_string(),
+            probe_timeout: Duration::from_secs(4),
         })
+    }
+
+    pub fn with_ssh_listen(mut self, ssh_listen: impl Into<String>) -> Self {
+        self.ssh_listen = ssh_listen.into();
+        self
+    }
+
+    pub fn with_probe_timeout(mut self, timeout: Duration) -> Self {
+        self.probe_timeout = timeout;
+        self
     }
 }
 
@@ -101,10 +115,12 @@ pub fn router(state: ControlApiState) -> Router {
     Router::new()
         .route("/api/v1/status", get(status))
         .route("/api/v1/assets", get(assets).post(create_asset))
+        .route("/api/v1/assets/probe", post(probe_all_assets))
         .route(
             "/api/v1/assets/{id}",
             put(update_asset).delete(delete_asset),
         )
+        .route("/api/v1/assets/{id}/probe", post(probe_single_asset))
         .route(
             "/api/v1/credentials",
             get(credentials).post(create_credential),
@@ -135,10 +151,8 @@ pub fn router(state: ControlApiState) -> Router {
             "/api/v1/known-hosts",
             get(known_hosts).delete(reset_known_host),
         )
+        .route("/api/v1/audit-events", get(audit_events))
         .route("/api/v1/catalog/revision", get(revision))
-        .route("/api/v1/config/validate", post(validate))
-        .route("/api/v1/config/diff", post(diff))
-        .route("/api/v1/config/apply", post(apply))
         .with_state(state)
 }
 
@@ -152,6 +166,7 @@ async fn status(
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         catalog_revision: catalog.revision,
+        ssh_listen: state.ssh_listen.clone(),
     }))
 }
 
@@ -188,6 +203,19 @@ async fn create_asset(
 ) -> ApiResult<(StatusCode, Json<AssetView>)> {
     authenticate(&state, &headers)?;
     let asset = state.catalog.add_asset(request.into()).await?;
+    record_api_audit(
+        &state.catalog,
+        "asset.create",
+        "asset",
+        Some(&asset.id),
+        Some(&asset.name),
+        Some(serde_json::json!({
+            "protocol": asset.protocol,
+            "hostname": asset.hostname,
+            "port": asset.port,
+        })),
+    )
+    .await;
     Ok((
         StatusCode::CREATED,
         Json(asset_view(&state.catalog, asset).await?),
@@ -207,6 +235,15 @@ async fn update_asset(
         .get_asset_by_id(&id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    record_api_audit(
+        &state.catalog,
+        "asset.update",
+        "asset",
+        Some(&asset.id),
+        Some(&asset.name),
+        None,
+    )
+    .await;
     Ok(Json(asset_view(&state.catalog, asset).await?))
 }
 
@@ -216,8 +253,78 @@ async fn delete_asset(
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<StatusCode> {
     authenticate(&state, &headers)?;
+    let existing = state.catalog.get_asset_by_id(&id).await?;
     state.catalog.delete_asset(&id).await?;
+    record_api_audit(
+        &state.catalog,
+        "asset.delete",
+        "asset",
+        Some(&id),
+        existing.as_ref().map(|asset| asset.name.as_str()),
+        None,
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn probe_all_assets(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<AssetView>>> {
+    authenticate(&state, &headers)?;
+    let probed = crate::probe::probe_all_assets(&state.catalog, state.probe_timeout)
+        .await
+        .map_err(ApiError::internal)?;
+    let healthy = probed
+        .iter()
+        .filter(|asset| asset.health.status == "healthy")
+        .count();
+    record_api_audit(
+        &state.catalog,
+        "asset.probe_all",
+        "asset",
+        None,
+        Some("fleet"),
+        Some(serde_json::json!({
+            "total": probed.len(),
+            "healthy": healthy,
+        })),
+    )
+    .await;
+    let mut views = Vec::with_capacity(probed.len());
+    for asset in probed {
+        views.push(asset_view(&state.catalog, asset).await?);
+    }
+    Ok(Json(views))
+}
+
+async fn probe_single_asset(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<AssetView>> {
+    authenticate(&state, &headers)?;
+    let existing = state
+        .catalog
+        .get_asset_by_id(&id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let probed = crate::probe::probe_asset(&state.catalog, &existing, state.probe_timeout)
+        .await
+        .map_err(ApiError::internal)?;
+    record_api_audit(
+        &state.catalog,
+        "asset.probe",
+        "asset",
+        Some(&probed.id),
+        Some(&probed.name),
+        Some(serde_json::json!({
+            "status": probed.health.status,
+            "latency_ms": probed.health.latency_ms,
+        })),
+    )
+    .await;
+    Ok(Json(asset_view(&state.catalog, probed).await?))
 }
 
 async fn credentials(
@@ -246,6 +353,15 @@ async fn create_credential(
     let id = new_id();
     let credential = build_credential(&state.master_key, &id, request, None)?;
     let credential = state.catalog.add_credential(credential).await?;
+    record_api_audit(
+        &state.catalog,
+        "credential.create",
+        "credential",
+        Some(&credential.id),
+        Some(&credential.name),
+        Some(serde_json::json!({ "auth_type": credential.auth_type })),
+    )
+    .await;
     Ok((
         StatusCode::CREATED,
         Json(credential_view(&state.catalog, credential).await?),
@@ -271,6 +387,15 @@ async fn update_credential(
         .get_credential(&id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    record_api_audit(
+        &state.catalog,
+        "credential.update",
+        "credential",
+        Some(&credential.id),
+        Some(&credential.name),
+        None,
+    )
+    .await;
     Ok(Json(credential_view(&state.catalog, credential).await?))
 }
 
@@ -280,7 +405,17 @@ async fn delete_credential(
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<StatusCode> {
     authenticate(&state, &headers)?;
+    let existing = state.catalog.get_credential(&id).await?;
     state.catalog.delete_credential(&id).await?;
+    record_api_audit(
+        &state.catalog,
+        "credential.delete",
+        "credential",
+        Some(&id),
+        existing.as_ref().map(|cred| cred.name.as_str()),
+        None,
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -318,6 +453,15 @@ async fn create_access_key(
             &asset_ids,
         )
         .await?;
+    record_api_audit(
+        &state.catalog,
+        "access_key.create",
+        "access_key",
+        Some(&key.id),
+        Some(&key.name),
+        Some(serde_json::json!({ "access_mode": key.asset_access_mode })),
+    )
+    .await;
     let view = access_key_view(&state.catalog, key).await?;
     Ok((StatusCode::CREATED, Json(view)))
 }
@@ -328,7 +472,17 @@ async fn delete_access_key(
     AxumPath(id): AxumPath<String>,
 ) -> ApiResult<StatusCode> {
     authenticate(&state, &headers)?;
+    let existing = state.catalog.get_authorized_key_by_id(&id).await?;
     state.catalog.delete_authorized_key(&id).await?;
+    record_api_audit(
+        &state.catalog,
+        "access_key.delete",
+        "access_key",
+        Some(&id),
+        existing.as_ref().map(|key| key.name.as_str()),
+        None,
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -348,6 +502,15 @@ async fn set_access_key_enabled(
         .get_authorized_key_by_id(&id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    record_api_audit(
+        &state.catalog,
+        "access_key.set_enabled",
+        "access_key",
+        Some(&key.id),
+        Some(&key.name),
+        Some(serde_json::json!({ "enabled": request.enabled })),
+    )
+    .await;
     Ok(Json(access_key_view(&state.catalog, key).await?))
 }
 
@@ -368,6 +531,18 @@ async fn set_access_key_access(
         .get_authorized_key_by_id(&id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    record_api_audit(
+        &state.catalog,
+        "access_key.set_access",
+        "access_key",
+        Some(&key.id),
+        Some(&key.name),
+        Some(serde_json::json!({
+            "access_mode": mode,
+            "asset_count": asset_ids.len(),
+        })),
+    )
+    .await;
     Ok(Json(access_key_view(&state.catalog, key).await?))
 }
 
@@ -380,6 +555,20 @@ async fn sessions(
         state
             .catalog
             .list_sessions(100)
+            .await
+            .map_err(ApiError::internal)?,
+    ))
+}
+
+async fn audit_events(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<AuditEvent>>> {
+    authenticate(&state, &headers)?;
+    Ok(Json(
+        state
+            .catalog
+            .list_audit_events(100)
             .await
             .map_err(ApiError::internal)?,
     ))
@@ -425,6 +614,16 @@ async fn reset_known_host(
     if !deleted {
         return Err(ApiError::not_found());
     }
+    let target_label = format!("{hostname}:{} ({})", request.port, request.key_type.trim());
+    record_api_audit(
+        &state.catalog,
+        "known_host.reset",
+        "known_host",
+        None,
+        Some(&target_label),
+        None,
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -441,6 +640,15 @@ async fn terminate_session(
                 .finish_session(&id, "terminated", Some("terminated by control API"))
                 .await
                 .map_err(ApiError::internal)?;
+            record_api_audit(
+                &state.catalog,
+                "session.terminate",
+                "session",
+                Some(&id),
+                Some(&id),
+                None,
+            )
+            .await;
             true
         }
         TerminateSessionResult::NotFound => false,
@@ -448,94 +656,26 @@ async fn terminate_session(
     Ok(Json(TerminateResponse { id, terminated }))
 }
 
-async fn validate(
-    State(state): State<ControlApiState>,
-    headers: HeaderMap,
-    Json(request): Json<ValidateRequest>,
-) -> ApiResult<Json<ValidationResponse>> {
-    authenticate(&state, &headers)?;
-    let manifest = request.manifest.parse()?;
-    if request.offline {
-        manifest.validate_offline()?;
-    } else {
-        state.catalog.validate_manifest(&manifest).await?;
-    }
-    Ok(Json(ValidationResponse {
-        valid: true,
-        offline: request.offline,
-    }))
-}
-
-async fn diff(
-    State(state): State<ControlApiState>,
-    headers: HeaderMap,
-    Json(request): Json<DiffRequest>,
-) -> ApiResult<Json<ApplySummary>> {
-    authenticate(&state, &headers)?;
-    let manifest = request.manifest.parse()?;
-    Ok(Json(
-        state
-            .catalog
-            .diff(
-                &manifest,
-                &request.source_id,
-                &state.master_key,
-                request.prune,
-            )
-            .await?,
-    ))
-}
-
-async fn apply(
-    State(state): State<ControlApiState>,
-    headers: HeaderMap,
-    Json(request): Json<ApplyRequest>,
-) -> ApiResult<Json<ApplySummary>> {
-    authenticate(&state, &headers)?;
-    let ApplyRequest {
-        manifest,
-        source_id,
-        base_revision,
-        prune,
-        dry_run,
-    } = request;
-    let manifest = match manifest.parse() {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            if !dry_run {
-                let _ = state
-                    .catalog
-                    .record_apply_failure(&source_id, "api", &error)
-                    .await;
-            }
-            return Err(error.into());
-        }
-    };
-    let result = state
-        .catalog
-        .apply(
-            &manifest,
-            &source_id,
-            &state.master_key,
-            ApplyOptions {
-                base_revision: Some(base_revision),
-                prune,
-                dry_run,
-            },
-        )
+async fn record_api_audit(
+    catalog: &Catalog,
+    action: &str,
+    target_type: &str,
+    target_id: Option<&str>,
+    target_label: Option<&str>,
+    details: Option<serde_json::Value>,
+) {
+    let _ = catalog
+        .record_audit_event(NewAuditEvent {
+            actor_label: "api-token".to_string(),
+            action: action.to_string(),
+            target_type: target_type.to_string(),
+            target_id: target_id.map(ToString::to_string),
+            target_label: target_label.map(ToString::to_string),
+            result: "success".to_string(),
+            source_ip: None,
+            details_json: details.map(|value| value.to_string()),
+        })
         .await;
-    match result {
-        Ok(summary) => Ok(Json(summary)),
-        Err(error) => {
-            if !dry_run {
-                let _ = state
-                    .catalog
-                    .record_apply_failure(&source_id, "api", &error)
-                    .await;
-            }
-            Err(error.into())
-        }
-    }
 }
 
 fn authenticate(state: &ControlApiState, headers: &HeaderMap) -> ApiResult<()> {
@@ -553,61 +693,6 @@ fn authenticate(state: &ControlApiState, headers: &HeaderMap) -> ApiResult<()> {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum ManifestFormat {
-    Yaml,
-    Toml,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ManifestPayload {
-    content: String,
-    format: ManifestFormat,
-}
-
-impl ManifestPayload {
-    fn parse(self) -> std::result::Result<Manifest, CatalogError> {
-        match self.format {
-            ManifestFormat::Yaml => Manifest::from_yaml(&self.content),
-            ManifestFormat::Toml => Manifest::from_toml(&self.content),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ValidateRequest {
-    #[serde(flatten)]
-    manifest: ManifestPayload,
-    #[serde(default)]
-    offline: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DiffRequest {
-    #[serde(flatten)]
-    manifest: ManifestPayload,
-    source_id: String,
-    #[serde(default)]
-    prune: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ApplyRequest {
-    #[serde(flatten)]
-    manifest: ManifestPayload,
-    source_id: String,
-    base_revision: i64,
-    #[serde(default)]
-    prune: bool,
-    #[serde(default)]
-    dry_run: bool,
-}
-
-#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AssetWriteRequest {
     name: String,
@@ -615,6 +700,8 @@ struct AssetWriteRequest {
     protocol: String,
     hostname: String,
     port: i64,
+    #[serde(default)]
+    display_name: Option<String>,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
@@ -630,6 +717,7 @@ impl From<AssetWriteRequest> for NewAsset {
             protocol: request.protocol,
             hostname: request.hostname,
             port: request.port,
+            display_name: request.display_name,
             description: request.description,
             tags: request.tags,
             credential_id: request.credential_id,
@@ -709,17 +797,12 @@ struct StatusResponse {
     status: &'static str,
     version: &'static str,
     catalog_revision: i64,
+    ssh_listen: String,
 }
 
 #[derive(Serialize)]
 struct RevisionResponse {
     revision: i64,
-}
-
-#[derive(Serialize)]
-struct ValidationResponse {
-    valid: bool,
-    offline: bool,
 }
 
 #[derive(Serialize)]
@@ -1012,6 +1095,8 @@ mod tests {
     use std::fs;
 
     use axum::{body::Body, http::Request};
+    use hop_core::{ApplyOptions, Manifest};
+    use tokio::{io::AsyncWriteExt, net::TcpListener};
     use tower::ServiceExt;
 
     use super::*;
@@ -1170,43 +1255,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_apply_uses_catalog_revision_and_never_returns_secret_material() {
+    async fn remote_config_routes_are_removed_and_credentials_never_return_secret_material() {
         let directory = tempfile::tempdir().unwrap();
         let password = directory.path().join("password");
         fs::write(&password, "api-secret-value").unwrap();
-        let manifest = format!(
+        let manifest_yaml = format!(
             "api_version: hop/v1alpha1\ncredentials:\n  root:\n    type: password\n    username: root\n    password:\n      file: {}\n",
             password.display()
         );
+        let catalog = Catalog::in_memory().await.unwrap();
+        let master_key = Arc::new(MasterKey::generate());
+        catalog
+            .apply(
+                &Manifest::from_yaml(&manifest_yaml).unwrap(),
+                "local-cli",
+                &master_key,
+                ApplyOptions::default(),
+            )
+            .await
+            .unwrap();
+
         let state = ControlApiState::new(
-            Catalog::in_memory().await.unwrap(),
-            Arc::new(MasterKey::generate()),
+            catalog,
+            master_key,
             "test-token",
             ActiveSessionRegistry::default(),
         )
         .unwrap();
         let app = router(state);
-        let payload = serde_json::json!({
-            "content": manifest,
-            "format": "yaml",
-            "source_id": "api-test",
-            "base_revision": 0
-        });
 
-        let applied = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/api/v1/config/apply")
-                    .header(header::AUTHORIZATION, "Bearer test-token")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(payload.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(applied.status(), StatusCode::OK);
+        for removed_route in [
+            "/api/v1/config/validate",
+            "/api/v1/config/diff",
+            "/api/v1/config/apply",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(api_request(
+                    Method::POST,
+                    removed_route,
+                    serde_json::json!({"content": manifest_yaml, "format": "yaml"}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
 
         let credentials = app
             .oneshot(
@@ -1342,9 +1435,11 @@ mod tests {
             .unwrap();
         let session = catalog
             .start_session(hop_core::NewSession {
+                key_id: Some(key.id.clone()),
                 key_finger: key.fingerprint.clone(),
                 key_name: Some(key.name.clone()),
                 mode: "direct".to_string(),
+                asset_id: Some(asset.id.clone()),
                 asset_name: Some(asset.name),
                 target_host: Some(asset.hostname),
                 target_port: Some(asset.port),
@@ -1572,6 +1667,112 @@ mod tests {
             response_json(response).await["code"],
             CatalogErrorCode::ManagedBySource.to_string()
         );
+    }
+
+    #[tokio::test]
+    async fn status_probe_and_audit_endpoints_expose_ssh_listen_latency_and_mutations() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for _ in 0..2 {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    let _ = socket.write_all(b"SSH-2.0-OpenSSH_9.7\r\n").await;
+                }
+            }
+        });
+
+        let catalog = Catalog::in_memory().await.unwrap();
+        let state = ControlApiState::new(
+            catalog.clone(),
+            Arc::new(MasterKey::generate()),
+            "test-token",
+            ActiveSessionRegistry::default(),
+        )
+        .unwrap()
+        .with_ssh_listen("0.0.0.0:22022")
+        .with_probe_timeout(Duration::from_secs(2));
+        let app = router(state);
+
+        let status = app
+            .clone()
+            .oneshot(api_request(
+                Method::GET,
+                "/api/v1/status",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        assert_eq!(response_json(status).await["ssh_listen"], "0.0.0.0:22022");
+
+        let created = app
+            .clone()
+            .oneshot(api_request(
+                Method::POST,
+                "/api/v1/assets",
+                serde_json::json!({
+                    "name": "hk-cn2",
+                    "display_name": "HK CN2 GIA",
+                    "protocol": "ssh",
+                    "hostname": addr.ip().to_string(),
+                    "port": addr.port(),
+                    "tags": ["hk", "cn2"]
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = response_json(created).await;
+        assert_eq!(created["display_name"], "HK CN2 GIA");
+        assert_eq!(created["health"]["status"], "unknown");
+        let asset_id = created["id"].as_str().unwrap();
+
+        let single_probe = app
+            .clone()
+            .oneshot(api_request(
+                Method::POST,
+                &format!("/api/v1/assets/{asset_id}/probe"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(single_probe.status(), StatusCode::OK);
+        let single_probe = response_json(single_probe).await;
+        assert_eq!(single_probe["health"]["status"], "healthy");
+        assert!(single_probe["health"]["latency_ms"].is_number());
+
+        let batch_probe = app
+            .clone()
+            .oneshot(api_request(
+                Method::POST,
+                "/api/v1/assets/probe",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(batch_probe.status(), StatusCode::OK);
+        let batch_probe = response_json(batch_probe).await;
+        assert_eq!(batch_probe[0]["health"]["status"], "healthy");
+
+        let audits = app
+            .oneshot(api_request(
+                Method::GET,
+                "/api/v1/audit-events",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(audits.status(), StatusCode::OK);
+        let audits = response_json(audits).await;
+        let actions = audits
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["action"].as_str())
+            .collect::<Vec<_>>();
+        assert!(actions.contains(&"asset.create"));
+        assert!(actions.contains(&"asset.probe"));
+        assert!(actions.contains(&"asset.probe_all"));
     }
 
     fn api_request(method: Method, uri: &str, body: serde_json::Value) -> Request<Body> {

@@ -1,6 +1,6 @@
 # Hop
 
-Hop is a lightweight, self-hosted SSH jump server. Ingress accepts registered public keys only, target credentials are encrypted at rest, and an official web panel is included.
+Hop is a lightweight (~3.7 MB static binary), zero-agent self-hosted SSH relay and encrypted credential vault. Ingress accepts registered public keys only, target VPS credentials stay encrypted at rest, and both the official web panel and CLI provide on-demand SSH/TCP protocol latency probing, audit trails, and `~/.ssh/config` generation for Multi-VPS operators and Cursor / VS Code Remote-SSH workflows.
 
 ## Quick start: web panel (recommended)
 
@@ -19,7 +19,7 @@ Open:
 - Panel: `http://localhost:8080`
 - SSH: `localhost:2222`
 
-On first load, enter only the webpage management Token from `hop.yaml`. The panel uses same-origin `/api/v1`; the backend management port is not published to the host. The initial Catalog is empty, so add an ingress public key, target credential, and asset in the panel. After a verified target rebuild or Host Key rotation, inspect and reset its Known Hosts record under **Host trust**.
+On first load, enter only the webpage management Token from `hop.yaml`. The panel uses same-origin `/api/v1`; the backend management port is not published to the host. Add ingress public keys, target credentials, and assets directly in the panel, probe SSH banner / TCP reachability on demand, review audit events, export `~/.ssh/config`, and reset Known Hosts records under **Host trust** after verified rebuilds.
 
 Compose always mounts the single `./hop.yaml` read-only. `examples/panel-first.yaml` and `examples/config-first.yaml` are alternative starting templates; they are never loaded, inherited, or merged together.
 
@@ -34,7 +34,7 @@ cargo run --release -p hop-server -- --config ./hop.yaml config validate
 cargo run --release -p hop-server -- --config ./hop.yaml serve
 ```
 
-One `hop.yaml` contains listeners, data directory, webpage management Token, SSH runtime settings, target credentials, assets, and ingress public keys. At startup, Hop applies its declared resources through the internal atomic Apply engine. Any error prevents listeners from starting and never leaves a partial Catalog.
+One `hop.yaml` contains listeners, data directory, webpage management Token, SSH runtime settings, target credentials, assets (including `tags` and `display_name`), and ingress public keys. At startup, Hop applies its declared resources through the internal atomic Apply engine. Any error prevents listeners from starting and never leaves a partial Catalog.
 
 ## Configuration and examples
 
@@ -52,10 +52,18 @@ If `api.token` is missing or empty, only the Control API is disabled; SSH contin
 - Resources declared in `hop.yaml` are `config`; the panel marks them read-only before rendering actions.
 - Restart Hop after changing configuration-managed resources. Startup Apply updates them and removes only resources deleted from the same configuration, preserving local resources.
 
-## Connect
+## Connect and `~/.ssh/config`
 
 ```bash
+# Managed vault relay (Hop logs into the target using stored credentials)
 ssh -p 2222 <asset-name>@<hop-host>
+
+# Interactive TUI selector (supports / fuzzy search, #tag filter, r to probe RTT)
+ssh -p 2222 menu@<hop-host>
+
+# Generate ~/.ssh/config for terminal relay or Cursor / VS Code Remote-SSH (ProxyJump)
+hop-server --config ./hop.yaml ssh-config --host <hop-host> --mode relay
+hop-server --config ./hop.yaml ssh-config --host <hop-host> --mode proxyjump
 ```
 
 Hop ingress advertises `publickey` authentication only. An unregistered key receives `Permission denied (publickey)` without a password prompt.

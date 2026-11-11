@@ -41,18 +41,34 @@ pub struct ManagedTarget {
     pub channel: Channel<client::Msg>,
 }
 
+pub fn sanitize_pty_term(term: &str) -> String {
+    let trimmed = term.trim();
+    if !trimmed.is_empty()
+        && trimmed.len() <= 64
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_graphic() && !matches!(ch, '/' | '\\'))
+    {
+        trimmed.to_string()
+    } else {
+        "xterm-256color".to_string()
+    }
+}
+
 pub async fn connect_asset_shell(
     db: Catalog,
     master_key: Arc<MasterKey>,
     asset: &Asset,
+    term: &str,
     width: u32,
     height: u32,
     timeout: Duration,
 ) -> Result<ManagedTarget> {
     let session = connect_authenticated_asset(db, master_key, asset, timeout).await?;
     let channel = session.channel_open_session().await?;
+    let term = sanitize_pty_term(term);
     channel
-        .request_pty(false, "xterm-256color", width, height, 0, 0, &[])
+        .request_pty(false, &term, width, height, 0, 0, &[])
         .await?;
     channel.request_shell(false).await?;
     Ok(ManagedTarget { session, channel })
@@ -63,14 +79,15 @@ pub async fn connect_asset_exec(
     master_key: Arc<MasterKey>,
     asset: &Asset,
     command: Vec<u8>,
-    pty: Option<(u32, u32)>,
+    pty: Option<(&str, u32, u32)>,
     timeout: Duration,
 ) -> Result<ManagedTarget> {
     let session = connect_authenticated_asset(db, master_key, asset, timeout).await?;
     let mut channel = session.channel_open_session().await?;
-    if let Some((width, height)) = pty {
+    if let Some((term, width, height)) = pty {
+        let term = sanitize_pty_term(term);
         channel
-            .request_pty(true, "xterm-256color", width, height, 0, 0, &[])
+            .request_pty(true, &term, width, height, 0, 0, &[])
             .await?;
         wait_for_request_success(&mut channel, timeout, "pty").await?;
     }

@@ -32,31 +32,35 @@ Target credentials let Hop log into SSH assets. The panel and API return only co
 
 ```bash
 hop-server --config /etc/hop/hop.yaml credential list
-hop-server --config /etc/hop/hop.yaml credential add-password \
-  --name nas-root --username root
+printf '%s\n' "$TARGET_PASSWORD" | hop-server --config /etc/hop/hop.yaml credential add \
+  --name nas-root --username root --auth-type password --password-stdin
 ```
 
-Interactive secret input is not echoed. Direct secrets in YAML require `0600` permissions.
+Direct secrets in YAML require `0600` permissions.
 
-## Assets
+## Assets, latency probing, and `~/.ssh/config`
 
 ```bash
-hop-server --config /etc/hop/hop.yaml asset add-ssh \
-  --name nas --host 192.168.1.20 --port 22 --credential nas-root
-hop-server --config /etc/hop/hop.yaml asset add-tcp \
-  --name metrics --host 192.168.1.30 --port 9090
+hop-server --config /etc/hop/hop.yaml asset add \
+  --name nas --protocol ssh --hostname 192.168.1.20 --port 22 \
+  --display-name "Home NAS" --tags home,storage --credential nas-root
+hop-server --config /etc/hop/hop.yaml asset add \
+  --name metrics --protocol tcp --hostname 192.168.1.30 --port 9090
 hop-server --config /etc/hop/hop.yaml asset list
+hop-server --config /etc/hop/hop.yaml asset probe
 ```
 
-Connect using the asset name:
+Connect directly using the asset name or generate `~/.ssh/config` blocks for terminal relay or Cursor / VS Code Remote-SSH (`ProxyJump`):
 
 ```bash
 ssh -p 2222 nas@hop.example.com
+hop-server --config /etc/hop/hop.yaml ssh-config --host hop.example.com --mode relay
+hop-server --config /etc/hop/hop.yaml ssh-config --host hop.example.com --mode proxyjump
 ```
 
-## Sessions
+## Sessions and audit events
 
-The panel shows the latest 100 session records. Termination can signal only a `started` session with an active in-memory transport. A stale record may return not active while remaining in history.
+The panel shows the latest 100 session records and recent audit events (`GET /api/v1/audit-events` or `hop-server audit list`). Termination can signal only a `started` session with an active in-memory transport. A stale record may return not active while remaining in history. Completed sessions and audit events older than `runtime.session_retention_days` are pruned at startup and every 6 hours while running.
 
 When Hop starts, any `started` record left by an earlier process is closed as
 `failed` with an error explaining that the server restarted. This recovery runs
@@ -69,7 +73,7 @@ seconds for SSH connections to drain before terminating anything remaining.
 
 Hop records an SSH target host-key fingerprint through TOFU on the first managed connection and verifies it on every later connection. Reinstalling a target or intentionally rotating its SSH host key makes the stored record reject the new key.
 
-Verify the new fingerprint through an independent trusted path first. Then open **Host trust** in the panel, select the exact host, port, and key algorithm, and choose **Reset trust**. The server requires an explicit confirmation field. The next managed connection establishes the new TOFU fingerprint automatically.
+Verify the new fingerprint through an independent trusted path first. Then open **Host trust** in the panel (or run `hop-server known-hosts reset --hostname <host> --port <port> --key-type <type>`), select the exact host, port, and key algorithm, and choose **Reset trust**. The server requires an explicit confirmation field. The next managed connection establishes the new TOFU fingerprint automatically.
 
 Control API operations:
 

@@ -116,11 +116,13 @@ pub struct Asset {
     pub protocol: String,
     pub hostname: String,
     pub port: i64,
+    pub display_name: Option<String>,
     pub description: Option<String>,
     pub tags: Vec<String>,
     pub credential_id: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+    pub health: AssetHealth,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -130,11 +132,18 @@ pub(crate) struct AssetRow {
     pub protocol: String,
     pub hostname: String,
     pub port: i64,
+    pub display_name: Option<String>,
     pub description: Option<String>,
     pub tags: Option<String>,
     pub credential_id: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+    pub health_status: Option<String>,
+    pub health_checked_at: Option<String>,
+    pub health_last_success_at: Option<String>,
+    pub health_latency_ms: Option<i64>,
+    pub health_error_code: Option<String>,
+    pub health_error_message: Option<String>,
 }
 
 impl TryFrom<AssetRow> for Asset {
@@ -146,6 +155,17 @@ impl TryFrom<AssetRow> for Asset {
             _ => Vec::new(),
         };
         let protocol = validate_asset_protocol(&row.protocol)?;
+        let health = AssetHealth {
+            asset_id: row.id.clone(),
+            status: row
+                .health_status
+                .unwrap_or_else(|| ASSET_HEALTH_UNKNOWN.to_string()),
+            checked_at: row.health_checked_at,
+            last_success_at: row.health_last_success_at,
+            latency_ms: row.health_latency_ms,
+            error_code: row.health_error_code,
+            error_message: row.health_error_message,
+        };
 
         Ok(Self {
             id: row.id,
@@ -153,11 +173,13 @@ impl TryFrom<AssetRow> for Asset {
             protocol,
             hostname: row.hostname,
             port: row.port,
+            display_name: row.display_name,
             description: row.description,
             tags,
             credential_id: row.credential_id,
             created_at: row.created_at,
             updated_at: row.updated_at,
+            health,
         })
     }
 }
@@ -168,6 +190,8 @@ pub struct NewAsset {
     pub protocol: String,
     pub hostname: String,
     pub port: i64,
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub description: Option<String>,
     pub tags: Vec<String>,
     pub credential_id: Option<String>,
@@ -180,6 +204,7 @@ impl NewAsset {
             protocol: ASSET_PROTOCOL_SSH.to_string(),
             hostname: hostname.into(),
             port,
+            display_name: None,
             description: None,
             tags: Vec::new(),
             credential_id: None,
@@ -266,7 +291,7 @@ pub struct NewAuditEvent {
     pub details_json: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AssetHealth {
     pub asset_id: String,
     pub status: String,
@@ -277,6 +302,20 @@ pub struct AssetHealth {
     pub error_message: Option<String>,
 }
 
+impl AssetHealth {
+    pub fn unknown(asset_id: impl Into<String>) -> Self {
+        Self {
+            asset_id: asset_id.into(),
+            status: ASSET_HEALTH_UNKNOWN.to_string(),
+            checked_at: None,
+            last_success_at: None,
+            latency_ms: None,
+            error_code: None,
+            error_message: None,
+        }
+    }
+}
+
 pub const ASSET_HEALTH_UNKNOWN: &str = "unknown";
 pub const ASSET_HEALTH_HEALTHY: &str = "healthy";
 pub const ASSET_HEALTH_FAILED: &str = "failed";
@@ -284,9 +323,13 @@ pub const ASSET_HEALTH_FAILED: &str = "failed";
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Session {
     pub id: String,
+    #[serde(default)]
+    pub key_id: Option<String>,
     pub key_finger: String,
     pub key_name: Option<String>,
     pub mode: String,
+    #[serde(default)]
+    pub asset_id: Option<String>,
     pub asset_name: Option<String>,
     pub target_host: Option<String>,
     pub target_port: Option<i64>,
@@ -299,9 +342,13 @@ pub struct Session {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewSession {
+    #[serde(default)]
+    pub key_id: Option<String>,
     pub key_finger: String,
     pub key_name: Option<String>,
     pub mode: String,
+    #[serde(default)]
+    pub asset_id: Option<String>,
     pub asset_name: Option<String>,
     pub target_host: Option<String>,
     pub target_port: Option<i64>,

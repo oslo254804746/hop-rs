@@ -187,6 +187,7 @@ impl HopConfig {
                         port: Some(asset.port.unwrap_or(22)),
                         display_name: asset.display_name.clone(),
                         description: asset.description.clone(),
+                        tags: asset.tags.clone(),
                         credential: asset.credential.clone(),
                     },
                 )
@@ -484,6 +485,8 @@ pub struct StartupAssetConfig {
     pub port: Option<u16>,
     pub display_name: Option<String>,
     pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub credential: Option<String>,
 }
 
@@ -598,6 +601,8 @@ credentials:
 assets:
   nas:
     host: 192.0.2.10
+    display_name: Home NAS
+    tags: [lan, storage]
     credential: root
 access_keys:
   laptop:
@@ -613,6 +618,10 @@ access_keys:
         assert_eq!(config.data_dir, directory.path().join("data"));
         assert!(config.api.token.as_ref().unwrap().is_placeholder());
         assert_eq!(config.startup_manifest().assets.len(), 1);
+        assert_eq!(
+            config.assets["nas"].tags,
+            vec!["lan".to_string(), "storage".to_string()]
+        );
         assert!(!format!("{config:?}").contains("target-password"));
         assert!(!format!("{config:?}").contains("change-me"));
         assert!(!format!("{:?}", config.startup_manifest()).contains("target-password"));

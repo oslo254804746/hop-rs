@@ -4,6 +4,51 @@ All notable user-visible changes to Hop are recorded here.
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-11-11
+
+### Added
+
+- Surfaced stored `asset_health` telemetry across Catalog queries, Control API
+  asset responses, CLI (`asset list`, `asset probe`), SSH TUI (`r` to probe),
+  and the official Web Panel.
+- Added zero-agent on-demand network and protocol banner latency probing
+  (`POST /api/v1/assets/probe`, `POST /api/v1/assets/{id}/probe`, and
+  `hop-server asset probe [target]`), verifying TCP reachability and RFC 4253
+  `SSH-` banners with bounded concurrency.
+- Wired `audit_events` recording across Control API mutations and local CLI
+  commands, exposed `GET /api/v1/audit-events` and `hop-server audit list`, and
+  added startup plus periodic 6-hour retention pruning.
+- Added `tags` support to declarative `hop.yaml` / Manifest assets and exposed
+  `display_name` across local asset CRUD and CLI (`--display-name`).
+- Added `hop-server ssh-config` (`--mode relay` and `--mode proxyjump`),
+  `hop-server key delete`, `hop-server known-hosts list|reset`, and
+  `--credential <id_or_name>` resolution on `asset add`.
+- Exposed `ssh_listen` on `GET /api/v1/status` so the Web Panel generates
+  ready-to-copy `ssh` and `~/.ssh/config` snippets with the active SSH port.
+
+### Fixed
+
+- Enforced exact target port matching on `.hop` `ProxyJump` / `direct-tcpip`
+  authorization (`a.name = ?4 AND a.port = ?3`), matching host-based rules.
+- Allowed `ProxyJump` gateway usernames (e.g. `proxy`) and reserved `menu` /
+  `+tui` usernames without failing authentication when a user matches a
+  non-managed or TCP asset name.
+- Forwarded the SSH client's negotiated PTY `TERM` value to target shells and
+  PTY exec sessions instead of hardcoding `xterm-256color`.
+- Populated `key_id` and `asset_id` on runtime `sessions` records.
+- Removed the unmounted remote HTTP manifest routes
+  (`/api/v1/config/{validate,diff,apply}`) so `SecretSource::File` remains
+  strictly local to CLI and startup config.
+- Enabled multi-arch (`linux/amd64`, `linux/arm64`) GHCR container image builds
+  and aligned `systemd/hop.service` and CLI documentation with `/etc/hop/hop.yaml`.
+
+### Compatibility and upgrade
+
+- No SQLite schema migration is required from `v0.2.8` (`asset_health`,
+  `audit_events`, `display_name`, `key_id`, and `asset_id` columns already exist
+  in the `v0.2` baseline schema). Upgrade `hop-rs`, `hop-rs-frontend`, and
+  `luci-app-hop` together to `v0.2.9`.
+
 ## [0.2.8] - 2026-08-27
 
 ### Changed
@@ -219,7 +264,8 @@ See the [full v0.1.6 release notes](docs/releases/v0.1.6.md).
 
 See the [full v0.1.5 release notes](docs/releases/v0.1.5.md).
 
-[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.9...HEAD
+[0.2.9]: https://github.com/oslo254804746/hop-rs/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/oslo254804746/hop-rs/compare/v0.2.5...v0.2.8
 [0.2.5]: https://github.com/oslo254804746/hop-rs/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/oslo254804746/hop-rs/compare/v0.2.3...v0.2.4
