@@ -119,7 +119,13 @@ impl Manifest {
 
     pub fn validate_offline(&self) -> CatalogResult<()> {
         let resolved = self.resolve_material()?;
-        validate_references(&resolved, false, &BTreeSet::new(), &BTreeSet::new())
+        validate_references(
+            &resolved,
+            false,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        )
     }
 
     pub(crate) fn resolve_material(&self) -> CatalogResult<ResolvedManifest> {
@@ -270,6 +276,8 @@ pub struct AssetSpec {
     #[serde(default)]
     pub tags: Vec<String>,
     pub credential: Option<String>,
+    pub via_asset: Option<String>,
+    pub allow_tcp_forwarding: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -381,6 +389,8 @@ pub(crate) enum ResolvedAsset {
         description: Option<String>,
         tags: Vec<String>,
         credential: Option<String>,
+        via_asset: Option<String>,
+        allow_tcp_forwarding: bool,
     },
 }
 
@@ -489,6 +499,8 @@ fn resolve_asset(spec: &AssetSpec, path: &str) -> CatalogResult<ResolvedAsset> {
                 spec.description.is_some(),
                 !spec.tags.is_empty(),
                 spec.credential.is_some(),
+                spec.via_asset.is_some(),
+                spec.allow_tcp_forwarding.is_some(),
             ],
         )?;
         return Ok(ResolvedAsset::Absent);
@@ -509,6 +521,14 @@ fn resolve_asset(spec: &AssetSpec, path: &str) -> CatalogResult<ResolvedAsset> {
             "tcp asset cannot reference an ssh credential",
         ));
     }
+    if asset_type == AssetType::Tcp && spec.allow_tcp_forwarding == Some(false) {
+        return Err(CatalogError::new(
+            CatalogErrorCode::ApplyFailed,
+            Some(format!("{path}.allow_tcp_forwarding")),
+            "tcp asset cannot disable managed ssh tcp forwarding",
+        ));
+    }
+    let via_asset = optional_name(spec.via_asset.as_deref(), &format!("{path}.via_asset"))?;
     let tags = spec
         .tags
         .iter()
@@ -524,6 +544,8 @@ fn resolve_asset(spec: &AssetSpec, path: &str) -> CatalogResult<ResolvedAsset> {
         description: trim_optional(spec.description.as_deref()),
         tags,
         credential,
+        via_asset,
+        allow_tcp_forwarding: spec.allow_tcp_forwarding.unwrap_or(true),
     })
 }
 
@@ -578,11 +600,14 @@ fn resolve_access(spec: &AccessSpec, path: &str) -> CatalogResult<ResolvedAccess
     })
 }
 
+pub(crate) type AssetTopologyEntry = (AssetType, bool, Option<String>);
+
 pub(crate) fn validate_references(
     manifest: &ResolvedManifest,
     allow_database_references: bool,
     database_credentials: &BTreeSet<String>,
     database_assets: &BTreeSet<String>,
+    database_topology: &BTreeMap<String, AssetTopologyEntry>,
 ) -> CatalogResult<()> {
     let present_credentials: BTreeSet<&str> = manifest
         .credentials
@@ -600,27 +625,122 @@ pub(crate) fn validate_references(
         .collect();
     for (name, asset) in &manifest.assets {
         let ResolvedAsset::Present {
-            credential: Some(credential),
+            credential,
+            via_asset,
             ..
         } = asset
         else {
             continue;
         };
-        let known = present_credentials.contains(credential.as_str())
-            || (allow_database_references && database_credentials.contains(credential));
-        if !known
-            || matches!(
-                manifest.credentials.get(credential),
-                Some(ResolvedCredential::Absent)
-            )
-        {
-            return Err(unknown_reference(
-                format!("assets.{name}.credential"),
-                "credential",
-                credential,
-            ));
+        if let Some(credential) = credential {
+            let known = present_credentials.contains(credential.as_str())
+                || (allow_database_references && database_credentials.contains(credential));
+            if !known
+                || matches!(
+                    manifest.credentials.get(credential),
+                    Some(ResolvedCredential::Absent)
+                )
+            {
+                return Err(unknown_reference(
+                    format!("assets.{name}.credential"),
+                    "credential",
+                    credential,
+                ));
+            }
+        }
+        if let Some(via) = via_asset {
+            if via == name {
+                return Err(CatalogError::new(
+                    CatalogErrorCode::ApplyFailed,
+                    Some(format!("assets.{name}.via_asset")),
+                    "asset cannot reference itself as via_asset",
+                ));
+            }
+            let known = present_assets.contains(via.as_str())
+                || (allow_database_references && database_assets.contains(via));
+            if !known || matches!(manifest.assets.get(via), Some(ResolvedAsset::Absent)) {
+                return Err(unknown_reference(
+                    format!("assets.{name}.via_asset"),
+                    "asset",
+                    via,
+                ));
+            }
         }
     }
+
+    let mut topology: BTreeMap<String, AssetTopologyEntry> = if allow_database_references {
+        database_topology
+            .iter()
+            .filter(|(name, _)| database_assets.contains(*name))
+            .map(|(name, entry)| (name.clone(), entry.clone()))
+            .collect()
+    } else {
+        BTreeMap::new()
+    };
+    for (name, asset) in &manifest.assets {
+        match asset {
+            ResolvedAsset::Absent => {
+                topology.remove(name);
+            }
+            ResolvedAsset::Present {
+                asset_type,
+                credential,
+                via_asset,
+                ..
+            } => {
+                topology.insert(
+                    name.clone(),
+                    (*asset_type, credential.is_some(), via_asset.clone()),
+                );
+            }
+        }
+    }
+    for (name, (_, _, via_opt)) in &topology {
+        let Some(mut cur_via) = via_opt.clone() else {
+            continue;
+        };
+        let path = format!("assets.{name}.via_asset");
+        let mut hops = 0usize;
+        let mut seen = BTreeSet::from([name.clone()]);
+        loop {
+            hops += 1;
+            if hops > crate::MAX_ASSET_CHAIN_HOPS {
+                return Err(CatalogError::new(
+                    CatalogErrorCode::ApplyFailed,
+                    Some(path),
+                    format!(
+                        "via_asset chain exceeds maximum depth of {} hops",
+                        crate::MAX_ASSET_CHAIN_HOPS
+                    ),
+                ));
+            }
+            if !seen.insert(cur_via.clone()) {
+                return Err(CatalogError::new(
+                    CatalogErrorCode::ApplyFailed,
+                    Some(path),
+                    "via_asset chain contains a cycle",
+                ));
+            }
+            let Some((via_type, via_has_cred, next_via)) = topology.get(&cur_via) else {
+                if allow_database_references && database_topology.contains_key(&cur_via) {
+                    break;
+                }
+                return Err(unknown_reference(path, "asset", &cur_via));
+            };
+            if *via_type != AssetType::Ssh || !*via_has_cred {
+                return Err(CatalogError::new(
+                    CatalogErrorCode::ApplyFailed,
+                    Some(path),
+                    format!("via_asset {cur_via} must be a managed ssh asset with a credential"),
+                ));
+            }
+            match next_via {
+                Some(next) => cur_via = next.clone(),
+                None => break,
+            }
+        }
+    }
+
     for (name, access) in &manifest.access {
         let ResolvedAccess::Present {
             assets: Some(assets),

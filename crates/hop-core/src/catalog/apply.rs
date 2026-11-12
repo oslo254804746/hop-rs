@@ -61,7 +61,8 @@ impl Catalog {
         let assets = load_assets(self).await?;
         let credential_names = credentials.keys().cloned().collect();
         let asset_names = assets.keys().cloned().collect();
-        validate_references(&resolved, true, &credential_names, &asset_names)
+        let topology = existing_asset_topology(&assets);
+        validate_references(&resolved, true, &credential_names, &asset_names, &topology)
     }
 
     pub async fn diff(
@@ -216,6 +217,8 @@ struct AssetUpsert {
     description: Option<String>,
     tags: Vec<String>,
     credential_id: Option<String>,
+    via_asset_id: Option<String>,
+    allow_tcp_forwarding: bool,
     hash: String,
 }
 
@@ -250,7 +253,9 @@ struct ExistingResource {
 struct ExistingAsset {
     id: String,
     name: String,
+    asset_type: String,
     credential_id: Option<String>,
+    via_asset_id: Option<String>,
     management_mode: Option<String>,
     source_id: Option<String>,
     last_applied_hash: Option<String>,
@@ -268,6 +273,34 @@ impl ExistingAsset {
             orphaned_at: self.orphaned_at.clone(),
         }
     }
+}
+
+fn existing_asset_topology(
+    existing_assets: &BTreeMap<String, ExistingAsset>,
+) -> BTreeMap<String, super::manifest::AssetTopologyEntry> {
+    let id_to_name: BTreeMap<&str, &str> = existing_assets
+        .values()
+        .map(|asset| (asset.id.as_str(), asset.name.as_str()))
+        .collect();
+    existing_assets
+        .iter()
+        .map(|(name, asset)| {
+            let asset_type = if asset.asset_type == "tcp" {
+                AssetType::Tcp
+            } else {
+                AssetType::Ssh
+            };
+            let via_name = asset
+                .via_asset_id
+                .as_deref()
+                .and_then(|id| id_to_name.get(id))
+                .map(|v| (*v).to_string());
+            (
+                name.clone(),
+                (asset_type, asset.credential_id.is_some(), via_name),
+            )
+        })
+        .collect()
 }
 
 async fn build_plan(
@@ -310,7 +343,14 @@ async fn build_plan(
             source_id,
         );
     }
-    validate_references(&manifest, true, &final_credential_names, &final_asset_names)?;
+    let topology = existing_asset_topology(&existing_assets);
+    validate_references(
+        &manifest,
+        true,
+        &final_credential_names,
+        &final_asset_names,
+        &topology,
+    )?;
 
     let mut plan = Plan {
         credential_upserts: Vec::new(),
@@ -394,6 +434,7 @@ async fn build_plan(
         .iter()
         .map(|(name, resource)| (name.clone(), resource.id.clone()))
         .collect();
+    let mut pending_via_names: BTreeMap<String, Option<String>> = BTreeMap::new();
     for (name, resource) in &manifest.assets {
         let path = format!("assets.{name}");
         match resource {
@@ -417,6 +458,8 @@ async fn build_plan(
                 description,
                 tags,
                 credential,
+                via_asset,
+                allow_tcp_forwarding,
             } => {
                 let credential_id = credential
                     .as_ref()
@@ -437,10 +480,13 @@ async fn build_plan(
                     description.as_deref(),
                     tags,
                     credential.as_deref(),
+                    via_asset.as_deref(),
+                    *allow_tcp_forwarding,
                 );
                 let existing = existing_assets.get(name).map(ExistingAsset::resource);
                 let (id, action) = classify_present(existing.as_ref(), source_id, &hash, &path)?;
                 asset_ids.insert(name.clone(), id.clone());
+                pending_via_names.insert(id.clone(), via_asset.clone());
                 push_change(&mut plan, "asset", name, action);
                 if action != ApplyAction::Unchanged {
                     plan.asset_upserts.push(AssetUpsert {
@@ -453,6 +499,8 @@ async fn build_plan(
                         description: description.clone(),
                         tags: tags.clone(),
                         credential_id,
+                        via_asset_id: None,
+                        allow_tcp_forwarding: *allow_tcp_forwarding,
                         hash,
                     });
                 }
@@ -477,6 +525,18 @@ async fn build_plan(
         .filter(|resource| resource.resource_type == "asset")
     {
         asset_ids.retain(|_, id| id != &deletion.id);
+    }
+    for upsert in &mut plan.asset_upserts {
+        if let Some(Some(via_name)) = pending_via_names.get(&upsert.id) {
+            let via_id = asset_ids.get(via_name).cloned().ok_or_else(|| {
+                CatalogError::new(
+                    CatalogErrorCode::UnknownReference,
+                    Some(format!("assets.{}.via_asset", upsert.name)),
+                    "via_asset is not present in the final catalog",
+                )
+            })?;
+            upsert.via_asset_id = Some(via_id);
+        }
     }
 
     for (name, resource) in &manifest.access {
@@ -545,6 +605,7 @@ async fn build_plan(
     );
 
     validate_credential_deletes(&plan, &existing_assets)?;
+    validate_asset_deletes(&plan, &existing_assets)?;
     plan.changes.sort_by(|left, right| {
         (&left.resource_type, &left.name).cmp(&(&right.resource_type, &right.name))
     });
@@ -711,6 +772,46 @@ fn validate_credential_deletes(
     Ok(())
 }
 
+fn validate_asset_deletes(
+    plan: &Plan,
+    existing_assets: &BTreeMap<String, ExistingAsset>,
+) -> CatalogResult<()> {
+    let deleted_asset_ids: BTreeSet<&str> = plan
+        .deletes
+        .iter()
+        .filter(|resource| resource.resource_type == "asset")
+        .map(|resource| resource.id.as_str())
+        .collect();
+    let updated_vias: BTreeMap<&str, Option<&str>> = plan
+        .asset_upserts
+        .iter()
+        .map(|asset| (asset.id.as_str(), asset.via_asset_id.as_deref()))
+        .collect();
+    for deleted in plan
+        .deletes
+        .iter()
+        .filter(|resource| resource.resource_type == "asset")
+    {
+        for asset in existing_assets.values() {
+            if deleted_asset_ids.contains(asset.id.as_str()) {
+                continue;
+            }
+            let final_via = updated_vias
+                .get(asset.id.as_str())
+                .copied()
+                .unwrap_or(asset.via_asset_id.as_deref());
+            if final_via == Some(deleted.id.as_str()) {
+                return Err(CatalogError::new(
+                    CatalogErrorCode::ResourceInUse,
+                    Some(format!("assets.{}", deleted.name)),
+                    format!("asset is still referenced as via_asset by {}", asset.name),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn push_change(plan: &mut Plan, resource_type: &str, name: &str, action: ApplyAction) {
     plan.changes.push(ApplyChange {
         resource_type: resource_type.to_string(),
@@ -791,8 +892,8 @@ async fn execute_plan(
         sqlx::query(
             r#"
             INSERT INTO assets
-                (id, name, asset_type, host, port, display_name, description, tags_json, credential_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                (id, name, asset_type, host, port, display_name, description, tags_json, credential_id, via_asset_id, allow_tcp_forwarding)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 asset_type = excluded.asset_type,
@@ -802,6 +903,8 @@ async fn execute_plan(
                 description = excluded.description,
                 tags_json = excluded.tags_json,
                 credential_id = excluded.credential_id,
+                via_asset_id = NULL,
+                allow_tcp_forwarding = excluded.allow_tcp_forwarding,
                 updated_at = CURRENT_TIMESTAMP
             "#,
         )
@@ -814,6 +917,7 @@ async fn execute_plan(
         .bind(&asset.description)
         .bind(tags_json)
         .bind(&asset.credential_id)
+        .bind(asset.allow_tcp_forwarding)
         .execute(&mut **transaction)
         .await
         .map_err(database_error)?;
@@ -827,6 +931,17 @@ async fn execute_plan(
             &asset.hash,
         )
         .await?;
+    }
+
+    for asset in &plan.asset_upserts {
+        if let Some(via_id) = &asset.via_asset_id {
+            sqlx::query("UPDATE assets SET via_asset_id = ?1 WHERE id = ?2")
+                .bind(via_id)
+                .bind(&asset.id)
+                .execute(&mut **transaction)
+                .await
+                .map_err(database_error)?;
+        }
     }
 
     for access in &plan.access_upserts {
@@ -894,6 +1009,18 @@ async fn execute_plan(
         .execute(&mut **transaction)
         .await
         .map_err(database_error)?;
+    }
+
+    for deletion in plan
+        .deletes
+        .iter()
+        .filter(|resource| resource.resource_type == "asset")
+    {
+        sqlx::query("UPDATE assets SET via_asset_id = NULL WHERE id = ?1")
+            .bind(&deletion.id)
+            .execute(&mut **transaction)
+            .await
+            .map_err(database_error)?;
     }
 
     for resource_type in ["access_key", "asset", "credential"] {
@@ -1060,6 +1187,7 @@ fn credential_hash(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn asset_hash(
     asset_type: AssetType,
     host: &str,
@@ -1068,27 +1196,29 @@ fn asset_hash(
     description: Option<&str>,
     tags: &[String],
     credential: Option<&str>,
+    via_asset: Option<&str>,
+    allow_tcp_forwarding: bool,
 ) -> String {
-    if tags.is_empty() {
-        hash_value(serde_json::json!({
-            "type": asset_type.as_str(),
-            "host": host,
-            "port": port,
-            "display_name": display_name,
-            "description": description,
-            "credential": credential,
-        }))
-    } else {
-        hash_value(serde_json::json!({
-            "type": asset_type.as_str(),
-            "host": host,
-            "port": port,
-            "display_name": display_name,
-            "description": description,
-            "tags": tags,
-            "credential": credential,
-        }))
+    let mut obj = serde_json::Map::new();
+    obj.insert("type".to_string(), serde_json::json!(asset_type.as_str()));
+    obj.insert("host".to_string(), serde_json::json!(host));
+    obj.insert("port".to_string(), serde_json::json!(port));
+    obj.insert("display_name".to_string(), serde_json::json!(display_name));
+    obj.insert("description".to_string(), serde_json::json!(description));
+    if !tags.is_empty() {
+        obj.insert("tags".to_string(), serde_json::json!(tags));
     }
+    obj.insert("credential".to_string(), serde_json::json!(credential));
+    if let Some(via) = via_asset {
+        obj.insert("via_asset".to_string(), serde_json::json!(via));
+    }
+    if !allow_tcp_forwarding {
+        obj.insert(
+            "allow_tcp_forwarding".to_string(),
+            serde_json::json!(allow_tcp_forwarding),
+        );
+    }
+    hash_value(serde_json::Value::Object(obj))
 }
 
 fn access_hash(public_key: &str, enabled: bool, assets: Option<&[String]>) -> String {
@@ -1135,7 +1265,7 @@ async fn load_credentials(catalog: &Catalog) -> CatalogResult<BTreeMap<String, E
 async fn load_assets(catalog: &Catalog) -> CatalogResult<BTreeMap<String, ExistingAsset>> {
     let resources = sqlx::query_as::<_, ExistingAsset>(
         r#"
-        SELECT a.id, a.name, a.credential_id,
+        SELECT a.id, a.name, a.asset_type, a.credential_id, a.via_asset_id,
                o.management_mode, o.source_id, o.last_applied_hash, o.orphaned_at
         FROM assets a
         LEFT JOIN resource_ownership o ON o.resource_type = 'asset' AND o.resource_id = a.id
@@ -1458,5 +1588,50 @@ access:
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].display_name.as_deref(), Some("HK Edge"));
         assert_eq!(assets[0].tags, vec!["hk".to_string(), "nat".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn declarative_via_asset_applies_regardless_of_lexical_order_and_guards_delete() {
+        let catalog = Catalog::in_memory().await.unwrap();
+        let master_key = MasterKey::generate();
+        let fixture = Fixture::new("password");
+        let chained = concat!(
+            "  aaa-leaf:\n    type: ssh\n    host: 10.0.0.20\n    port: 22\n    credential: root\n    via_asset: server\n    allow_tcp_forwarding: false\n",
+            "  server:\n    type: ssh\n    host: 192.0.2.10\n    port: 22\n    credential: root"
+        );
+        let applied = catalog
+            .apply(
+                &fixture.manifest(chained),
+                "home",
+                &master_key,
+                ApplyOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied.created, 4);
+
+        let server = catalog.get_asset_by_name("server").await.unwrap().unwrap();
+        let leaf = catalog
+            .get_asset_by_name("aaa-leaf")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(leaf.via_asset_id.as_deref(), Some(server.id.as_str()));
+        assert!(!leaf.allow_tcp_forwarding);
+
+        let chain = catalog.resolve_asset_chain(&leaf.id).await.unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].name, "server");
+        assert_eq!(chain[1].name, "aaa-leaf");
+
+        let delete_parent = Manifest::from_yaml(
+            "api_version: hop/v1alpha1\nassets:\n  server:\n    state: absent\n",
+        )
+        .unwrap();
+        let err = catalog
+            .apply(&delete_parent, "home", &master_key, ApplyOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CatalogErrorCode::ResourceInUse);
     }
 }

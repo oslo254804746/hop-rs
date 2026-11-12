@@ -230,6 +230,7 @@ impl HopSshServer {
             active_sessions: self.active_sessions.clone(),
             auth: None,
             direct_asset: None,
+            direct_client: Arc::new(Mutex::new(None)),
             client_ip: Some(peer_addr.to_string()),
             channels: Arc::new(Mutex::new(HashMap::new())),
             ptys: HashMap::new(),
@@ -245,6 +246,7 @@ pub struct HopSshHandler {
     active_sessions: ActiveSessionRegistry,
     auth: Option<AuthInfo>,
     direct_asset: Option<Asset>,
+    direct_client: Arc<Mutex<Option<Arc<super::client::ManagedClientSession>>>>,
     client_ip: Option<String>,
     channels: SharedChannels,
     ptys: HashMap<ChannelId, PtySize>,
@@ -588,8 +590,8 @@ impl server::Handler for HopSshHandler {
         channel: Channel<Msg>,
         host_to_connect: &str,
         port_to_connect: u32,
-        _originator_address: &str,
-        _originator_port: u32,
+        originator_address: &str,
+        originator_port: u32,
         reply: server::ChannelOpenHandle,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
@@ -599,6 +601,97 @@ impl server::Handler for HopSshHandler {
                 .await;
             return Ok(());
         };
+
+        let is_dot_hop = host_to_connect
+            .trim()
+            .to_ascii_lowercase()
+            .ends_with(".hop");
+        if let Some(direct) = self.direct_asset.as_ref().filter(|_| !is_dot_hop) {
+            let fresh_asset = self.db.get_asset_by_id(&direct.id).await?;
+            let Some(asset) = fresh_asset.filter(|a| accepts_managed_ssh_asset(Some(a))) else {
+                audit_denied_attempt(
+                    &self.db,
+                    &auth,
+                    "managed-tcp-forward",
+                    Some(direct.id.clone()),
+                    Some(direct.name.clone()),
+                    Some(host_to_connect.to_string()),
+                    Some(i64::from(port_to_connect)),
+                    self.client_ip.clone(),
+                )
+                .await;
+                reply
+                    .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                    .await;
+                return Ok(());
+            };
+
+            let key_authorized = self
+                .db
+                .key_can_access_asset(&auth.key_id, &asset.id)
+                .await?;
+            let forwarding_enabled =
+                self.config.ssh.allow_managed_tcp_forwarding && asset.allow_tcp_forwarding;
+            if !key_authorized || !forwarding_enabled {
+                audit_denied_attempt(
+                    &self.db,
+                    &auth,
+                    "managed-tcp-forward",
+                    Some(asset.id.clone()),
+                    Some(asset.name.clone()),
+                    Some(host_to_connect.to_string()),
+                    Some(i64::from(port_to_connect)),
+                    self.client_ip.clone(),
+                )
+                .await;
+                warn!(
+                    key_id = auth.key_id,
+                    asset = asset.name,
+                    host_to_connect,
+                    port_to_connect,
+                    forwarding_enabled,
+                    client_ip = ?self.client_ip,
+                    "rejected managed tcp forwarding request"
+                );
+                reply
+                    .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                    .await;
+                return Ok(());
+            }
+
+            let direct_client = Arc::clone(&self.direct_client);
+            let db = self.db.clone();
+            let master_key = Arc::clone(&self.master_key);
+            let active_sessions = self.active_sessions.clone();
+            let client_ip = self.client_ip.clone();
+            let connect_timeout = self.config.connect_timeout();
+            let host = host_to_connect.to_string();
+            let orig_addr = originator_address.to_string();
+            tokio::spawn(async move {
+                if let Err(err) = proxy::bridge_managed_direct_tcpip(
+                    channel,
+                    reply,
+                    direct_client,
+                    db,
+                    master_key,
+                    active_sessions,
+                    auth,
+                    asset,
+                    host,
+                    port_to_connect,
+                    orig_addr,
+                    originator_port,
+                    client_ip,
+                    connect_timeout,
+                )
+                .await
+                {
+                    tracing::debug!(?err, "managed tcp forward channel ended with error");
+                }
+            });
+            return Ok(());
+        }
+
         let target = self
             .db
             .find_proxy_asset_for_key(&auth.key_id, host_to_connect, i64::from(port_to_connect))
@@ -630,12 +723,22 @@ impl server::Handler for HopSshHandler {
 
         reply.accept().await;
         let db = self.db.clone();
+        let master_key = Arc::clone(&self.master_key);
         let active_sessions = self.active_sessions.clone();
         let client_ip = self.client_ip.clone();
+        let connect_timeout = self.config.connect_timeout();
         tokio::spawn(async move {
-            if let Err(err) =
-                proxy::bridge_direct_tcpip(channel, db, active_sessions, auth, asset, client_ip)
-                    .await
+            if let Err(err) = proxy::bridge_direct_tcpip(
+                channel,
+                db,
+                master_key,
+                active_sessions,
+                auth,
+                asset,
+                client_ip,
+                connect_timeout,
+            )
+            .await
             {
                 warn!(?err, "proxy bridge failed");
             }
@@ -835,6 +938,7 @@ impl server::Handler for HopSshHandler {
         if probe_tui {
             if let Some(auth) = self.auth_info() {
                 let db = self.db.clone();
+                let master_key = Arc::clone(&self.master_key);
                 let channels = self.channels.clone();
                 let handle = session.handle();
                 let timeout = self.config.connect_timeout();
@@ -843,7 +947,8 @@ impl server::Handler for HopSshHandler {
                         return;
                     };
                     let count = assets.len();
-                    let _ = crate::probe::probe_assets(&db, &assets, timeout).await;
+                    let _ =
+                        crate::probe::probe_assets(&db, Some(master_key), &assets, timeout).await;
                     let Ok(fresh) = db.list_assets_for_key(&auth.key_id).await else {
                         return;
                     };
@@ -1055,6 +1160,7 @@ mod tests {
             active_sessions: ActiveSessionRegistry::default(),
             auth: None,
             direct_asset: None,
+            direct_client: Arc::new(Mutex::new(None)),
             client_ip: None,
             channels: Arc::new(Mutex::new(HashMap::new())),
             ptys: HashMap::new(),
@@ -1062,10 +1168,35 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct ExecTargetServer {
+        expected_user: String,
+        expected_password: String,
+        auth_count: Arc<std::sync::atomic::AtomicUsize>,
         commands: Arc<StdMutex<Vec<Vec<u8>>>>,
         ptys: Arc<StdMutex<Vec<(u32, u32)>>>,
+        forwards: Arc<StdMutex<Vec<(String, u32)>>>,
+        session_channels: std::collections::HashSet<ChannelId>,
+    }
+
+    impl Default for ExecTargetServer {
+        fn default() -> Self {
+            Self::with_credentials("target-user", "target-password")
+        }
+    }
+
+    impl ExecTargetServer {
+        fn with_credentials(user: &str, password: &str) -> Self {
+            Self {
+                expected_user: user.to_string(),
+                expected_password: password.to_string(),
+                auth_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                commands: Arc::new(StdMutex::new(Vec::new())),
+                ptys: Arc::new(StdMutex::new(Vec::new())),
+                forwards: Arc::new(StdMutex::new(Vec::new())),
+                session_channels: std::collections::HashSet::new(),
+            }
+        }
     }
 
     impl server::Server for ExecTargetServer {
@@ -1084,7 +1215,9 @@ mod tests {
             user: &str,
             password: &str,
         ) -> Result<server::Auth, Self::Error> {
-            if user == "target-user" && password == "target-password" {
+            if user == self.expected_user && password == self.expected_password {
+                self.auth_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(server::Auth::Accept)
             } else {
                 Ok(server::Auth::reject())
@@ -1093,11 +1226,45 @@ mod tests {
 
         async fn channel_open_session(
             &mut self,
-            _channel: Channel<ServerMsg>,
+            channel: Channel<ServerMsg>,
             reply: server::ChannelOpenHandle,
             _session: &mut Session,
         ) -> Result<(), Self::Error> {
+            self.session_channels.insert(channel.id());
             reply.accept().await;
+            Ok(())
+        }
+
+        async fn channel_open_direct_tcpip(
+            &mut self,
+            channel: Channel<ServerMsg>,
+            host_to_connect: &str,
+            port_to_connect: u32,
+            _originator_address: &str,
+            _originator_port: u32,
+            reply: server::ChannelOpenHandle,
+            _session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            self.forwards
+                .lock()
+                .unwrap()
+                .push((host_to_connect.to_string(), port_to_connect));
+            let Ok(port) = u16::try_from(port_to_connect) else {
+                reply.reject(ChannelOpenFailure::ConnectFailed).await;
+                return Ok(());
+            };
+            match tokio::net::TcpStream::connect((host_to_connect, port)).await {
+                Ok(mut tcp) => {
+                    reply.accept().await;
+                    tokio::spawn(async move {
+                        let mut stream = channel.into_stream();
+                        let _ = tokio::io::copy_bidirectional(&mut stream, &mut tcp).await;
+                    });
+                }
+                Err(_) => {
+                    reply.reject(ChannelOpenFailure::ConnectFailed).await;
+                }
+            }
             Ok(())
         }
 
@@ -1134,7 +1301,9 @@ mod tests {
             data: &[u8],
             session: &mut Session,
         ) -> Result<(), Self::Error> {
-            session.data(channel, data.to_vec())?;
+            if self.session_channels.contains(&channel) {
+                session.data(channel, data.to_vec())?;
+            }
             Ok(())
         }
 
@@ -1143,11 +1312,13 @@ mod tests {
             channel: ChannelId,
             session: &mut Session,
         ) -> Result<(), Self::Error> {
-            session.extended_data(channel, 1, b"target stderr\n".to_vec())?;
-            session.exit_status_request(channel, 42)?;
-            session.data(channel, b"after status\n".to_vec())?;
-            session.eof(channel)?;
-            session.close(channel)?;
+            if self.session_channels.remove(&channel) {
+                session.extended_data(channel, 1, b"target stderr\n".to_vec())?;
+                session.exit_status_request(channel, 42)?;
+                session.data(channel, b"after status\n".to_vec())?;
+                session.eof(channel)?;
+                session.close(channel)?;
+            }
             Ok(())
         }
     }
@@ -1565,6 +1736,8 @@ mod tests {
             description: None,
             tags: Vec::new(),
             credential_id: Some("cred-1".to_string()),
+            via_asset_id: None,
+            allow_tcp_forwarding: true,
             created_at: None,
             updated_at: None,
             health: hop_core::AssetHealth::unknown("asset-1"),
@@ -1721,5 +1894,550 @@ mod tests {
                 .await
                 .unwrap());
         }
+    }
+
+    #[tokio::test]
+    async fn chained_via_asset_exec_and_probe_traverse_jump_host_and_record_tofu_and_samples() {
+        let mut jump_server = ExecTargetServer::with_credentials("jump-user", "jump-password");
+        let jump_state = jump_server.clone();
+        let jump_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let jump_addr = jump_listener.local_addr().unwrap();
+        let jump_config = Arc::new(server::Config {
+            auth_rejection_time: Duration::ZERO,
+            auth_rejection_time_initial: Some(Duration::ZERO),
+            keys: vec![
+                russh::keys::PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap(),
+            ],
+            ..Default::default()
+        });
+        let jump_task =
+            tokio::spawn(
+                async move { jump_server.run_on_socket(jump_config, &jump_listener).await },
+            );
+
+        let mut leaf_server = ExecTargetServer::with_credentials("leaf-user", "leaf-password");
+        let leaf_state = leaf_server.clone();
+        let leaf_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let leaf_addr = leaf_listener.local_addr().unwrap();
+        let leaf_config = Arc::new(server::Config {
+            auth_rejection_time: Duration::ZERO,
+            auth_rejection_time_initial: Some(Duration::ZERO),
+            keys: vec![
+                russh::keys::PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap(),
+            ],
+            ..Default::default()
+        });
+        let leaf_task =
+            tokio::spawn(
+                async move { leaf_server.run_on_socket(leaf_config, &leaf_listener).await },
+            );
+
+        let db = Catalog::in_memory().await.unwrap();
+        let master_key = Arc::new(MasterKey::from_bytes([11; 32]));
+
+        let jump_cred_id = "jump-cred";
+        let jump_cred = db
+            .add_credential(NewCredential {
+                id: Some(jump_cred_id.to_string()),
+                name: "jump cred".to_string(),
+                username: "jump-user".to_string(),
+                auth_type: AuthType::Password,
+                password_enc: Some(
+                    encrypt_envelope(
+                        &master_key,
+                        &format!("{jump_cred_id}:password"),
+                        b"jump-password",
+                    )
+                    .unwrap(),
+                ),
+                private_key_enc: None,
+                passphrase_enc: None,
+            })
+            .await
+            .unwrap();
+        let leaf_cred_id = "leaf-cred";
+        let leaf_cred = db
+            .add_credential(NewCredential {
+                id: Some(leaf_cred_id.to_string()),
+                name: "leaf cred".to_string(),
+                username: "leaf-user".to_string(),
+                auth_type: AuthType::Password,
+                password_enc: Some(
+                    encrypt_envelope(
+                        &master_key,
+                        &format!("{leaf_cred_id}:password"),
+                        b"leaf-password",
+                    )
+                    .unwrap(),
+                ),
+                private_key_enc: None,
+                passphrase_enc: None,
+            })
+            .await
+            .unwrap();
+
+        let mut jump_new = NewAsset::new(
+            "hk-relay",
+            jump_addr.ip().to_string(),
+            i64::from(jump_addr.port()),
+        );
+        jump_new.credential_id = Some(jump_cred.id);
+        let jump_asset = db.add_asset(jump_new).await.unwrap();
+
+        let mut leaf_new = NewAsset::new(
+            "jp-private",
+            leaf_addr.ip().to_string(),
+            i64::from(leaf_addr.port()),
+        );
+        leaf_new.credential_id = Some(leaf_cred.id);
+        leaf_new.via_asset_id = Some(jump_asset.id.clone());
+        let leaf_asset = db.add_asset(leaf_new).await.unwrap();
+
+        let probed =
+            crate::probe::probe_asset(&db, Some(&master_key), &leaf_asset, Duration::from_secs(5))
+                .await
+                .unwrap();
+        assert_eq!(probed.health.status, "healthy");
+        assert!(probed.health.latency_ms.is_some());
+        let samples = db
+            .list_asset_probe_samples(&leaf_asset.id, 10)
+            .await
+            .unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].status, "healthy");
+
+        let client_key =
+            russh::keys::PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap();
+        let client_public_key = client_key.public_key();
+        db.add_authorized_key(NewAuthorizedKey::new(
+            "dev laptop",
+            client_public_key.to_openssh().unwrap(),
+            key_fingerprint(client_public_key),
+        ))
+        .await
+        .unwrap();
+
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hop_addr = probe.local_addr().unwrap();
+        drop(probe);
+        let temp = tempfile::tempdir().unwrap();
+        let config = HopConfig {
+            listen: hop_addr.to_string(),
+            data_dir: temp.path().to_path_buf(),
+            ssh: hop_core::config::SshConfig {
+                banner: String::new(),
+                keepalive_interval: 0,
+                connect_timeout: 5,
+                ..hop_core::config::SshConfig::default()
+            },
+            ..HopConfig::default()
+        };
+        let (_shutdown_tx, shutdown) = watch::channel(false);
+        let hop_task = tokio::spawn(serve_ssh_with_shutdown(
+            hop_addr,
+            config,
+            db.clone(),
+            master_key,
+            ActiveSessionRegistry::default(),
+            shutdown,
+        ));
+
+        let mut hop_client = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match russh::client::connect(
+                    Arc::new(russh::client::Config::default()),
+                    hop_addr,
+                    AcceptAnyServerKey,
+                )
+                .await
+                {
+                    Ok(client) => break Some(client),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .expect("Hop SSH server did not start")
+        .expect("Hop SSH client was not created");
+
+        let hash_alg = hop_client
+            .best_supported_rsa_hash()
+            .await
+            .unwrap()
+            .flatten();
+        let auth = hop_client
+            .authenticate_publickey(
+                "jp-private",
+                PrivateKeyWithHashAlg::new(Arc::new(client_key), hash_alg),
+            )
+            .await
+            .unwrap();
+        assert!(auth.success());
+
+        let (stdout, stderr, exit_status) =
+            run_exec_channel(&hop_client, b"cat", None, b"chained payload\n").await;
+        assert_eq!(
+            stdout,
+            b"chained payload\nafter status\n",
+            "unexpected stdout; stderr={} exit={:?}",
+            String::from_utf8_lossy(&stderr),
+            exit_status
+        );
+        assert_eq!(stderr, b"target stderr\n");
+        assert_eq!(exit_status, Some(42));
+        assert_eq!(&*leaf_state.commands.lock().unwrap(), &[b"cat".to_vec()]);
+        assert_eq!(
+            jump_state.forwards.lock().unwrap().len(),
+            2,
+            "jump host should have forwarded both probe and exec streams"
+        );
+        assert_eq!(db.list_known_hosts().await.unwrap().len(), 2);
+
+        hop_client
+            .disconnect(russh::Disconnect::ByApplication, "done", "en")
+            .await
+            .ok();
+        hop_task.abort();
+        jump_task.abort();
+        leaf_task.abort();
+    }
+
+    #[tokio::test]
+    async fn managed_direct_tcpip_multiplexes_multiple_port_forwards_over_cached_target_session() {
+        use tokio::io::AsyncWriteExt;
+
+        let echo_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo_listener.local_addr().unwrap();
+        let echo_task = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = echo_listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 256];
+                    if let Ok(n) = stream.read(&mut buf).await {
+                        let mut reply = b"echo:".to_vec();
+                        reply.extend_from_slice(&buf[..n]);
+                        let _ = stream.write_all(&reply).await;
+                        let _ = stream.shutdown().await;
+                    }
+                });
+            }
+        });
+
+        let mut target = ExecTargetServer::default();
+        let target_state = target.clone();
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        let target_config = Arc::new(server::Config {
+            auth_rejection_time: Duration::ZERO,
+            auth_rejection_time_initial: Some(Duration::ZERO),
+            keys: vec![
+                russh::keys::PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap(),
+            ],
+            ..Default::default()
+        });
+        let target_task =
+            tokio::spawn(
+                async move { target.run_on_socket(target_config, &target_listener).await },
+            );
+
+        let db = Catalog::in_memory().await.unwrap();
+        let master_key = Arc::new(MasterKey::from_bytes([12; 32]));
+        let credential_id = "fwd-target-cred";
+        let credential = db
+            .add_credential(NewCredential {
+                id: Some(credential_id.to_string()),
+                name: "fwd target".to_string(),
+                username: "target-user".to_string(),
+                auth_type: AuthType::Password,
+                password_enc: Some(
+                    encrypt_envelope(
+                        &master_key,
+                        &format!("{credential_id}:password"),
+                        b"target-password",
+                    )
+                    .unwrap(),
+                ),
+                private_key_enc: None,
+                passphrase_enc: None,
+            })
+            .await
+            .unwrap();
+
+        let mut asset = NewAsset::new(
+            "cursor-dev",
+            target_addr.ip().to_string(),
+            i64::from(target_addr.port()),
+        );
+        asset.credential_id = Some(credential.id);
+        db.add_asset(asset).await.unwrap();
+
+        let client_key =
+            russh::keys::PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap();
+        let client_public_key = client_key.public_key();
+        db.add_authorized_key(NewAuthorizedKey::new(
+            "cursor ide",
+            client_public_key.to_openssh().unwrap(),
+            key_fingerprint(client_public_key),
+        ))
+        .await
+        .unwrap();
+
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hop_addr = probe.local_addr().unwrap();
+        drop(probe);
+        let temp = tempfile::tempdir().unwrap();
+        let config = HopConfig {
+            listen: hop_addr.to_string(),
+            data_dir: temp.path().to_path_buf(),
+            ssh: hop_core::config::SshConfig {
+                banner: String::new(),
+                keepalive_interval: 0,
+                connect_timeout: 5,
+                ..hop_core::config::SshConfig::default()
+            },
+            ..HopConfig::default()
+        };
+        let (_shutdown_tx, shutdown) = watch::channel(false);
+        let hop_task = tokio::spawn(serve_ssh_with_shutdown(
+            hop_addr,
+            config,
+            db.clone(),
+            master_key,
+            ActiveSessionRegistry::default(),
+            shutdown,
+        ));
+
+        let mut hop_client = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match russh::client::connect(
+                    Arc::new(russh::client::Config::default()),
+                    hop_addr,
+                    AcceptAnyServerKey,
+                )
+                .await
+                {
+                    Ok(client) => break Some(client),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let hash_alg = hop_client
+            .best_supported_rsa_hash()
+            .await
+            .unwrap()
+            .flatten();
+        let auth = hop_client
+            .authenticate_publickey(
+                "cursor-dev",
+                PrivateKeyWithHashAlg::new(Arc::new(client_key), hash_alg),
+            )
+            .await
+            .unwrap();
+        assert!(auth.success());
+
+        let (ch1, ch2) = tokio::join!(
+            hop_client.channel_open_direct_tcpip(
+                echo_addr.ip().to_string(),
+                u32::from(echo_addr.port()),
+                "127.0.0.1",
+                51001,
+            ),
+            hop_client.channel_open_direct_tcpip(
+                echo_addr.ip().to_string(),
+                u32::from(echo_addr.port()),
+                "127.0.0.1",
+                51002,
+            )
+        );
+        let mut s1 = ch1.unwrap().into_stream();
+        let mut s2 = ch2.unwrap().into_stream();
+        s1.write_all(b"cursor-port-1").await.unwrap();
+        s2.write_all(b"socks-port-2").await.unwrap();
+        let mut out1 = Vec::new();
+        let mut out2 = Vec::new();
+        s1.read_to_end(&mut out1).await.unwrap();
+        s2.read_to_end(&mut out2).await.unwrap();
+        assert_eq!(out1, b"echo:cursor-port-1");
+        assert_eq!(out2, b"echo:socks-port-2");
+        drop(s1);
+        drop(s2);
+
+        assert_eq!(
+            target_state
+                .auth_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "multiple direct-tcpip channels must multiplex over a single cached target SSH session"
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let sessions = db.list_sessions(10).await.unwrap();
+                if sessions.len() == 2 && sessions.iter().all(|s| s.ended_at.is_some()) {
+                    assert!(sessions
+                        .iter()
+                        .all(|s| s.mode == "managed-tcp-forward" && s.status == "ok"));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("managed-tcp-forward sessions did not complete cleanly");
+
+        hop_client
+            .disconnect(russh::Disconnect::ByApplication, "done", "en")
+            .await
+            .ok();
+        hop_task.abort();
+        target_task.abort();
+        echo_task.abort();
+    }
+
+    #[tokio::test]
+    async fn managed_direct_tcpip_honors_per_asset_forwarding_disable_policy() {
+        let mut target = ExecTargetServer::default();
+        let target_state = target.clone();
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        let target_config = Arc::new(server::Config {
+            auth_rejection_time: Duration::ZERO,
+            auth_rejection_time_initial: Some(Duration::ZERO),
+            keys: vec![
+                russh::keys::PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap(),
+            ],
+            ..Default::default()
+        });
+        let target_task =
+            tokio::spawn(
+                async move { target.run_on_socket(target_config, &target_listener).await },
+            );
+
+        let db = Catalog::in_memory().await.unwrap();
+        let master_key = Arc::new(MasterKey::from_bytes([13; 32]));
+        let credential_id = "locked-cred";
+        let credential = db
+            .add_credential(NewCredential {
+                id: Some(credential_id.to_string()),
+                name: "locked target".to_string(),
+                username: "target-user".to_string(),
+                auth_type: AuthType::Password,
+                password_enc: Some(
+                    encrypt_envelope(
+                        &master_key,
+                        &format!("{credential_id}:password"),
+                        b"target-password",
+                    )
+                    .unwrap(),
+                ),
+                private_key_enc: None,
+                passphrase_enc: None,
+            })
+            .await
+            .unwrap();
+
+        let mut asset = NewAsset::new(
+            "locked-box",
+            target_addr.ip().to_string(),
+            i64::from(target_addr.port()),
+        );
+        asset.credential_id = Some(credential.id);
+        asset.allow_tcp_forwarding = false;
+        db.add_asset(asset).await.unwrap();
+
+        let client_key =
+            russh::keys::PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap();
+        let client_public_key = client_key.public_key();
+        db.add_authorized_key(NewAuthorizedKey::new(
+            "restricted laptop",
+            client_public_key.to_openssh().unwrap(),
+            key_fingerprint(client_public_key),
+        ))
+        .await
+        .unwrap();
+
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hop_addr = probe.local_addr().unwrap();
+        drop(probe);
+        let temp = tempfile::tempdir().unwrap();
+        let config = HopConfig {
+            listen: hop_addr.to_string(),
+            data_dir: temp.path().to_path_buf(),
+            ssh: hop_core::config::SshConfig {
+                banner: String::new(),
+                keepalive_interval: 0,
+                connect_timeout: 5,
+                ..hop_core::config::SshConfig::default()
+            },
+            ..HopConfig::default()
+        };
+        let (_shutdown_tx, shutdown) = watch::channel(false);
+        let hop_task = tokio::spawn(serve_ssh_with_shutdown(
+            hop_addr,
+            config,
+            db.clone(),
+            master_key,
+            ActiveSessionRegistry::default(),
+            shutdown,
+        ));
+
+        let mut hop_client = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match russh::client::connect(
+                    Arc::new(russh::client::Config::default()),
+                    hop_addr,
+                    AcceptAnyServerKey,
+                )
+                .await
+                {
+                    Ok(client) => break Some(client),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let hash_alg = hop_client
+            .best_supported_rsa_hash()
+            .await
+            .unwrap()
+            .flatten();
+        let auth = hop_client
+            .authenticate_publickey(
+                "locked-box",
+                PrivateKeyWithHashAlg::new(Arc::new(client_key), hash_alg),
+            )
+            .await
+            .unwrap();
+        assert!(auth.success());
+
+        let result = hop_client
+            .channel_open_direct_tcpip("127.0.0.1", 8080, "127.0.0.1", 52000)
+            .await;
+        assert!(
+            result.is_err(),
+            "disabled allow_tcp_forwarding must reject direct-tcpip"
+        );
+        assert_eq!(
+            target_state
+                .auth_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+
+        let sessions = db.list_sessions(10).await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].mode, "managed-tcp-forward");
+        assert_eq!(sessions[0].status, "failed");
+
+        hop_client
+            .disconnect(russh::Disconnect::ByApplication, "done", "en")
+            .await
+            .ok();
+        hop_task.abort();
+        target_task.abort();
     }
 }

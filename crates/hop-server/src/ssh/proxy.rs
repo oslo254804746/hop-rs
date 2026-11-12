@@ -4,19 +4,19 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
-use hop_core::{validate_tcp_port, Asset, Catalog, NewSession};
-use russh::{server, Channel};
+use hop_core::{validate_tcp_port, Asset, Catalog, MasterKey, NewSession};
+use russh::{client, server, Channel, ChannelOpenFailure};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::TcpStream,
-    sync::mpsc,
+    sync::{mpsc, Mutex},
 };
 
 use super::{
+    client::{open_asset_stream, ManagedClientSession},
     server::{audit_denied_attempt, AuthInfo, AUTHORIZATION_DENIED},
     session_registry::{ActiveSessionRegistry, TERMINATED_BY_MANAGEMENT},
 };
@@ -126,13 +126,82 @@ where
     }
 }
 
+async fn pump_bidirectional<S>(
+    channel: Channel<server::Msg>,
+    stream: S,
+    terminate_rx: &mut mpsc::UnboundedReceiver<()>,
+    terminated: &mut bool,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut tcp_read, mut tcp_write) = tokio::io::split(stream);
+    let (mut channel_read, channel_write) = channel.split();
+    let mut channel_reader = channel_read.make_reader();
+    let mut channel_writer = channel_write.make_writer();
+    let client_to_target_bytes = Arc::new(AtomicU64::new(0));
+    let target_to_client_bytes = Arc::new(AtomicU64::new(0));
+
+    let client_to_target = async {
+        let res = relay_copy(
+            &mut channel_reader,
+            &mut tcp_write,
+            RelayPeer::Client,
+            RelayPeer::Target,
+            client_to_target_bytes.clone(),
+        )
+        .await;
+        let _ = tcp_write.shutdown().await;
+        res
+    };
+    let target_to_client = async {
+        let res = relay_copy(
+            &mut tcp_read,
+            &mut channel_writer,
+            RelayPeer::Target,
+            RelayPeer::Client,
+            target_to_client_bytes.clone(),
+        )
+        .await;
+        let _ = channel_write.eof().await;
+        res
+    };
+
+    let copy_result = tokio::select! {
+        Some(()) = terminate_rx.recv() => {
+            *terminated = true;
+            let _ = tcp_write.shutdown().await;
+            let _ = channel_write.eof().await;
+            let _ = channel_write.close().await;
+            return Ok(());
+        }
+        res = async { tokio::try_join!(client_to_target, target_to_client) } => res,
+    };
+
+    let _ = channel_write.close().await;
+    if let Err(err) = copy_result {
+        anyhow::bail!(
+            "{}",
+            relay_error_message(
+                &err,
+                client_to_target_bytes.load(Ordering::Relaxed),
+                target_to_client_bytes.load(Ordering::Relaxed),
+            )
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn bridge_direct_tcpip(
     channel: Channel<server::Msg>,
     db: Catalog,
+    master_key: Arc<MasterKey>,
     active_sessions: ActiveSessionRegistry,
     auth: AuthInfo,
     asset: Asset,
     client_ip: Option<String>,
+    connect_timeout: Duration,
 ) -> Result<()> {
     if !db.key_can_access_asset(&auth.key_id, &asset.id).await? {
         audit_denied_attempt(
@@ -168,7 +237,7 @@ pub async fn bridge_direct_tcpip(
         .await;
     let mut terminated = false;
     let result = async {
-        let port = validate_tcp_port(asset.port)?;
+        let _ = validate_tcp_port(asset.port)?;
         let connect_started = Instant::now();
         let stream_result = tokio::select! {
             Some(()) = terminate_rx.recv() => {
@@ -176,7 +245,7 @@ pub async fn bridge_direct_tcpip(
                 let _ = channel.close().await;
                 return Ok(());
             }
-            stream = TcpStream::connect((asset.hostname.as_str(), port)) => {
+            stream = open_asset_stream(&db, Some(&master_key), &asset, connect_timeout) => {
                 stream
             }
         };
@@ -201,59 +270,7 @@ pub async fn bridge_direct_tcpip(
                     .with_context(|| format!("connect {}:{}", asset.hostname, asset.port));
             }
         };
-        let (mut tcp_read, mut tcp_write) = stream.into_split();
-        let (mut channel_read, channel_write) = channel.split();
-        let mut channel_reader = channel_read.make_reader();
-        let mut channel_writer = channel_write.make_writer();
-        let client_to_target_bytes = Arc::new(AtomicU64::new(0));
-        let target_to_client_bytes = Arc::new(AtomicU64::new(0));
-
-        tokio::select! {
-            Some(()) = terminate_rx.recv() => {
-                terminated = true;
-                let _ = tcp_write.shutdown().await;
-                let _ = channel_write.eof().await;
-                let _ = channel_write.close().await;
-            }
-            res = relay_copy(
-                &mut channel_reader,
-                &mut tcp_write,
-                RelayPeer::Client,
-                RelayPeer::Target,
-                client_to_target_bytes.clone(),
-            ) => {
-                if let Err(err) = res {
-                    anyhow::bail!(
-                        "{}",
-                        relay_error_message(
-                            &err,
-                            client_to_target_bytes.load(Ordering::Relaxed),
-                            target_to_client_bytes.load(Ordering::Relaxed),
-                        )
-                    );
-                }
-                let _ = tcp_write.shutdown().await;
-            }
-            res = relay_copy(
-                &mut tcp_read,
-                &mut channel_writer,
-                RelayPeer::Target,
-                RelayPeer::Client,
-                target_to_client_bytes.clone(),
-            ) => {
-                if let Err(err) = res {
-                    anyhow::bail!(
-                        "{}",
-                        relay_error_message(
-                            &err,
-                            client_to_target_bytes.load(Ordering::Relaxed),
-                            target_to_client_bytes.load(Ordering::Relaxed),
-                        )
-                    );
-                }
-            }
-        }
-        Ok::<(), anyhow::Error>(())
+        pump_bidirectional(channel, stream, &mut terminate_rx, &mut terminated).await
     }
     .await;
 
@@ -270,6 +287,219 @@ pub async fn bridge_direct_tcpip(
         }
     }
     result
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn bridge_managed_direct_tcpip(
+    channel: Channel<server::Msg>,
+    reply: server::ChannelOpenHandle,
+    direct_client: Arc<Mutex<Option<Arc<ManagedClientSession>>>>,
+    db: Catalog,
+    master_key: Arc<MasterKey>,
+    active_sessions: ActiveSessionRegistry,
+    auth: AuthInfo,
+    asset: Asset,
+    host_to_connect: String,
+    port_to_connect: u32,
+    originator_address: String,
+    originator_port: u32,
+    client_ip: Option<String>,
+    connect_timeout: Duration,
+) -> Result<()> {
+    let Some(valid_port) = u16::try_from(port_to_connect).ok().filter(|p| *p > 0) else {
+        reply
+            .reject(ChannelOpenFailure::AdministrativelyProhibited)
+            .await;
+        return Ok(());
+    };
+
+    let session = db
+        .start_session(NewSession {
+            key_id: Some(auth.key_id.clone()),
+            key_finger: auth.fingerprint.clone(),
+            key_name: Some(auth.name.clone()),
+            mode: "managed-tcp-forward".to_string(),
+            asset_id: Some(asset.id.clone()),
+            asset_name: Some(asset.name.clone()),
+            target_host: Some(host_to_connect.clone()),
+            target_port: Some(i64::from(valid_port)),
+            client_ip,
+        })
+        .await?;
+
+    let (terminate_tx, mut terminate_rx) = mpsc::unbounded_channel();
+    active_sessions
+        .register(session.id.clone(), terminate_tx)
+        .await;
+    let mut terminated = false;
+
+    let result = async {
+        let open_started = Instant::now();
+        let open_result = tokio::select! {
+            Some(()) = terminate_rx.recv() => {
+                terminated = true;
+                reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+                return Ok(());
+            }
+            opened = open_managed_target_tcpip(
+                &direct_client,
+                &db,
+                &master_key,
+                &asset,
+                &host_to_connect,
+                u32::from(valid_port),
+                &originator_address,
+                originator_port,
+                connect_timeout,
+            ) => opened
+        };
+
+        let (_client_guard, target_channel) = match open_result {
+            Ok(pair) => {
+                let latency_ms = open_started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+                let _ = db
+                    .record_asset_health_success(&asset.id, Some(latency_ms))
+                    .await;
+                pair
+            }
+            Err(err) => {
+                reply.reject(ChannelOpenFailure::ConnectFailed).await;
+                return Err(err);
+            }
+        };
+
+        reply.accept().await;
+        pump_bidirectional(
+            channel,
+            target_channel.into_stream(),
+            &mut terminate_rx,
+            &mut terminated,
+        )
+        .await
+    }
+    .await;
+
+    active_sessions.unregister(&session.id).await;
+    match &result {
+        _ if terminated => {
+            db.finish_session(&session.id, "terminated", Some(TERMINATED_BY_MANAGEMENT))
+                .await?
+        }
+        Ok(_) => db.finish_session(&session.id, "ok", None).await?,
+        Err(err) => {
+            db.finish_session(&session.id, "failed", Some(&err.to_string()))
+                .await?
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn open_managed_target_tcpip(
+    direct_client: &Arc<Mutex<Option<Arc<ManagedClientSession>>>>,
+    db: &Catalog,
+    master_key: &Arc<MasterKey>,
+    asset: &Asset,
+    host_to_connect: &str,
+    port_to_connect: u32,
+    originator_address: &str,
+    originator_port: u32,
+    connect_timeout: Duration,
+) -> Result<(Arc<ManagedClientSession>, Channel<client::Msg>)> {
+    let (mut client_session, was_reused) =
+        get_or_connect_direct_client(direct_client, db, master_key, asset, connect_timeout).await?;
+
+    let first_attempt = tokio::time::timeout(
+        connect_timeout,
+        client_session.session.channel_open_direct_tcpip(
+            host_to_connect.to_string(),
+            port_to_connect,
+            originator_address.to_string(),
+            originator_port,
+        ),
+    )
+    .await;
+
+    match first_attempt {
+        Ok(Ok(channel)) => Ok((client_session, channel)),
+        Ok(Err(err)) if was_reused && client_session.is_closed() => {
+            {
+                let mut guard = direct_client.lock().await;
+                if guard
+                    .as_ref()
+                    .is_some_and(|cached| Arc::ptr_eq(cached, &client_session))
+                {
+                    *guard = None;
+                }
+            }
+            let (fresh_client, _) =
+                get_or_connect_direct_client(direct_client, db, master_key, asset, connect_timeout)
+                    .await?;
+            client_session = fresh_client;
+            let channel = tokio::time::timeout(
+                connect_timeout,
+                client_session.session.channel_open_direct_tcpip(
+                    host_to_connect.to_string(),
+                    port_to_connect,
+                    originator_address.to_string(),
+                    originator_port,
+                ),
+            )
+            .await
+            .with_context(|| {
+                format!("managed forward to {host_to_connect}:{port_to_connect} timed out")
+            })?
+            .with_context(|| {
+                format!("managed forward to {host_to_connect}:{port_to_connect} failed: {err}")
+            })?;
+            Ok((client_session, channel))
+        }
+        Ok(Err(err)) => Err(err).with_context(|| {
+            format!("managed forward to {host_to_connect}:{port_to_connect} rejected by target")
+        }),
+        Err(_) => anyhow::bail!(
+            "managed forward to {host_to_connect}:{port_to_connect} timed out after {}ms",
+            connect_timeout.as_millis()
+        ),
+    }
+}
+
+async fn get_or_connect_direct_client(
+    direct_client: &Arc<Mutex<Option<Arc<ManagedClientSession>>>>,
+    db: &Catalog,
+    master_key: &Arc<MasterKey>,
+    asset: &Asset,
+    connect_timeout: Duration,
+) -> Result<(Arc<ManagedClientSession>, bool)> {
+    let mut guard = direct_client.lock().await;
+    if let Some(existing) = guard.as_ref().filter(|client| !client.is_closed()) {
+        return Ok((Arc::clone(existing), true));
+    }
+    match super::client::connect_authenticated_asset(
+        db.clone(),
+        Arc::clone(master_key),
+        asset,
+        connect_timeout,
+    )
+    .await
+    {
+        Ok(connected) => {
+            let shared = Arc::new(connected);
+            *guard = Some(Arc::clone(&shared));
+            Ok((shared, false))
+        }
+        Err(err) => {
+            let message = health_error_message(&err);
+            let _ = db
+                .record_asset_health_failure(
+                    &asset.id,
+                    Some("managed_connect_failed"),
+                    Some(&message),
+                )
+                .await;
+            Err(err)
+        }
+    }
 }
 
 fn health_error_message(err: &impl fmt::Display) -> String {

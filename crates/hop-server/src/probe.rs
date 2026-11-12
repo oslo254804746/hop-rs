@@ -4,35 +4,48 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use hop_core::{validate_tcp_port, Asset, Catalog, ASSET_PROTOCOL_SSH};
+use hop_core::{validate_tcp_port, Asset, Catalog, MasterKey, ASSET_PROTOCOL_SSH};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
     sync::Semaphore,
     task::JoinSet,
 };
 
 const MIN_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
-const MAX_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_DIRECT_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_CHAINED_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CONCURRENT_PROBES: usize = 16;
 const MAX_BANNER_LINES: usize = 8;
 const MAX_BANNER_LINE_BYTES: usize = 256;
 
-pub fn bounded_probe_timeout(timeout: Duration) -> Duration {
-    timeout.clamp(MIN_PROBE_TIMEOUT, MAX_PROBE_TIMEOUT)
-}
-
-pub async fn probe_asset(db: &Catalog, asset: &Asset, timeout: Duration) -> Result<Asset> {
-    let bounded = bounded_probe_timeout(timeout);
-    match run_network_probe(asset, bounded).await {
+pub async fn probe_asset(
+    db: &Catalog,
+    master_key: Option<&MasterKey>,
+    asset: &Asset,
+    timeout: Duration,
+) -> Result<Asset> {
+    let max_timeout = if asset.via_asset_id.is_some() {
+        MAX_CHAINED_PROBE_TIMEOUT
+    } else {
+        MAX_DIRECT_PROBE_TIMEOUT
+    };
+    let bounded = timeout.clamp(MIN_PROBE_TIMEOUT, max_timeout);
+    match run_network_probe(db, master_key, asset, bounded).await {
         Ok(latency_ms) => {
             db.record_asset_health_success(&asset.id, Some(latency_ms))
                 .await?;
+            let _ = db
+                .record_probe_sample(&asset.id, true, Some(latency_ms), None)
+                .await;
         }
         Err((code, message)) => {
             let truncated: String = message.chars().take(512).collect();
             db.record_asset_health_failure(&asset.id, Some(code), Some(&truncated))
                 .await?;
+            let _ = db
+                .record_probe_sample(&asset.id, false, None, Some(code))
+                .await;
         }
     }
 
@@ -41,7 +54,12 @@ pub async fn probe_asset(db: &Catalog, asset: &Asset, timeout: Duration) -> Resu
         .with_context(|| format!("asset disappeared during probe: {}", asset.id))
 }
 
-pub async fn probe_assets(db: &Catalog, assets: &[Asset], timeout: Duration) -> Result<Vec<Asset>> {
+pub async fn probe_assets(
+    db: &Catalog,
+    master_key: Option<Arc<MasterKey>>,
+    assets: &[Asset],
+    timeout: Duration,
+) -> Result<Vec<Asset>> {
     if assets.is_empty() {
         return Ok(Vec::new());
     }
@@ -50,13 +68,14 @@ pub async fn probe_assets(db: &Catalog, assets: &[Asset], timeout: Duration) -> 
     for asset in assets {
         let asset = asset.clone();
         let db = db.clone();
+        let master_key = master_key.clone();
         let semaphore = Arc::clone(&semaphore);
         join_set.spawn(async move {
             let _permit = semaphore
                 .acquire_owned()
                 .await
                 .context("probe semaphore closed")?;
-            probe_asset(&db, &asset, timeout).await
+            probe_asset(&db, master_key.as_deref(), &asset, timeout).await
         });
     }
 
@@ -68,17 +87,59 @@ pub async fn probe_assets(db: &Catalog, assets: &[Asset], timeout: Duration) -> 
     Ok(refreshed)
 }
 
-pub async fn probe_all_assets(db: &Catalog, timeout: Duration) -> Result<Vec<Asset>> {
+pub async fn probe_all_assets(
+    db: &Catalog,
+    master_key: Option<Arc<MasterKey>>,
+    timeout: Duration,
+) -> Result<Vec<Asset>> {
     let assets = db.list_assets().await?;
-    probe_assets(db, &assets, timeout).await
+    probe_assets(db, master_key, &assets, timeout).await
 }
 
 async fn run_network_probe(
+    db: &Catalog,
+    master_key: Option<&MasterKey>,
     asset: &Asset,
     timeout: Duration,
 ) -> std::result::Result<i64, (&'static str, String)> {
     let port = validate_tcp_port(asset.port).map_err(|err| ("invalid_port", err.to_string()))?;
     let started = Instant::now();
+
+    if asset.via_asset_id.is_some() {
+        let stream = match tokio::time::timeout(
+            timeout,
+            crate::ssh::client::open_asset_stream(db, master_key, asset, timeout),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => {
+                let text = format!("{err:#}");
+                let code = if text.contains("timed out") {
+                    "probe_timeout"
+                } else if text.contains("jump forward via") {
+                    "tcp_connect_failed"
+                } else {
+                    "via_jump_failed"
+                };
+                return Err((code, text));
+            }
+            Err(_) => {
+                return Err((
+                    "probe_timeout",
+                    format!(
+                        "chained probe {}:{} timed out after {}ms",
+                        asset.hostname,
+                        port,
+                        timeout.as_millis()
+                    ),
+                ));
+            }
+        };
+
+        return finish_probe_over_stream(asset, port, started, timeout, stream).await;
+    }
+
     let stream =
         match tokio::time::timeout(timeout, TcpStream::connect((asset.hostname.as_str(), port)))
             .await
@@ -104,7 +165,19 @@ async fn run_network_probe(
         };
 
     let _ = stream.set_nodelay(true);
+    finish_probe_over_stream(asset, port, started, timeout, stream).await
+}
 
+async fn finish_probe_over_stream<S>(
+    asset: &Asset,
+    port: u16,
+    started: Instant,
+    timeout: Duration,
+    mut stream: S,
+) -> std::result::Result<i64, (&'static str, String)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     if asset.protocol == ASSET_PROTOCOL_SSH {
         let remaining = timeout
             .saturating_sub(started.elapsed())
@@ -125,7 +198,6 @@ async fn run_network_probe(
             }
         }
     } else {
-        let mut stream = stream;
         let _ = stream.shutdown().await;
     }
 
@@ -133,7 +205,10 @@ async fn run_network_probe(
     Ok(latency_ms)
 }
 
-async fn read_ssh_banner(stream: TcpStream) -> std::result::Result<(), String> {
+async fn read_ssh_banner<S>(stream: S) -> std::result::Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut reader = BufReader::new(stream);
     let mut line = Vec::with_capacity(64);
     for _ in 0..MAX_BANNER_LINES {
@@ -184,12 +259,19 @@ mod tests {
             .await
             .unwrap();
 
-        let probed = probe_asset(&catalog, &asset, Duration::from_secs(2))
+        let probed = probe_asset(&catalog, None, &asset, Duration::from_secs(2))
             .await
             .unwrap();
         assert_eq!(probed.health.status, "healthy");
         assert!(probed.health.latency_ms.is_some());
         assert!(probed.health.error_code.is_none());
+
+        let samples = catalog
+            .list_asset_probe_samples(&asset.id, 10)
+            .await
+            .unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].status, "healthy");
     }
 
     #[tokio::test]
@@ -213,7 +295,7 @@ mod tests {
             .await
             .unwrap();
 
-        let probed = probe_asset(&catalog, &asset, Duration::from_secs(2))
+        let probed = probe_asset(&catalog, None, &asset, Duration::from_secs(2))
             .await
             .unwrap();
         assert_eq!(probed.health.status, "failed");
@@ -246,6 +328,8 @@ mod tests {
                 description: None,
                 tags: Vec::new(),
                 credential_id: None,
+                via_asset_id: None,
+                allow_tcp_forwarding: true,
             })
             .await
             .unwrap();
@@ -259,11 +343,13 @@ mod tests {
                 description: None,
                 tags: Vec::new(),
                 credential_id: None,
+                via_asset_id: None,
+                allow_tcp_forwarding: true,
             })
             .await
             .unwrap();
 
-        let results = probe_all_assets(&catalog, Duration::from_secs(1))
+        let results = probe_all_assets(&catalog, None, Duration::from_secs(1))
             .await
             .unwrap();
         assert_eq!(results.len(), 2);

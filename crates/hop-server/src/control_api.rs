@@ -1,17 +1,18 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
     Json, Router,
 };
 use hop_core::{
-    encrypt_envelope, new_id, Asset, AssetAccessMode, AuditEvent, AuthType, Catalog, CatalogError,
-    CatalogErrorCode, Credential, HopCoreError, KnownHost, MasterKey, NewAsset, NewAuditEvent,
-    NewAuthorizedKey, NewCredential, ResourceOwnership, Session,
+    encrypt_envelope, new_id, Asset, AssetAccessMode, AssetProbeSample, AuditEvent, AuthType,
+    Catalog, CatalogError, CatalogErrorCode, Credential, HopCoreError, KnownHost, MasterKey,
+    NewAsset, NewAuditEvent, NewAuthorizedKey, NewCredential, NewNotificationChannel,
+    NotificationChannel, NotificationChannelKind, ProbeSettings, ResourceOwnership, Session,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,7 +20,15 @@ use subtle::ConstantTimeEq;
 use tokio::sync::watch;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-use crate::ssh::session_registry::{ActiveSessionRegistry, TerminateSessionResult};
+use crate::{
+    bootstrap::{bootstrap_asset_ssh_key, BootstrapKeyOptions},
+    notify::{
+        build_encrypted_notification_config, decrypt_notification_config,
+        send_channel_notification, summarize_notification_config, AlertEvent,
+        NotificationConfigInput, NotificationConfigSummary,
+    },
+    ssh::session_registry::{ActiveSessionRegistry, TerminateSessionResult},
+};
 
 #[derive(Clone)]
 pub struct ControlApiState {
@@ -29,6 +38,7 @@ pub struct ControlApiState {
     active_sessions: ActiveSessionRegistry,
     ssh_listen: String,
     probe_timeout: Duration,
+    scheduler_reload: Option<watch::Sender<u64>>,
 }
 
 impl ControlApiState {
@@ -49,6 +59,7 @@ impl ControlApiState {
             active_sessions,
             ssh_listen: "0.0.0.0:2222".to_string(),
             probe_timeout: Duration::from_secs(4),
+            scheduler_reload: None,
         })
     }
 
@@ -59,6 +70,11 @@ impl ControlApiState {
 
     pub fn with_probe_timeout(mut self, timeout: Duration) -> Self {
         self.probe_timeout = timeout;
+        self
+    }
+
+    pub fn with_scheduler_reload(mut self, reload: watch::Sender<u64>) -> Self {
+        self.scheduler_reload = Some(reload);
         self
     }
 }
@@ -116,11 +132,36 @@ pub fn router(state: ControlApiState) -> Router {
         .route("/api/v1/status", get(status))
         .route("/api/v1/assets", get(assets).post(create_asset))
         .route("/api/v1/assets/probe", post(probe_all_assets))
+        .route("/api/v1/assets/probe-history", get(probe_history_all))
         .route(
             "/api/v1/assets/{id}",
             put(update_asset).delete(delete_asset),
         )
         .route("/api/v1/assets/{id}/probe", post(probe_single_asset))
+        .route(
+            "/api/v1/assets/{id}/probe-history",
+            get(probe_history_single),
+        )
+        .route(
+            "/api/v1/assets/{id}/bootstrap-key",
+            post(bootstrap_asset_key),
+        )
+        .route(
+            "/api/v1/probe/settings",
+            get(get_probe_settings).put(update_probe_settings),
+        )
+        .route(
+            "/api/v1/notifications/channels",
+            get(notification_channels).post(create_notification_channel),
+        )
+        .route(
+            "/api/v1/notifications/channels/{id}",
+            put(update_notification_channel).delete(delete_notification_channel),
+        )
+        .route(
+            "/api/v1/notifications/channels/{id}/test",
+            post(test_notification_channel),
+        )
         .route(
             "/api/v1/credentials",
             get(credentials).post(create_credential),
@@ -272,9 +313,13 @@ async fn probe_all_assets(
     headers: HeaderMap,
 ) -> ApiResult<Json<Vec<AssetView>>> {
     authenticate(&state, &headers)?;
-    let probed = crate::probe::probe_all_assets(&state.catalog, state.probe_timeout)
-        .await
-        .map_err(ApiError::internal)?;
+    let probed = crate::probe::probe_all_assets(
+        &state.catalog,
+        Some(Arc::clone(&state.master_key)),
+        state.probe_timeout,
+    )
+    .await
+    .map_err(ApiError::internal)?;
     let healthy = probed
         .iter()
         .filter(|asset| asset.health.status == "healthy")
@@ -309,9 +354,14 @@ async fn probe_single_asset(
         .get_asset_by_id(&id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let probed = crate::probe::probe_asset(&state.catalog, &existing, state.probe_timeout)
-        .await
-        .map_err(ApiError::internal)?;
+    let probed = crate::probe::probe_asset(
+        &state.catalog,
+        Some(&state.master_key),
+        &existing,
+        state.probe_timeout,
+    )
+    .await
+    .map_err(ApiError::internal)?;
     record_api_audit(
         &state.catalog,
         "asset.probe",
@@ -656,6 +706,428 @@ async fn terminate_session(
     Ok(Json(TerminateResponse { id, terminated }))
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ProbeHistoryQuery {
+    limit: Option<i64>,
+}
+
+async fn probe_history_all(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+    Query(query): Query<ProbeHistoryQuery>,
+) -> ApiResult<Json<BTreeMap<String, Vec<AssetProbeSample>>>> {
+    authenticate(&state, &headers)?;
+    let limit = query.limit.unwrap_or(24).clamp(1, 96);
+    let samples = state
+        .catalog
+        .list_recent_probe_samples(limit)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(samples))
+}
+
+async fn probe_history_single(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProbeHistoryQuery>,
+) -> ApiResult<Json<Vec<AssetProbeSample>>> {
+    authenticate(&state, &headers)?;
+    let _existing = state
+        .catalog
+        .get_asset_by_id(&id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let limit = query.limit.unwrap_or(48).clamp(1, 96);
+    let samples = state
+        .catalog
+        .list_asset_probe_samples(&id, limit)
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(samples))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BootstrapKeyRequest {
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    credential_name: Option<String>,
+    #[serde(default)]
+    disable_password_auth: bool,
+    #[serde(default = "default_true_bool")]
+    prune_previous_credential: bool,
+}
+
+#[derive(Serialize)]
+struct BootstrapKeyResponse {
+    asset: AssetView,
+    credential: CredentialView,
+    public_key: String,
+    public_key_fingerprint: String,
+    verified_key_login: bool,
+    pruned_previous_credential: bool,
+    password_auth_disabled: bool,
+    warnings: Vec<String>,
+}
+
+async fn bootstrap_asset_key(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<BootstrapKeyRequest>,
+) -> ApiResult<Json<BootstrapKeyResponse>> {
+    authenticate(&state, &headers)?;
+    let existing = state
+        .catalog
+        .get_asset_by_id(&id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+
+    let timeout = state.probe_timeout.max(Duration::from_secs(10));
+    let outcome = match bootstrap_asset_ssh_key(
+        &state.catalog,
+        Arc::clone(&state.master_key),
+        &existing.id,
+        BootstrapKeyOptions {
+            username: request.username,
+            password: request.password,
+            credential_name: request.credential_name,
+            disable_password_auth: request.disable_password_auth,
+            prune_previous_credential: request.prune_previous_credential,
+        },
+        timeout,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            if let Some(core_err) = err.downcast_ref::<HopCoreError>() {
+                return Err(ApiError::from(HopCoreError::Validation(
+                    core_err.to_string(),
+                )));
+            }
+            let message: String = format!("{err:#}").chars().take(480).collect();
+            let _ = state
+                .catalog
+                .record_audit_event(NewAuditEvent {
+                    actor_label: "api-token".to_string(),
+                    action: "asset.bootstrap_key".to_string(),
+                    target_type: "asset".to_string(),
+                    target_id: Some(existing.id),
+                    target_label: Some(existing.name),
+                    result: "failed".to_string(),
+                    source_ip: None,
+                    details_json: Some(serde_json::json!({ "error": message }).to_string()),
+                })
+                .await;
+            return Err(ApiError::upstream("bootstrap_failed", message));
+        }
+    };
+
+    record_api_audit(
+        &state.catalog,
+        "asset.bootstrap_key",
+        "asset",
+        Some(&outcome.asset.id),
+        Some(&outcome.asset.name),
+        Some(serde_json::json!({
+            "credential_id": outcome.credential.id,
+            "fingerprint": outcome.public_key_fingerprint,
+            "pruned_previous_credential": outcome.pruned_previous_credential,
+            "password_auth_disabled": outcome.password_auth_disabled,
+        })),
+    )
+    .await;
+
+    Ok(Json(BootstrapKeyResponse {
+        asset: asset_view(&state.catalog, outcome.asset).await?,
+        credential: credential_view(&state.catalog, outcome.credential).await?,
+        public_key: outcome.public_key,
+        public_key_fingerprint: outcome.public_key_fingerprint,
+        verified_key_login: outcome.verified_key_login,
+        pruned_previous_credential: outcome.pruned_previous_credential,
+        password_auth_disabled: outcome.password_auth_disabled,
+        warnings: outcome.warnings,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProbeSettingsWriteRequest {
+    enabled: bool,
+    interval_seconds: i64,
+    timeout_ms: i64,
+    failure_threshold: i64,
+    notify_on_recovery: bool,
+}
+
+async fn get_probe_settings(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<ProbeSettings>> {
+    authenticate(&state, &headers)?;
+    let settings = state
+        .catalog
+        .get_probe_settings()
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(settings))
+}
+
+async fn update_probe_settings(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+    Json(request): Json<ProbeSettingsWriteRequest>,
+) -> ApiResult<Json<ProbeSettings>> {
+    authenticate(&state, &headers)?;
+    let updated = state
+        .catalog
+        .update_probe_settings(&ProbeSettings {
+            enabled: request.enabled,
+            interval_seconds: request.interval_seconds,
+            timeout_ms: request.timeout_ms,
+            failure_threshold: request.failure_threshold,
+            notify_on_recovery: request.notify_on_recovery,
+            updated_at: None,
+        })
+        .await?;
+    if let Some(reload) = &state.scheduler_reload {
+        reload.send_modify(|rev| *rev = rev.wrapping_add(1));
+    }
+    record_api_audit(
+        &state.catalog,
+        "probe.settings_update",
+        "probe_settings",
+        Some("singleton"),
+        Some("probe-scheduler"),
+        Some(serde_json::json!({
+            "enabled": updated.enabled,
+            "interval_seconds": updated.interval_seconds,
+            "timeout_ms": updated.timeout_ms,
+            "failure_threshold": updated.failure_threshold,
+            "notify_on_recovery": updated.notify_on_recovery,
+        })),
+    )
+    .await;
+    Ok(Json(updated))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotificationChannelWriteRequest {
+    name: String,
+    kind: NotificationChannelKind,
+    #[serde(default = "default_true_bool")]
+    enabled: bool,
+    #[serde(default)]
+    config: NotificationConfigInput,
+}
+
+#[derive(Serialize)]
+struct NotificationChannelView {
+    id: String,
+    name: String,
+    kind: String,
+    enabled: bool,
+    config: NotificationConfigSummary,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
+fn notification_channel_view(
+    master_key: &MasterKey,
+    channel: NotificationChannel,
+) -> NotificationChannelView {
+    let config = summarize_notification_config(master_key, &channel);
+    NotificationChannelView {
+        id: channel.id,
+        name: channel.name,
+        kind: channel.kind,
+        enabled: channel.enabled,
+        config,
+        created_at: channel.created_at,
+        updated_at: channel.updated_at,
+    }
+}
+
+async fn notification_channels(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Vec<NotificationChannelView>>> {
+    authenticate(&state, &headers)?;
+    let channels = state
+        .catalog
+        .list_notification_channels()
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(
+        channels
+            .into_iter()
+            .map(|chan| notification_channel_view(&state.master_key, chan))
+            .collect(),
+    ))
+}
+
+async fn create_notification_channel(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+    Json(request): Json<NotificationChannelWriteRequest>,
+) -> ApiResult<(StatusCode, Json<NotificationChannelView>)> {
+    authenticate(&state, &headers)?;
+    let id = new_id();
+    let config_enc = build_encrypted_notification_config(
+        &state.master_key,
+        &id,
+        request.kind,
+        &request.config,
+        None,
+    )?;
+    let created = state
+        .catalog
+        .add_notification_channel(NewNotificationChannel {
+            id: Some(id),
+            name: request.name,
+            kind: request.kind,
+            enabled: request.enabled,
+            config_enc,
+        })
+        .await?;
+    record_api_audit(
+        &state.catalog,
+        "notification_channel.create",
+        "notification_channel",
+        Some(&created.id),
+        Some(&created.name),
+        Some(serde_json::json!({ "kind": created.kind, "enabled": created.enabled })),
+    )
+    .await;
+    Ok((
+        StatusCode::CREATED,
+        Json(notification_channel_view(&state.master_key, created)),
+    ))
+}
+
+async fn update_notification_channel(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(request): Json<NotificationChannelWriteRequest>,
+) -> ApiResult<Json<NotificationChannelView>> {
+    authenticate(&state, &headers)?;
+    let existing = state
+        .catalog
+        .get_notification_channel(&id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let decrypted_existing = decrypt_notification_config(&state.master_key, &existing).ok();
+    let config_enc = build_encrypted_notification_config(
+        &state.master_key,
+        &id,
+        request.kind,
+        &request.config,
+        decrypted_existing.as_ref(),
+    )?;
+    let updated = state
+        .catalog
+        .update_notification_channel(
+            &id,
+            NewNotificationChannel {
+                id: Some(id.clone()),
+                name: request.name,
+                kind: request.kind,
+                enabled: request.enabled,
+                config_enc,
+            },
+        )
+        .await?;
+    record_api_audit(
+        &state.catalog,
+        "notification_channel.update",
+        "notification_channel",
+        Some(&updated.id),
+        Some(&updated.name),
+        Some(serde_json::json!({ "kind": updated.kind, "enabled": updated.enabled })),
+    )
+    .await;
+    Ok(Json(notification_channel_view(&state.master_key, updated)))
+}
+
+async fn delete_notification_channel(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<StatusCode> {
+    authenticate(&state, &headers)?;
+    let existing = state.catalog.get_notification_channel(&id).await?;
+    let deleted = state.catalog.delete_notification_channel(&id).await?;
+    if !deleted {
+        return Err(ApiError::not_found());
+    }
+    record_api_audit(
+        &state.catalog,
+        "notification_channel.delete",
+        "notification_channel",
+        Some(&id),
+        existing.as_ref().map(|chan| chan.name.as_str()),
+        None,
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+struct NotificationTestResponse {
+    delivered: bool,
+}
+
+async fn test_notification_channel(
+    State(state): State<ControlApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResult<Json<NotificationTestResponse>> {
+    authenticate(&state, &headers)?;
+    let channel = state
+        .catalog
+        .get_notification_channel(&id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let event = AlertEvent::ChannelTest {
+        channel_name: channel.name.clone(),
+        channel_kind: channel.kind.clone(),
+    };
+    if let Err(err) = send_channel_notification(&state.master_key, &channel, &event).await {
+        let msg: String = format!("{err:#}").chars().take(360).collect();
+        let _ = state
+            .catalog
+            .record_audit_event(NewAuditEvent {
+                actor_label: "api-token".to_string(),
+                action: "notification_channel.test".to_string(),
+                target_type: "notification_channel".to_string(),
+                target_id: Some(channel.id),
+                target_label: Some(channel.name),
+                result: "failed".to_string(),
+                source_ip: None,
+                details_json: Some(serde_json::json!({ "error": msg }).to_string()),
+            })
+            .await;
+        return Err(ApiError::upstream("notification_delivery_failed", msg));
+    }
+    record_api_audit(
+        &state.catalog,
+        "notification_channel.test",
+        "notification_channel",
+        Some(&channel.id),
+        Some(&channel.name),
+        Some(serde_json::json!({ "kind": channel.kind })),
+    )
+    .await;
+    Ok(Json(NotificationTestResponse { delivered: true }))
+}
+
 async fn record_api_audit(
     catalog: &Catalog,
     action: &str,
@@ -708,6 +1180,10 @@ struct AssetWriteRequest {
     tags: Vec<String>,
     #[serde(default)]
     credential_id: Option<String>,
+    #[serde(default)]
+    via_asset_id: Option<String>,
+    #[serde(default = "default_true_bool")]
+    allow_tcp_forwarding: bool,
 }
 
 impl From<AssetWriteRequest> for NewAsset {
@@ -721,12 +1197,18 @@ impl From<AssetWriteRequest> for NewAsset {
             description: request.description,
             tags: request.tags,
             credential_id: request.credential_id,
+            via_asset_id: request.via_asset_id,
+            allow_tcp_forwarding: request.allow_tcp_forwarding,
         }
     }
 }
 
 fn default_asset_protocol() -> String {
     "ssh".to_string()
+}
+
+fn default_true_bool() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -809,6 +1291,8 @@ struct RevisionResponse {
 struct AssetView {
     #[serde(flatten)]
     asset: Asset,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    via_asset_name: Option<String>,
     ownership: ResourceOwnership,
 }
 
@@ -817,7 +1301,19 @@ async fn asset_view(catalog: &Catalog, asset: Asset) -> ApiResult<AssetView> {
         .resource_ownership("asset", &asset.id)
         .await
         .map_err(ApiError::internal)?;
-    Ok(AssetView { asset, ownership })
+    let via_asset_name = match asset.via_asset_id.as_deref() {
+        Some(via_id) => catalog
+            .get_asset_by_id(via_id)
+            .await
+            .map_err(ApiError::internal)?
+            .map(|parent| parent.name),
+        None => None,
+    };
+    Ok(AssetView {
+        asset,
+        via_asset_name,
+        ownership,
+    })
 }
 
 #[derive(Serialize)]
@@ -1030,6 +1526,17 @@ impl ApiError {
                 code: "not_found".to_string(),
                 path: None,
                 message: "catalog resource was not found".to_string(),
+            },
+        }
+    }
+
+    fn upstream(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            body: ApiErrorBody {
+                code: code.to_string(),
+                path: None,
+                message: message.into(),
             },
         }
     }
@@ -1773,6 +2280,280 @@ mod tests {
         assert!(actions.contains(&"asset.create"));
         assert!(actions.contains(&"asset.probe"));
         assert!(actions.contains(&"asset.probe_all"));
+    }
+
+    #[tokio::test]
+    async fn v0_3_0_probe_history_settings_notifications_and_bootstrap_api_roundtrip() {
+        let (ssh_addr, ssh_server_task) =
+            crate::bootstrap::tests::spawn_test_bootstrap_server("root", "one-time-pass").await;
+
+        let webhook_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let webhook_addr = webhook_listener.local_addr().unwrap();
+        let (webhook_tx, webhook_rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = webhook_listener.accept().await {
+                let raw = crate::notify::tests::read_http_request_for_test(&mut stream).await;
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await;
+                let _ = stream.shutdown().await;
+                let _ = webhook_tx.send(raw);
+            }
+        });
+
+        let catalog = Catalog::in_memory().await.unwrap();
+        let (reload_tx, reload_rx) = watch::channel(0_u64);
+        let state = ControlApiState::new(
+            catalog.clone(),
+            Arc::new(MasterKey::generate()),
+            "test-token",
+            ActiveSessionRegistry::default(),
+        )
+        .unwrap()
+        .with_probe_timeout(Duration::from_secs(4))
+        .with_scheduler_reload(reload_tx);
+        let app = router(state);
+
+        // 1. Create relay + chained target asset with bootstrap-key
+        let relay_res = app
+            .clone()
+            .oneshot(api_request(
+                Method::POST,
+                "/api/v1/assets",
+                serde_json::json!({
+                    "name": "hk-relay",
+                    "protocol": "ssh",
+                    "hostname": ssh_addr.ip().to_string(),
+                    "port": ssh_addr.port()
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(relay_res.status(), StatusCode::CREATED);
+        let relay = response_json(relay_res).await;
+        let relay_id = relay["id"].as_str().unwrap().to_string();
+        assert_eq!(relay["allow_tcp_forwarding"], true);
+
+        let bootstrap_res = app
+            .clone()
+            .oneshot(api_request(
+                Method::POST,
+                &format!("/api/v1/assets/{relay_id}/bootstrap-key"),
+                serde_json::json!({
+                    "username": "root",
+                    "password": "one-time-pass"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bootstrap_res.status(), StatusCode::OK);
+        let bootstrap_body = response_json(bootstrap_res).await;
+        assert_eq!(bootstrap_body["verified_key_login"], true);
+        assert!(bootstrap_body["public_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("ssh-ed25519 "));
+        assert_eq!(bootstrap_body["credential"]["auth_type"], "key");
+        assert_eq!(
+            bootstrap_body["asset"]["credential_id"],
+            bootstrap_body["credential"]["id"]
+        );
+
+        let leaf_res = app
+            .clone()
+            .oneshot(api_request(
+                Method::POST,
+                "/api/v1/assets",
+                serde_json::json!({
+                    "name": "us-origin",
+                    "protocol": "ssh",
+                    "hostname": "10.20.0.8",
+                    "port": 22,
+                    "via_asset_id": relay_id,
+                    "allow_tcp_forwarding": false
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(leaf_res.status(), StatusCode::CREATED);
+        let leaf = response_json(leaf_res).await;
+        assert_eq!(leaf["via_asset_name"], "hk-relay");
+        assert_eq!(leaf["allow_tcp_forwarding"], false);
+
+        // 2. Probe relay & verify probe-history endpoints
+        let probe_res = app
+            .clone()
+            .oneshot(api_request(
+                Method::POST,
+                &format!("/api/v1/assets/{relay_id}/probe"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(probe_res.status(), StatusCode::OK);
+
+        let all_hist = app
+            .clone()
+            .oneshot(api_request(
+                Method::GET,
+                "/api/v1/assets/probe-history?limit=12",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(all_hist.status(), StatusCode::OK);
+        let all_hist_json = response_json(all_hist).await;
+        assert_eq!(all_hist_json[&relay_id].as_array().unwrap().len(), 2);
+
+        let single_hist = app
+            .clone()
+            .oneshot(api_request(
+                Method::GET,
+                &format!("/api/v1/assets/{relay_id}/probe-history?limit=12"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(single_hist.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(single_hist).await.as_array().unwrap().len(),
+            2
+        );
+
+        // 3. Probe settings GET / PUT + validation + reload watch signal
+        let get_settings = app
+            .clone()
+            .oneshot(api_request(
+                Method::GET,
+                "/api/v1/probe/settings",
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(get_settings.status(), StatusCode::OK);
+        assert_eq!(response_json(get_settings).await["enabled"], false);
+
+        let invalid_settings = app
+            .clone()
+            .oneshot(api_request(
+                Method::PUT,
+                "/api/v1/probe/settings",
+                serde_json::json!({
+                    "enabled": true,
+                    "interval_seconds": 5,
+                    "timeout_ms": 4000,
+                    "failure_threshold": 2,
+                    "notify_on_recovery": true
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(invalid_settings.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let put_settings = app
+            .clone()
+            .oneshot(api_request(
+                Method::PUT,
+                "/api/v1/probe/settings",
+                serde_json::json!({
+                    "enabled": true,
+                    "interval_seconds": 180,
+                    "timeout_ms": 3500,
+                    "failure_threshold": 3,
+                    "notify_on_recovery": true
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(put_settings.status(), StatusCode::OK);
+        assert_eq!(*reload_rx.borrow(), 1);
+
+        // 4. Notification channels CRUD + secret redaction + test push
+        let create_chan = app
+            .clone()
+            .oneshot(api_request(
+                Method::POST,
+                "/api/v1/notifications/channels",
+                serde_json::json!({
+                    "name": "Ops Webhook",
+                    "kind": "webhook",
+                    "enabled": true,
+                    "config": {
+                        "url": format!("http://{webhook_addr}/alert"),
+                        "secret": "super-secret-hmac-key"
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(create_chan.status(), StatusCode::CREATED);
+        let chan_json = response_json(create_chan).await;
+        let chan_id = chan_json["id"].as_str().unwrap().to_string();
+        assert_eq!(chan_json["config"]["has_secret"], true);
+        assert!(
+            !chan_json.to_string().contains("super-secret-hmac-key"),
+            "notification secret must never be returned by Control API"
+        );
+
+        // Update name while omitting secret -> existing secret must be preserved!
+        let update_chan = app
+            .clone()
+            .oneshot(api_request(
+                Method::PUT,
+                &format!("/api/v1/notifications/channels/{chan_id}"),
+                serde_json::json!({
+                    "name": "Primary Webhook",
+                    "kind": "webhook",
+                    "enabled": true,
+                    "config": {
+                        "url": format!("http://{webhook_addr}/alert")
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(update_chan.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(update_chan).await["config"]["has_secret"],
+            true
+        );
+
+        let test_push = app
+            .clone()
+            .oneshot(api_request(
+                Method::POST,
+                &format!("/api/v1/notifications/channels/{chan_id}/test"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(test_push.status(), StatusCode::OK);
+        assert_eq!(response_json(test_push).await["delivered"], true);
+
+        let raw_http = tokio::time::timeout(Duration::from_secs(3), webhook_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            raw_http
+                .to_ascii_lowercase()
+                .contains("x-hop-signature-256: sha256="),
+            "preserved HMAC secret should sign test webhook: {raw_http}"
+        );
+
+        let del_chan = app
+            .oneshot(api_request(
+                Method::DELETE,
+                &format!("/api/v1/notifications/channels/{chan_id}"),
+                serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(del_chan.status(), StatusCode::NO_CONTENT);
+
+        ssh_server_task.abort();
     }
 
     fn api_request(method: Method, uri: &str, body: serde_json::Value) -> Request<Body> {

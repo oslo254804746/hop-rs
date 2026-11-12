@@ -109,6 +109,13 @@ impl NewAuthorizedKey {
     }
 }
 
+pub const MAX_ASSET_CHAIN_HOPS: usize = 4;
+pub const MAX_PROBE_SAMPLES_PER_ASSET: i64 = 96;
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {
     pub id: String,
@@ -120,6 +127,10 @@ pub struct Asset {
     pub description: Option<String>,
     pub tags: Vec<String>,
     pub credential_id: Option<String>,
+    #[serde(default)]
+    pub via_asset_id: Option<String>,
+    #[serde(default = "default_true")]
+    pub allow_tcp_forwarding: bool,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub health: AssetHealth,
@@ -136,6 +147,8 @@ pub(crate) struct AssetRow {
     pub description: Option<String>,
     pub tags: Option<String>,
     pub credential_id: Option<String>,
+    pub via_asset_id: Option<String>,
+    pub allow_tcp_forwarding: bool,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub health_status: Option<String>,
@@ -144,6 +157,8 @@ pub(crate) struct AssetRow {
     pub health_latency_ms: Option<i64>,
     pub health_error_code: Option<String>,
     pub health_error_message: Option<String>,
+    pub health_consecutive_failures: Option<i64>,
+    pub health_alert_firing: Option<bool>,
 }
 
 impl TryFrom<AssetRow> for Asset {
@@ -165,6 +180,8 @@ impl TryFrom<AssetRow> for Asset {
             latency_ms: row.health_latency_ms,
             error_code: row.health_error_code,
             error_message: row.health_error_message,
+            consecutive_failures: row.health_consecutive_failures.unwrap_or(0),
+            alert_firing: row.health_alert_firing.unwrap_or(false),
         };
 
         Ok(Self {
@@ -177,6 +194,8 @@ impl TryFrom<AssetRow> for Asset {
             description: row.description,
             tags,
             credential_id: row.credential_id,
+            via_asset_id: row.via_asset_id,
+            allow_tcp_forwarding: row.allow_tcp_forwarding,
             created_at: row.created_at,
             updated_at: row.updated_at,
             health,
@@ -195,6 +214,10 @@ pub struct NewAsset {
     pub description: Option<String>,
     pub tags: Vec<String>,
     pub credential_id: Option<String>,
+    #[serde(default)]
+    pub via_asset_id: Option<String>,
+    #[serde(default = "default_true")]
+    pub allow_tcp_forwarding: bool,
 }
 
 impl NewAsset {
@@ -208,6 +231,8 @@ impl NewAsset {
             description: None,
             tags: Vec::new(),
             credential_id: None,
+            via_asset_id: None,
+            allow_tcp_forwarding: true,
         }
     }
 }
@@ -300,6 +325,10 @@ pub struct AssetHealth {
     pub latency_ms: Option<i64>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
+    #[serde(default)]
+    pub consecutive_failures: i64,
+    #[serde(default)]
+    pub alert_firing: bool,
 }
 
 impl AssetHealth {
@@ -312,6 +341,8 @@ impl AssetHealth {
             latency_ms: None,
             error_code: None,
             error_message: None,
+            consecutive_failures: 0,
+            alert_firing: false,
         }
     }
 }
@@ -319,6 +350,96 @@ impl AssetHealth {
 pub const ASSET_HEALTH_UNKNOWN: &str = "unknown";
 pub const ASSET_HEALTH_HEALTHY: &str = "healthy";
 pub const ASSET_HEALTH_FAILED: &str = "failed";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct AssetProbeSample {
+    pub id: i64,
+    pub asset_id: String,
+    pub checked_at: String,
+    pub status: String,
+    pub latency_ms: Option<i64>,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ProbeSettings {
+    pub enabled: bool,
+    pub interval_seconds: i64,
+    pub timeout_ms: i64,
+    pub failure_threshold: i64,
+    pub notify_on_recovery: bool,
+    pub updated_at: Option<String>,
+}
+
+impl Default for ProbeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_seconds: 300,
+            timeout_ms: 4000,
+            failure_threshold: 2,
+            notify_on_recovery: true,
+            updated_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationChannelKind {
+    Telegram,
+    Bark,
+    Webhook,
+}
+
+impl NotificationChannelKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Telegram => "telegram",
+            Self::Bark => "bark",
+            Self::Webhook => "webhook",
+        }
+    }
+}
+
+impl TryFrom<&str> for NotificationChannelKind {
+    type Error = HopCoreError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "telegram" => Ok(Self::Telegram),
+            "bark" => Ok(Self::Bark),
+            "webhook" => Ok(Self::Webhook),
+            other => Err(HopCoreError::Validation(format!(
+                "notification channel kind must be telegram, bark, or webhook, got {other}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct NotificationChannel {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub enabled: bool,
+    pub config_enc: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewNotificationChannel {
+    pub id: Option<String>,
+    pub name: String,
+    pub kind: NotificationChannelKind,
+    pub enabled: bool,
+    pub config_enc: String,
+}
+
+pub fn notification_channel_crypto_context(id: &str) -> String {
+    format!("notification_channel:{id}:config")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Session {

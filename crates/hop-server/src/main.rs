@@ -1,7 +1,10 @@
+mod bootstrap;
 mod control_api;
 mod local_cli;
 mod manifest_io;
+mod notify;
 mod probe;
+mod scheduler;
 mod ssh;
 mod transfer;
 mod tui;
@@ -352,6 +355,10 @@ enum AssetCommand {
         credential_id: Option<String>,
         #[arg(long)]
         credential: Option<String>,
+        #[arg(long)]
+        via_asset: Option<String>,
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        allow_tcp_forwarding: bool,
     },
     List,
     Delete {
@@ -360,6 +367,23 @@ enum AssetCommand {
     Probe {
         target: Option<String>,
         #[arg(long, default_value_t = 4)]
+        timeout_secs: u64,
+    },
+    BootstrapKey {
+        target: String,
+        #[arg(long)]
+        username: Option<String>,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long, conflicts_with = "password")]
+        password_stdin: bool,
+        #[arg(long)]
+        credential_name: Option<String>,
+        #[arg(long)]
+        disable_password_auth: bool,
+        #[arg(long)]
+        keep_previous_credential: bool,
+        #[arg(long, default_value_t = 15)]
         timeout_secs: u64,
     },
 }
@@ -454,7 +478,7 @@ async fn main() -> Result<()> {
             }
         }
         Command::Asset { command } => {
-            let (db, _, _) = open_runtime(cli.config).await?;
+            let (db, _, master_key) = open_runtime(cli.config).await?;
             match command {
                 AssetCommand::Add {
                     name,
@@ -466,6 +490,8 @@ async fn main() -> Result<()> {
                     tags,
                     credential_id,
                     credential,
+                    via_asset,
+                    allow_tcp_forwarding,
                 } => {
                     let resolved_credential_id = match (credential_id, credential) {
                         (Some(id), None) => {
@@ -479,6 +505,12 @@ async fn main() -> Result<()> {
                             bail!("choose either --credential-id or --credential, not both")
                         }
                     };
+                    let resolved_via_asset_id = match via_asset {
+                        Some(reference) => {
+                            Some(local_cli::resolve_asset_ref(&db, &reference).await?)
+                        }
+                        None => None,
+                    };
                     local_cli::add_asset(
                         &db,
                         NewAsset {
@@ -490,6 +522,8 @@ async fn main() -> Result<()> {
                             description,
                             tags,
                             credential_id: resolved_credential_id,
+                            via_asset_id: resolved_via_asset_id,
+                            allow_tcp_forwarding,
                         },
                     )
                     .await
@@ -502,7 +536,34 @@ async fn main() -> Result<()> {
                 } => {
                     local_cli::probe_assets(
                         &db,
+                        Some(master_key),
                         target.as_deref(),
+                        Duration::from_secs(timeout_secs),
+                    )
+                    .await
+                }
+                AssetCommand::BootstrapKey {
+                    target,
+                    username,
+                    password,
+                    password_stdin,
+                    credential_name,
+                    disable_password_auth,
+                    keep_previous_credential,
+                    timeout_secs,
+                } => {
+                    let password = read_stdin_secret_arg(password, password_stdin)?;
+                    local_cli::bootstrap_asset_key(
+                        &db,
+                        master_key,
+                        &target,
+                        crate::bootstrap::BootstrapKeyOptions {
+                            username,
+                            password,
+                            credential_name,
+                            disable_password_auth,
+                            prune_previous_credential: !keep_previous_credential,
+                        },
                         Duration::from_secs(timeout_secs),
                     )
                     .await
@@ -938,6 +999,9 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
             "applied startup-config resources"
         );
     }
+    scheduler::sync_startup_probe_and_notifications(&db, &master_key, &config)
+        .await
+        .context("sync startup probe and notification config")?;
     let active_sessions = ssh::session_registry::ActiveSessionRegistry::default();
     info!("starting hop-server SSH listener on {ssh_bind}");
     let api_token = config
@@ -952,6 +1016,7 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
         warn!("api.token still uses the insecure 'change-me' placeholder; replace it before exposing the panel");
     }
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (probe_reload_tx, probe_reload_rx) = watch::channel(0_u64);
     let shutdown_task = tokio::spawn(async move {
         shutdown_signal().await;
         info!("shutdown signal received");
@@ -959,6 +1024,12 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
     });
     let maintenance_task =
         spawn_retention_maintenance(db.clone(), retention_days, shutdown_rx.clone());
+    let scheduler_task = tokio::spawn(scheduler::serve_probe_scheduler_with_shutdown(
+        db.clone(),
+        master_key.clone(),
+        probe_reload_rx,
+        shutdown_rx.clone(),
+    ));
     if let Some(token) = api_token {
         let api_bind = config.api_bind_addr()?;
         let api_state = control_api::ControlApiState::new(
@@ -968,7 +1039,8 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
             active_sessions.clone(),
         )?
         .with_ssh_listen(config.listen.clone())
-        .with_probe_timeout(config.connect_timeout());
+        .with_probe_timeout(config.connect_timeout())
+        .with_scheduler_reload(probe_reload_tx);
         info!("starting Hop Control API on {api_bind}");
         let cors_allowlist = config.api.cors_allowlist.clone();
         let api = control_api::serve_with_shutdown(
@@ -986,10 +1058,12 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
             shutdown_rx,
         );
         let result = tokio::try_join!(api, ssh).map(|_| ());
+        scheduler_task.abort();
         maintenance_task.abort();
         shutdown_task.abort();
         result
     } else {
+        drop(probe_reload_tx);
         info!("Control API disabled; no HTTP listener will be created");
         let result = ssh::server::serve_ssh_with_shutdown(
             ssh_bind,
@@ -1000,6 +1074,7 @@ async fn serve(config_path: Option<PathBuf>) -> Result<()> {
             shutdown_rx,
         )
         .await;
+        scheduler_task.abort();
         maintenance_task.abort();
         shutdown_task.abort();
         result
@@ -1633,6 +1708,60 @@ access_keys:
             reset.command,
             Some(Command::KnownHosts {
                 command: KnownHostsCommand::Reset { port: 22, .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn v0_3_0_cli_commands_parse_via_asset_forwarding_and_bootstrap_key() {
+        let add_chained = Cli::try_parse_from([
+            "hop-server",
+            "asset",
+            "add",
+            "--name",
+            "us-origin",
+            "--hostname",
+            "10.20.0.5",
+            "--via-asset",
+            "hk-relay",
+            "--allow-tcp-forwarding",
+            "false",
+        ])
+        .unwrap();
+        assert!(matches!(
+            add_chained.command,
+            Some(Command::Asset {
+                command: AssetCommand::Add {
+                    via_asset: Some(_),
+                    allow_tcp_forwarding: false,
+                    ..
+                }
+            })
+        ));
+
+        let bootstrap = Cli::try_parse_from([
+            "hop-server",
+            "asset",
+            "bootstrap-key",
+            "dmit-lax",
+            "--username",
+            "root",
+            "--password-stdin",
+            "--disable-password-auth",
+            "--timeout-secs",
+            "20",
+        ])
+        .unwrap();
+        assert!(matches!(
+            bootstrap.command,
+            Some(Command::Asset {
+                command: AssetCommand::BootstrapKey {
+                    password_stdin: true,
+                    disable_password_auth: true,
+                    keep_previous_credential: false,
+                    timeout_secs: 20,
+                    ..
+                }
             })
         ));
     }

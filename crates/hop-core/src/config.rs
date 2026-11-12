@@ -16,7 +16,9 @@ use crate::{
         AccessSpec, AssetSpec, AssetType, CredentialSpec, CredentialType, ResourceState,
         SecretSource,
     },
+    crypto::{encrypt_envelope, MasterKey},
     errors::HopCoreError,
+    models::{NewNotificationChannel, NotificationChannelKind, ProbeSettings},
     Manifest, Result, MANIFEST_API_VERSION,
 };
 
@@ -58,6 +60,8 @@ pub struct HopConfig {
     pub api: ApiConfig,
     pub ssh: SshConfig,
     pub runtime: RuntimeConfig,
+    pub probe: Option<StartupProbeConfig>,
+    pub notifications: BTreeMap<String, StartupNotificationConfig>,
     pub credentials: BTreeMap<String, StartupCredentialConfig>,
     pub assets: BTreeMap<String, StartupAssetConfig>,
     pub access_keys: BTreeMap<String, StartupAccessKeyConfig>,
@@ -71,6 +75,8 @@ impl Default for HopConfig {
             api: ApiConfig::default(),
             ssh: SshConfig::default(),
             runtime: RuntimeConfig::default(),
+            probe: None,
+            notifications: BTreeMap::new(),
             credentials: BTreeMap::new(),
             assets: BTreeMap::new(),
             access_keys: BTreeMap::new(),
@@ -189,6 +195,8 @@ impl HopConfig {
                         description: asset.description.clone(),
                         tags: asset.tags.clone(),
                         credential: asset.credential.clone(),
+                        via_asset: asset.via_asset.clone(),
+                        allow_tcp_forwarding: asset.allow_tcp_forwarding,
                     },
                 )
             })
@@ -262,6 +270,26 @@ impl HopConfig {
             return Err(HopCoreError::Config(
                 "runtime.log_level must not be empty".to_string(),
             ));
+        }
+        if let Some(probe) = &self.probe {
+            if !(30..=86_400).contains(&probe.interval_seconds) {
+                return Err(HopCoreError::Config(
+                    "probe.interval_seconds must be between 30 and 86400".to_string(),
+                ));
+            }
+            if !(500..=30_000).contains(&probe.timeout_ms) {
+                return Err(HopCoreError::Config(
+                    "probe.timeout_ms must be between 500 and 30000".to_string(),
+                ));
+            }
+            if !(1..=20).contains(&probe.failure_threshold) {
+                return Err(HopCoreError::Config(
+                    "probe.failure_threshold must be between 1 and 20".to_string(),
+                ));
+            }
+        }
+        for (name, channel) in &self.notifications {
+            channel.validate(name)?;
         }
         for (name, credential) in &self.credentials {
             let path = format!("credentials.{name}");
@@ -429,8 +457,14 @@ pub struct SshConfig {
     pub keepalive_interval: u64,
     pub connect_timeout: u64,
     pub proxy_policy: String,
+    #[serde(default = "default_true")]
+    pub allow_managed_tcp_forwarding: bool,
     #[serde(default = "default_allowed_client_ip_ranges")]
     pub allowed_client_ip_ranges: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl SshConfig {
@@ -462,6 +496,7 @@ impl Default for SshConfig {
             keepalive_interval: 30,
             connect_timeout: 10,
             proxy_policy: "assets_only".to_string(),
+            allow_managed_tcp_forwarding: true,
             allowed_client_ip_ranges: default_allowed_client_ip_ranges(),
         }
     }
@@ -488,6 +523,8 @@ pub struct StartupAssetConfig {
     #[serde(default)]
     pub tags: Vec<String>,
     pub credential: Option<String>,
+    pub via_asset: Option<String>,
+    pub allow_tcp_forwarding: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -497,6 +534,200 @@ pub struct StartupAccessKeyConfig {
     pub public_key_file: Option<PathBuf>,
     pub enabled: Option<bool>,
     pub assets: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StartupProbeConfig {
+    pub enabled: bool,
+    pub interval_seconds: i64,
+    pub timeout_ms: i64,
+    pub failure_threshold: i64,
+    pub notify_on_recovery: bool,
+}
+
+impl Default for StartupProbeConfig {
+    fn default() -> Self {
+        let defaults = ProbeSettings::default();
+        Self {
+            enabled: defaults.enabled,
+            interval_seconds: defaults.interval_seconds,
+            timeout_ms: defaults.timeout_ms,
+            failure_threshold: defaults.failure_threshold,
+            notify_on_recovery: defaults.notify_on_recovery,
+        }
+    }
+}
+
+impl From<&StartupProbeConfig> for ProbeSettings {
+    fn from(value: &StartupProbeConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+            interval_seconds: value.interval_seconds,
+            timeout_ms: value.timeout_ms,
+            failure_threshold: value.failure_threshold,
+            notify_on_recovery: value.notify_on_recovery,
+            updated_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartupNotificationConfig {
+    #[serde(rename = "type")]
+    pub kind: NotificationChannelKind,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub bot_token: Option<SecretString>,
+    pub chat_id: Option<String>,
+    pub api_base_url: Option<String>,
+    pub server_url: Option<String>,
+    pub device_key: Option<SecretString>,
+    pub url: Option<String>,
+    pub secret: Option<SecretString>,
+}
+
+impl StartupNotificationConfig {
+    pub fn validate(&self, name: &str) -> Result<()> {
+        let valid_name = !name.is_empty()
+            && name.len() <= 128
+            && name
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphanumeric())
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'));
+        if !valid_name {
+            return Err(HopCoreError::Config(format!(
+                "notifications.{name}: name must start with an ASCII letter or digit and contain only letters, digits, '.', '-' or '_'"
+            )));
+        }
+        let path = format!("notifications.{name}");
+        match self.kind {
+            NotificationChannelKind::Telegram => {
+                if self.bot_token.as_ref().is_none_or(SecretString::is_empty) {
+                    return Err(HopCoreError::Config(format!(
+                        "{path}.bot_token: required for telegram notification channel"
+                    )));
+                }
+                if self
+                    .chat_id
+                    .as_deref()
+                    .map(str::trim)
+                    .is_none_or(str::is_empty)
+                {
+                    return Err(HopCoreError::Config(format!(
+                        "{path}.chat_id: required for telegram notification channel"
+                    )));
+                }
+                if let Some(base) = &self.api_base_url {
+                    validate_http_url(base, &format!("{path}.api_base_url"))?;
+                }
+                if self.server_url.is_some()
+                    || self.device_key.is_some()
+                    || self.url.is_some()
+                    || self.secret.is_some()
+                {
+                    return Err(HopCoreError::Config(format!(
+                        "{path}: server_url, device_key, url, and secret are not valid for telegram"
+                    )));
+                }
+            }
+            NotificationChannelKind::Bark => {
+                if self.device_key.as_ref().is_none_or(SecretString::is_empty) {
+                    return Err(HopCoreError::Config(format!(
+                        "{path}.device_key: required for bark notification channel"
+                    )));
+                }
+                if let Some(server_url) = &self.server_url {
+                    validate_http_url(server_url, &format!("{path}.server_url"))?;
+                }
+                if self.bot_token.is_some()
+                    || self.chat_id.is_some()
+                    || self.api_base_url.is_some()
+                    || self.url.is_some()
+                    || self.secret.is_some()
+                {
+                    return Err(HopCoreError::Config(format!(
+                        "{path}: bot_token, chat_id, api_base_url, url, and secret are not valid for bark"
+                    )));
+                }
+            }
+            NotificationChannelKind::Webhook => {
+                let Some(url) = &self.url else {
+                    return Err(HopCoreError::Config(format!(
+                        "{path}.url: required for webhook notification channel"
+                    )));
+                };
+                validate_http_url(url, &format!("{path}.url"))?;
+                if self.bot_token.is_some()
+                    || self.chat_id.is_some()
+                    || self.api_base_url.is_some()
+                    || self.server_url.is_some()
+                    || self.device_key.is_some()
+                {
+                    return Err(HopCoreError::Config(format!(
+                        "{path}: telegram/bark fields are not valid for webhook"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn to_encrypted_channel(
+        &self,
+        existing_id: Option<String>,
+        name: &str,
+        master_key: &MasterKey,
+    ) -> Result<NewNotificationChannel> {
+        self.validate(name)?;
+        let id = existing_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let json_payload = match self.kind {
+            NotificationChannelKind::Telegram => serde_json::json!({
+                "bot_token": self.bot_token.as_ref().map(SecretString::expose).unwrap_or_default().trim(),
+                "chat_id": self.chat_id.as_deref().unwrap_or_default().trim(),
+                "api_base_url": self.api_base_url.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+            }),
+            NotificationChannelKind::Bark => serde_json::json!({
+                "server_url": self.server_url.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+                "device_key": self.device_key.as_ref().map(SecretString::expose).unwrap_or_default().trim(),
+            }),
+            NotificationChannelKind::Webhook => serde_json::json!({
+                "url": self.url.as_deref().unwrap_or_default().trim(),
+                "secret": self.secret.as_ref().map(SecretString::expose).map(str::trim).filter(|s| !s.is_empty()),
+            }),
+        };
+        let raw_bytes = serde_json::to_vec(&json_payload).map_err(|error| {
+            HopCoreError::Config(format!("serialize notification config: {error}"))
+        })?;
+        let context = crate::models::notification_channel_crypto_context(&id);
+        let config_enc = encrypt_envelope(master_key, &context, &raw_bytes)?;
+        Ok(NewNotificationChannel {
+            id: Some(id),
+            name: name.to_string(),
+            kind: self.kind,
+            enabled: self.enabled,
+            config_enc,
+        })
+    }
+}
+
+fn validate_http_url(raw: &str, field_path: &str) -> Result<()> {
+    let trimmed = raw.trim();
+    let uri = trimmed.parse::<Uri>().map_err(|_| {
+        HopCoreError::Config(format!(
+            "{field_path}: must be a valid http:// or https:// URL"
+        ))
+    })?;
+    if !matches!(uri.scheme_str(), Some("http" | "https")) || uri.authority().is_none() {
+        return Err(HopCoreError::Config(format!(
+            "{field_path}: must include http:// or https:// and a host"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -744,5 +975,84 @@ access_keys:
         .unwrap();
         let error = HopConfig::load(Some(&mixed)).unwrap_err();
         assert!(error.to_string().contains("must be the only entry"));
+    }
+
+    #[test]
+    fn v0_3_via_asset_forwarding_probe_and_notifications_validate_and_redact() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hop.yaml");
+        fs::write(
+            &path,
+            r#"ssh:
+  allow_managed_tcp_forwarding: true
+probe:
+  enabled: true
+  interval_seconds: 180
+  timeout_ms: 5000
+  failure_threshold: 3
+  notify_on_recovery: true
+notifications:
+  tg-ops:
+    type: telegram
+    bot_token: "123456:SECRET_BOT_TOKEN"
+    chat_id: "-100999"
+    api_base_url: "https://api.telegram.org"
+  bark-iphone:
+    type: bark
+    server_url: "https://api.day.app"
+    device_key: "BARK_SECRET_KEY"
+  ops-hook:
+    type: webhook
+    url: "https://hooks.example.com/hop"
+    secret: "HOOK_SECRET"
+credentials:
+  root:
+    username: root
+    password: relay-password
+assets:
+  hk-relay:
+    host: 203.0.113.10
+    credential: root
+  jp-target:
+    host: 198.51.100.20
+    credential: root
+    via_asset: hk-relay
+    allow_tcp_forwarding: false
+"#,
+        )
+        .unwrap();
+
+        let config = HopConfig::load(Some(&path)).unwrap();
+        assert!(config.ssh.allow_managed_tcp_forwarding);
+        let probe = config.probe.as_ref().unwrap();
+        assert!(probe.enabled);
+        assert_eq!(probe.interval_seconds, 180);
+        assert_eq!(probe.failure_threshold, 3);
+        assert_eq!(config.notifications.len(), 3);
+        assert_eq!(
+            config.assets["jp-target"].via_asset.as_deref(),
+            Some("hk-relay")
+        );
+        assert_eq!(config.assets["jp-target"].allow_tcp_forwarding, Some(false));
+        let debug_repr = format!("{config:?}");
+        assert!(!debug_repr.contains("SECRET_BOT_TOKEN"));
+        assert!(!debug_repr.contains("BARK_SECRET_KEY"));
+        assert!(!debug_repr.contains("HOOK_SECRET"));
+
+        let master_key = MasterKey::generate();
+        let encrypted = config.notifications["tg-ops"]
+            .to_encrypted_channel(None, "tg-ops", &master_key)
+            .unwrap();
+        assert_eq!(encrypted.kind, NotificationChannelKind::Telegram);
+        assert!(!encrypted.config_enc.contains("SECRET_BOT_TOKEN"));
+
+        let cycle = directory.path().join("cycle.yaml");
+        fs::write(
+            &cycle,
+            "credentials:\n  root:\n    username: root\n    password: secret\nassets:\n  a:\n    host: 1.1.1.1\n    credential: root\n    via_asset: b\n  b:\n    host: 2.2.2.2\n    credential: root\n    via_asset: a\n",
+        )
+        .unwrap();
+        let cycle_err = HopConfig::load(Some(&cycle)).unwrap_err().to_string();
+        assert!(cycle_err.contains("cycle"));
     }
 }

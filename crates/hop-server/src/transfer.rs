@@ -67,6 +67,14 @@ pub struct AssetTransferRow {
     pub tags: Vec<String>,
     pub credential_id: Option<String>,
     pub protocol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via_asset_id: Option<String>,
+    #[serde(default = "default_true_forwarding")]
+    pub allow_tcp_forwarding: bool,
+}
+
+fn default_true_forwarding() -> bool {
+    true
 }
 
 impl From<Asset> for AssetTransferRow {
@@ -79,6 +87,8 @@ impl From<Asset> for AssetTransferRow {
             tags: asset.tags,
             credential_id: asset.credential_id,
             protocol: asset.protocol,
+            via_asset_id: asset.via_asset_id,
+            allow_tcp_forwarding: asset.allow_tcp_forwarding,
         }
     }
 }
@@ -94,6 +104,8 @@ impl From<AssetTransferRow> for NewAsset {
             description: row.description,
             tags: row.tags,
             credential_id: row.credential_id,
+            via_asset_id: row.via_asset_id,
+            allow_tcp_forwarding: row.allow_tcp_forwarding,
         }
     }
 }
@@ -173,8 +185,13 @@ pub async fn import_assets(
                     summary.record_error(format!("asset already exists: {}", row.name))
                 }
                 ConflictPolicy::Overwrite => {
+                    let is_csv = format == TransferFormat::Csv;
                     let mut updated: NewAsset = row.into();
                     updated.display_name = existing.display_name;
+                    if is_csv {
+                        updated.via_asset_id = existing.via_asset_id;
+                        updated.allow_tcp_forwarding = existing.allow_tcp_forwarding;
+                    }
                     db.update_asset(&existing.id, updated).await?;
                     summary.record_overwritten();
                 }
@@ -299,6 +316,8 @@ fn read_asset_csv(input: &str) -> Result<Vec<AssetTransferRow>> {
             tags: split_tags(&record[4]),
             credential_id: nonempty(record[5].clone()),
             protocol: record[6].clone(),
+            via_asset_id: None,
+            allow_tcp_forwarding: true,
         });
     }
     Ok(rows)
@@ -492,6 +511,8 @@ mod tests {
             description: None,
             tags: tags.iter().map(|tag| tag.to_string()).collect(),
             credential_id: None,
+            via_asset_id: None,
+            allow_tcp_forwarding: true,
             created_at: None,
             updated_at: None,
             health: hop_core::AssetHealth::unknown(name),
@@ -520,6 +541,8 @@ mod tests {
             tags: vec!["prod".to_string()],
             credential_id: None,
             protocol: "tcp".to_string(),
+            via_asset_id: None,
+            allow_tcp_forwarding: true,
         };
 
         let new_asset: NewAsset = row.into();

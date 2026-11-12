@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, time::Duration};
+use std::{fs, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
 use hop_core::{
@@ -329,6 +329,8 @@ pub async fn add_asset(db: &Catalog, asset: NewAsset) -> Result<()> {
             "protocol": asset.protocol,
             "hostname": asset.hostname,
             "port": asset.port,
+            "via_asset_id": asset.via_asset_id,
+            "allow_tcp_forwarding": asset.allow_tcp_forwarding,
         })),
     )
     .await;
@@ -337,6 +339,20 @@ pub async fn add_asset(db: &Catalog, asset: NewAsset) -> Result<()> {
         asset.id, asset.name, asset.protocol, asset.hostname, asset.port
     );
     Ok(())
+}
+
+pub async fn resolve_asset_ref(db: &Catalog, reference: &str) -> Result<String> {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        bail!("asset reference must not be empty");
+    }
+    if let Some(asset) = db.get_asset_by_id(trimmed).await? {
+        return Ok(asset.id);
+    }
+    if let Some(asset) = db.get_asset_by_name(trimmed).await? {
+        return Ok(asset.id);
+    }
+    bail!("unknown asset id or name: {trimmed}");
 }
 
 pub fn format_health_column(health: &AssetHealth) -> String {
@@ -356,7 +372,7 @@ pub fn format_health_column(health: &AssetHealth) -> String {
 pub async fn list_assets(db: &Catalog) -> Result<()> {
     for asset in db.list_assets().await? {
         println!(
-            "{}\t{}\t{}\t{}:{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}:{}\t{}\t{}\t{}\t{}",
             asset.id,
             asset.name,
             asset.protocol,
@@ -364,6 +380,7 @@ pub async fn list_assets(db: &Catalog) -> Result<()> {
             asset.port,
             asset.tags.join(","),
             asset.credential_id.unwrap_or_else(|| "-".to_string()),
+            asset.via_asset_id.unwrap_or_else(|| "-".to_string()),
             format_health_column(&asset.health)
         );
     }
@@ -386,7 +403,12 @@ pub async fn delete_asset(db: &Catalog, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn probe_assets(db: &Catalog, target: Option<&str>, timeout: Duration) -> Result<()> {
+pub async fn probe_assets(
+    db: &Catalog,
+    master_key: Option<std::sync::Arc<MasterKey>>,
+    target: Option<&str>,
+    timeout: Duration,
+) -> Result<()> {
     let results = if let Some(reference) = target {
         let trimmed = reference.trim();
         let asset = match db.get_asset_by_id(trimmed).await? {
@@ -396,7 +418,7 @@ pub async fn probe_assets(db: &Catalog, target: Option<&str>, timeout: Duration)
                 .await?
                 .with_context(|| format!("unknown asset id or name: {trimmed}"))?,
         };
-        let probed = crate::probe::probe_asset(db, &asset, timeout).await?;
+        let probed = crate::probe::probe_asset(db, master_key.as_deref(), &asset, timeout).await?;
         record_cli_audit(
             db,
             "asset.probe",
@@ -412,7 +434,7 @@ pub async fn probe_assets(db: &Catalog, target: Option<&str>, timeout: Duration)
         .await;
         vec![probed]
     } else {
-        let probed = crate::probe::probe_all_assets(db, timeout).await?;
+        let probed = crate::probe::probe_all_assets(db, master_key, timeout).await?;
         let healthy = probed
             .iter()
             .filter(|asset| asset.health.status == ASSET_HEALTH_HEALTHY)
@@ -449,6 +471,48 @@ pub async fn probe_assets(db: &Catalog, target: Option<&str>, timeout: Duration)
             "{}\t{}\t{}:{}\t{}\t{}",
             asset.name, asset.protocol, asset.hostname, asset.port, asset.health.status, detail
         );
+    }
+    Ok(())
+}
+
+pub async fn bootstrap_asset_key(
+    db: &Catalog,
+    master_key: Arc<MasterKey>,
+    target: &str,
+    options: crate::bootstrap::BootstrapKeyOptions,
+    timeout: Duration,
+) -> Result<()> {
+    let asset_id = resolve_asset_ref(db, target).await?;
+    let outcome =
+        crate::bootstrap::bootstrap_asset_ssh_key(db, master_key, &asset_id, options, timeout)
+            .await?;
+    record_cli_audit(
+        db,
+        "asset.bootstrap_key",
+        "asset",
+        Some(outcome.asset.id.clone()),
+        Some(outcome.asset.name.clone()),
+        Some(serde_json::json!({
+            "credential_id": outcome.credential.id,
+            "fingerprint": outcome.public_key_fingerprint,
+            "pruned_previous_credential": outcome.pruned_previous_credential,
+            "password_auth_disabled": outcome.password_auth_disabled,
+        })),
+    )
+    .await;
+    println!(
+        "bootstrapped {} ({}:{}) -> credential {} ({})",
+        outcome.asset.name,
+        outcome.asset.hostname,
+        outcome.asset.port,
+        outcome.credential.name,
+        outcome.public_key_fingerprint
+    );
+    if outcome.password_auth_disabled {
+        println!("sshd PasswordAuthentication disabled and reloaded");
+    }
+    for warning in &outcome.warnings {
+        eprintln!("warning: {warning}");
     }
     Ok(())
 }
@@ -523,8 +587,18 @@ pub fn render_ssh_config(
         .map(|path| format!("  IdentityFile {path}\n  IdentitiesOnly yes\n"))
         .unwrap_or_default();
 
+    let name_by_id: std::collections::HashMap<&str, &str> = assets
+        .iter()
+        .map(|asset| (asset.id.as_str(), asset.name.as_str()))
+        .collect();
+
     let mut out = String::new();
     out.push_str("# Generated by hop-server ssh-config\n");
+    if mode == SshConfigMode::Relay {
+        out.push_str(
+            "# Managed Vault mode: supports SSH, SFTP, -L/-D forwarding, and Cursor / VS Code Remote-SSH\n",
+        );
+    }
     out.push_str("# Interactive TUI selector: ssh hop\n");
     out.push_str("Host hop\n");
     out.push_str(&format!("  HostName {hop_host}\n"));
@@ -542,10 +616,24 @@ pub fn render_ssh_config(
     }
 
     for asset in assets {
+        let via_suffix = asset
+            .via_asset_id
+            .as_deref()
+            .and_then(|via_id| name_by_id.get(via_id).copied())
+            .map(|via_name| format!(" via {via_name}"))
+            .unwrap_or_default();
         if asset.protocol == ASSET_PROTOCOL_SSH {
             out.push('\n');
             if let Some(label) = asset.display_name.as_deref() {
-                out.push_str(&format!("# {label} ({}:{})\n", asset.hostname, asset.port));
+                out.push_str(&format!(
+                    "# {label} ({}:{}{via_suffix})\n",
+                    asset.hostname, asset.port
+                ));
+            } else if !via_suffix.is_empty() {
+                out.push_str(&format!(
+                    "# {} ({}:{}{via_suffix})\n",
+                    asset.name, asset.hostname, asset.port
+                ));
             }
             match mode {
                 SshConfigMode::Relay => {
@@ -564,7 +652,7 @@ pub fn render_ssh_config(
             }
         } else {
             out.push_str(&format!(
-                "\n# TCP tunnel ({}): ssh -N -L {}:{}.hop:{} proxy@{} -p {}\n",
+                "\n# TCP tunnel ({}{via_suffix}): ssh -N -L {}:{}.hop:{} proxy@{} -p {}\n",
                 asset.name, asset.port, asset.name, asset.port, hop_host, hop_port
             ));
         }

@@ -10,10 +10,13 @@ axum.workspace = true
 base64.workspace = true
 clap.workspace = true
 glob.workspace = true
+hmac.workspace = true
 hop-core = { path = "../hop-core" }
+http.workspace = true
 nucleo-matcher.workspace = true
 ratatui.workspace = true
 russh.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -23,6 +26,7 @@ tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+webpki-roots.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

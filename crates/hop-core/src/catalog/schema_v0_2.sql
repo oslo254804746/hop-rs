@@ -30,21 +30,24 @@ CREATE TABLE credentials (
 );
 
 CREATE TABLE assets (
-    id            TEXT PRIMARY KEY,
-    name          TEXT NOT NULL UNIQUE,
-    asset_type    TEXT NOT NULL CHECK (asset_type IN ('ssh', 'tcp')),
-    host          TEXT NOT NULL,
-    port          INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
-    display_name  TEXT,
-    description   TEXT,
-    tags_json     TEXT,
-    credential_id TEXT REFERENCES credentials(id) ON DELETE RESTRICT,
-    created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    id                   TEXT PRIMARY KEY,
+    name                 TEXT NOT NULL UNIQUE,
+    asset_type           TEXT NOT NULL CHECK (asset_type IN ('ssh', 'tcp')),
+    host                 TEXT NOT NULL,
+    port                 INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
+    display_name         TEXT,
+    description          TEXT,
+    tags_json            TEXT,
+    credential_id        TEXT REFERENCES credentials(id) ON DELETE RESTRICT,
+    via_asset_id         TEXT REFERENCES assets(id) ON DELETE RESTRICT,
+    allow_tcp_forwarding INTEGER NOT NULL DEFAULT 1 CHECK (allow_tcp_forwarding IN (0, 1)),
+    created_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK (asset_type = 'ssh' OR credential_id IS NULL)
 );
 
 CREATE INDEX idx_assets_host_port ON assets(host, port);
+CREATE INDEX idx_assets_via_asset_id ON assets(via_asset_id);
 
 CREATE TABLE access_keys (
     id          TEXT PRIMARY KEY,
@@ -126,13 +129,17 @@ CREATE TABLE sessions (
 CREATE INDEX idx_sessions_started_at ON sessions(started_at DESC);
 
 CREATE TABLE asset_health (
-    asset_id        TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
-    status          TEXT NOT NULL DEFAULT 'unknown' CHECK (status IN ('unknown', 'healthy', 'failed')),
-    checked_at      TEXT,
-    last_success_at TEXT,
-    latency_ms      INTEGER,
-    error_code      TEXT,
-    error_message   TEXT
+    asset_id             TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+    status               TEXT NOT NULL DEFAULT 'unknown' CHECK (status IN ('unknown', 'healthy', 'failed')),
+    checked_at           TEXT,
+    last_success_at      TEXT,
+    latency_ms           INTEGER,
+    error_code           TEXT,
+    error_message        TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    alert_firing         INTEGER NOT NULL DEFAULT 0 CHECK (alert_firing IN (0, 1)),
+    last_alerted_at      TEXT,
+    last_recovered_at    TEXT
 );
 
 CREATE TRIGGER assets_create_health
@@ -140,6 +147,40 @@ AFTER INSERT ON assets
 BEGIN
     INSERT OR IGNORE INTO asset_health (asset_id) VALUES (NEW.id);
 END;
+
+CREATE TABLE asset_probe_samples (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id   TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status     TEXT NOT NULL CHECK (status IN ('healthy', 'failed')),
+    latency_ms INTEGER,
+    error_code TEXT
+);
+
+CREATE INDEX idx_asset_probe_samples_asset_id
+ON asset_probe_samples(asset_id, id DESC);
+
+CREATE TABLE probe_settings (
+    singleton_id       INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    enabled            INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+    interval_seconds   INTEGER NOT NULL DEFAULT 300 CHECK (interval_seconds BETWEEN 30 AND 86400),
+    timeout_ms         INTEGER NOT NULL DEFAULT 4000 CHECK (timeout_ms BETWEEN 500 AND 15000),
+    failure_threshold  INTEGER NOT NULL DEFAULT 2 CHECK (failure_threshold BETWEEN 1 AND 10),
+    notify_on_recovery INTEGER NOT NULL DEFAULT 1 CHECK (notify_on_recovery IN (0, 1)),
+    updated_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO probe_settings (singleton_id) VALUES (1);
+
+CREATE TABLE notification_channels (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    kind       TEXT NOT NULL CHECK (kind IN ('telegram', 'bark', 'webhook')),
+    enabled    INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    config_enc TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
 CREATE TABLE audit_events (
     id           TEXT PRIMARY KEY,

@@ -399,6 +399,8 @@ mod tests {
             description: None,
             tags: vec![],
             credential_id: None,
+            via_asset_id: None,
+            allow_tcp_forwarding: true,
             created_at: None,
             updated_at: None,
             health: hop_core::AssetHealth::unknown(name),

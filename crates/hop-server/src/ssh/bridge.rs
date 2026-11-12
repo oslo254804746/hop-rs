@@ -291,7 +291,7 @@ async fn run_managed_bridge(
         } else {
             "target closed"
         };
-        target.session.disconnect(russh::Disconnect::ByApplication, reason, "en").await.ok();
+        target.client.disconnect(reason).await;
         if is_exec && !exit_reported && !terminated {
             anyhow::bail!("target closed without reporting an exit status");
         }
