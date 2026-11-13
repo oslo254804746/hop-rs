@@ -148,9 +148,15 @@ connection = sqlite3.connect(sys.argv[1])
 rows = connection.execute(
     "SELECT key_name, error FROM sessions WHERE status = 'failed' AND mode = 'tcp-forward'"
 ).fetchall()
-assert rows, "expected denied forwarding audit records"
+assert rows, "expected denied forwarding session records"
 assert any(name == "key-restricted" for name, _ in rows)
-assert all(error == "target not authorized or not found" for _, error in rows)
+assert all(error == "target not authorized" for _, error in rows), rows
+
+audit_rows = connection.execute(
+    "SELECT actor_label, action, result FROM audit_events WHERE action = 'session.access_denied'"
+).fetchall()
+assert len(audit_rows) == len(rows), audit_rows
+assert all(actor == "ssh-ingress" and result == "denied" for actor, _, result in audit_rows), audit_rows
 PY
 
 printf 'Per-key asset authorization end-to-end test passed\n'
