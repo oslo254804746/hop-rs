@@ -29,7 +29,8 @@ use super::{
     },
     host_key, proxy,
     session_registry::{
-        ActiveSessionRegistry, TuiSelectorGuard, TuiTargetGuard, TERMINATED_BY_MANAGEMENT,
+        ActiveSessionRegistry, ResolvedTuiTarget, TuiSelectorGuard, TuiTargetGuard,
+        TERMINATED_BY_MANAGEMENT,
     },
 };
 
@@ -191,12 +192,25 @@ async fn serve_ssh_connections(
                     }
                 }
                 let handler = server.new_client(client_ip);
+                let cleanup_db = handler.db.clone();
+                let cleanup_active_sessions = handler.active_sessions.clone();
+                let cleanup_channels = Arc::clone(&handler.channels);
+                let cleanup_selected_target = Arc::clone(&handler.selected_target);
+                let cleanup_direct_client = Arc::clone(&handler.direct_client);
                 let session_config = Arc::clone(&config);
                 sessions.spawn(async move {
                     let result = match server::run_stream(session_config, socket, handler).await {
                         Ok(session) => session.await,
                         Err(error) => Err(error),
                     };
+                    cleanup_disconnected_client(
+                        &cleanup_db,
+                        &cleanup_active_sessions,
+                        &cleanup_channels,
+                        &cleanup_selected_target,
+                        &cleanup_direct_client,
+                    )
+                    .await;
                     (client_ip, result)
                 });
             }
@@ -222,6 +236,32 @@ async fn serve_ssh_connections(
                 }
             }
         }
+    }
+}
+
+async fn cleanup_disconnected_client(
+    db: &Catalog,
+    active_sessions: &ActiveSessionRegistry,
+    channels: &SharedChannels,
+    selected_target: &Arc<StdMutex<Option<ResolvedTuiTarget>>>,
+    direct_client: &Arc<Mutex<Option<Arc<super::client::ManagedClientSession>>>>,
+) {
+    if let Ok(mut guard) = selected_target.lock() {
+        *guard = None;
+    }
+    let drained = {
+        let mut guard = channels.lock().await;
+        std::mem::take(&mut *guard)
+    };
+    for (_, state) in drained {
+        if let ChannelState::Tui { audit, .. } = state {
+            let session_id = audit.id().to_string();
+            let _ = audit.finish(db, "ok", None).await;
+            active_sessions.unregister(&session_id).await;
+        }
+    }
+    if let Some(cached) = direct_client.lock().await.take() {
+        cached.disconnect("client disconnected").await;
     }
 }
 
@@ -278,7 +318,7 @@ impl HopSshServer {
             active_sessions: self.active_sessions.clone(),
             auth: None,
             direct_asset: None,
-            selected_asset: Arc::new(StdMutex::new(None)),
+            selected_target: Arc::new(StdMutex::new(None)),
             direct_client: Arc::new(Mutex::new(None)),
             peer_ip: Some(peer_addr.ip().to_canonical()),
             client_ip: Some(peer_addr.to_string()),
@@ -296,7 +336,7 @@ pub struct HopSshHandler {
     active_sessions: ActiveSessionRegistry,
     auth: Option<AuthInfo>,
     direct_asset: Option<Asset>,
-    selected_asset: Arc<StdMutex<Option<Asset>>>,
+    selected_target: Arc<StdMutex<Option<ResolvedTuiTarget>>>,
     direct_client: Arc<Mutex<Option<Arc<super::client::ManagedClientSession>>>>,
     peer_ip: Option<IpAddr>,
     client_ip: Option<String>,
@@ -310,13 +350,19 @@ impl HopSshHandler {
         self.auth.clone()
     }
 
-    fn effective_managed_asset(&self) -> Option<Asset> {
-        self.direct_asset.clone().or_else(|| {
-            self.selected_asset
-                .lock()
-                .expect("selected_asset mutex poisoned")
-                .clone()
-        })
+    fn effective_managed_target(&self) -> Option<(Asset, Option<watch::Receiver<bool>>)> {
+        if let Some(asset) = self.direct_asset.clone() {
+            return Some((asset, None));
+        }
+        let selected = self
+            .selected_target
+            .lock()
+            .expect("selected_target mutex poisoned")
+            .clone()?;
+        if *selected.parent_closed.borrow() {
+            return None;
+        }
+        Some((selected.asset, Some(selected.parent_closed)))
     }
 
     fn pty_size(&self, channel: ChannelId) -> PtySize {
@@ -356,21 +402,22 @@ impl HopSshHandler {
         Ok(Some(asset))
     }
 
-    async fn resolve_channel_managed_asset(&self, wait_timeout: Duration) -> Result<Option<Asset>> {
+    async fn resolve_channel_managed_target(
+        &self,
+        wait_timeout: Duration,
+    ) -> Result<Option<(Asset, Option<watch::Receiver<bool>>)>> {
         if let Some(asset) = self.direct_asset.clone() {
-            return Ok(Some(asset));
+            return Ok(Some((asset, None)));
         }
         let selected = self
-            .selected_asset
+            .selected_target
             .lock()
-            .expect("selected_asset mutex poisoned")
-            .clone();
+            .expect("selected_target mutex poisoned")
+            .clone()
+            .filter(|target| !*target.parent_closed.borrow());
         if let Some(selected) = selected {
-            return self
-                .db
-                .get_asset_by_id(&selected.id)
-                .await
-                .map_err(Into::into);
+            let fresh = self.db.get_asset_by_id(&selected.asset.id).await?;
+            return Ok(fresh.map(|asset| (asset, Some(selected.parent_closed))));
         }
         let Some(auth) = self.auth_info() else {
             return Ok(None);
@@ -382,10 +429,8 @@ impl HopSshHandler {
         else {
             return Ok(None);
         };
-        self.db
-            .get_asset_by_id(&candidate.id)
-            .await
-            .map_err(Into::into)
+        let fresh = self.db.get_asset_by_id(&candidate.asset.id).await?;
+        Ok(fresh.map(|asset| (asset, Some(candidate.parent_closed))))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -396,6 +441,7 @@ impl HopSshHandler {
         asset: Asset,
         tui: Option<TuiResources>,
         tui_target_guard: Option<TuiTargetGuard>,
+        parent_closed: Option<watch::Receiver<bool>>,
         mode: ManagedSessionMode,
         command: Option<Vec<u8>>,
     ) -> Result<()> {
@@ -417,7 +463,7 @@ impl HopSshHandler {
         }
         let selected_asset_cleanup = (mode == ManagedSessionMode::Tui).then(|| {
             (
-                Arc::clone(&self.selected_asset),
+                Arc::clone(&self.selected_target),
                 Arc::clone(&self.direct_client),
             )
         });
@@ -431,6 +477,7 @@ impl HopSshHandler {
             asset,
             channel_id,
             handle,
+            channels: Arc::clone(&self.channels),
             pty: self.pty_size(channel_id),
             pty_term: self.pty_term(channel_id),
             pty_requested: self.ptys.contains_key(&channel_id),
@@ -438,6 +485,7 @@ impl HopSshHandler {
             session_mode: mode,
             return_to_tui: tui.map(|tui| (self.channels.clone(), tui)),
             tui_target_guard,
+            parent_closed,
             selected_asset_cleanup,
             connect_timeout: self.config.connect_timeout(),
         };
@@ -760,7 +808,9 @@ impl server::Handler for HopSshHandler {
             .trim()
             .to_ascii_lowercase()
             .ends_with(".hop");
-        if let Some(direct) = self.effective_managed_asset().filter(|_| !is_dot_hop) {
+        if let Some((direct, parent_closed)) =
+            self.effective_managed_target().filter(|_| !is_dot_hop)
+        {
             let fresh_asset = self.db.get_asset_by_id(&direct.id).await?;
             let Some(asset) = fresh_asset
                 .clone()
@@ -848,6 +898,7 @@ impl server::Handler for HopSshHandler {
                     active_sessions,
                     auth,
                     asset,
+                    parent_closed,
                     host,
                     port_to_connect,
                     orig_addr,
@@ -958,6 +1009,7 @@ impl server::Handler for HopSshHandler {
                 asset,
                 None,
                 None,
+                None,
                 ManagedSessionMode::Direct,
                 None,
             )
@@ -1015,7 +1067,9 @@ impl server::Handler for HopSshHandler {
         } else {
             TUI_SFTP_WAIT_TIMEOUT
         };
-        let Some(asset) = self.resolve_channel_managed_asset(wait_timeout).await? else {
+        let Some((asset, parent_closed)) =
+            self.resolve_channel_managed_target(wait_timeout).await?
+        else {
             session.channel_failure(channel)?;
             return Ok(());
         };
@@ -1031,6 +1085,7 @@ impl server::Handler for HopSshHandler {
                 asset,
                 None,
                 None,
+                parent_closed,
                 ManagedSessionMode::Exec,
                 Some(data.to_vec()),
             )
@@ -1061,7 +1116,7 @@ impl server::Handler for HopSshHandler {
             .await
             .values()
             .any(|state| matches!(state, ChannelState::Tui { .. }));
-        if self.effective_managed_asset().is_none() && has_local_tui {
+        if self.effective_managed_target().is_none() && has_local_tui {
             let Some(auth) = self.auth_info() else {
                 session.channel_failure(channel)?;
                 return Ok(());
@@ -1089,8 +1144,8 @@ impl server::Handler for HopSshHandler {
             return Ok(());
         }
 
-        let Some(asset) = self
-            .resolve_channel_managed_asset(TUI_SFTP_WAIT_TIMEOUT)
+        let Some((asset, parent_closed)) = self
+            .resolve_channel_managed_target(TUI_SFTP_WAIT_TIMEOUT)
             .await?
         else {
             session.channel_failure(channel)?;
@@ -1108,6 +1163,7 @@ impl server::Handler for HopSshHandler {
                 asset,
                 None,
                 None,
+                parent_closed,
                 ManagedSessionMode::Sftp,
                 None,
             )
@@ -1173,25 +1229,28 @@ impl server::Handler for HopSshHandler {
                         output.extend_from_slice(
                             b"\r\nAsset has no managed credential; use ProxyJump instead.\r\n",
                         );
-                    } else {
+                    } else if let Some(ChannelState::Tui { mut tui, audit, .. }) =
+                        channels.remove(&channel)
+                    {
                         let target_guard = self.auth_info().map(|auth| {
-                            self.active_sessions.select_tui_target(
+                            let (guard, parent_closed) = self.active_sessions.select_tui_target(
                                 &auth.key_id,
                                 self.peer_ip,
                                 (*asset).clone(),
-                            )
-                        });
-                        if let Some(ChannelState::Tui { mut tui, audit, .. }) =
-                            channels.remove(&channel)
-                        {
+                            );
                             *self
-                                .selected_asset
+                                .selected_target
                                 .lock()
-                                .expect("selected_asset mutex poisoned") = Some((*asset).clone());
-                            output.append(&mut tui.leave_screen()?);
-                            finish_tui = Some((audit, "connected", None));
-                            connect = Some((*asset, *tui, target_guard));
-                        }
+                                .expect("selected_target mutex poisoned") =
+                                Some(ResolvedTuiTarget {
+                                    asset: (*asset).clone(),
+                                    parent_closed,
+                                });
+                            guard
+                        });
+                        output.append(&mut tui.leave_screen()?);
+                        finish_tui = Some((audit, "connected", None));
+                        connect = Some((*asset, *tui, target_guard));
                     }
                 }
             }
@@ -1252,6 +1311,7 @@ impl server::Handler for HopSshHandler {
                 asset,
                 Some(tui),
                 target_guard,
+                None,
                 ManagedSessionMode::Tui,
                 None,
             )
@@ -1428,7 +1488,7 @@ mod tests {
             active_sessions: ActiveSessionRegistry::default(),
             auth: None,
             direct_asset: None,
-            selected_asset: Arc::new(StdMutex::new(None)),
+            selected_target: Arc::new(StdMutex::new(None)),
             direct_client: Arc::new(Mutex::new(None)),
             peer_ip: None,
             client_ip: None,
@@ -1599,6 +1659,13 @@ mod tests {
             session: &mut Session,
         ) -> Result<(), Self::Error> {
             if self.session_channels.contains(&channel) {
+                if data == b"exit\n" {
+                    self.session_channels.remove(&channel);
+                    session.exit_status_request(channel, 0)?;
+                    session.eof(channel)?;
+                    session.close(channel)?;
+                    return Ok(());
+                }
                 session.data(channel, data.to_vec())?;
             }
             Ok(())
@@ -3078,7 +3145,144 @@ mod tests {
             .iter()
             .any(|s| s.mode == "sftp" && s.asset_name.as_deref() == Some("kwrt")));
 
+        // Drain `tui_ch` until the target shell banner (`WELCOME-SHELL`) arrives.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut buf = Vec::new();
+            while let Some(msg) = tui_ch.wait().await {
+                if let ChannelMsg::Data { data } = msg {
+                    buf.extend_from_slice(&data);
+                    if buf
+                        .windows(b"WELCOME-SHELL".len())
+                        .any(|w| w == b"WELCOME-SHELL")
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("target shell welcome banner");
+
+        // 3. Same-connection multiplexed SFTP (Netcatty side-panel reuse) closes automatically
+        //    when the user exits the target shell back to the Hop TUI menu (`exit\n`).
+        let mut mux_sftp_ch = tui_client.channel_open_session().await.unwrap();
+        mux_sftp_ch.request_subsystem(true, "sftp").await.unwrap();
+        loop {
+            match mux_sftp_ch.wait().await {
+                Some(ChannelMsg::Success) => break,
+                Some(ChannelMsg::WindowAdjusted { .. }) => continue,
+                other => panic!("expected multiplexed SFTP Success, got {other:?}"),
+            }
+        }
+        mux_sftp_ch.data(&b"MUX-PING"[..]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut got = Vec::new();
+            while let Some(msg) = mux_sftp_ch.wait().await {
+                if let ChannelMsg::Data { data } = msg {
+                    got.extend_from_slice(&data);
+                    if got == b"MUX-PING" {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("multiplexed SFTP roundtrip");
+
+        // Exit target shell -> returns `tui_ch` to Hop TUI menu and drops `TuiTargetGuard`.
+        tui_ch.data(&b"exit\n"[..]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while let Some(msg) = mux_sftp_ch.wait().await {
+                if matches!(msg, ChannelMsg::Close) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("multiplexed follower SFTP must close promptly when target shell exits to TUI");
+
+        // Wait until Hop TUI resumes (`Returning to Hop...`), then re-select `kwrt`.
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut buf = Vec::new();
+            while let Some(msg) = tui_ch.wait().await {
+                if let ChannelMsg::Data { data } = msg {
+                    buf.extend_from_slice(&data);
+                    if buf
+                        .windows(b"Returning to Hop...".len())
+                        .any(|w| w == b"Returning to Hop...")
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("TUI resume after target exit");
+        // Drain initial resumed TUI render frame before pressing Enter again.
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        tui_ch.data(&b"\r"[..]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let mut buf = Vec::new();
+            while let Some(msg) = tui_ch.wait().await {
+                if let ChannelMsg::Data { data } = msg {
+                    buf.extend_from_slice(&data);
+                    if buf
+                        .windows(b"WELCOME-SHELL".len())
+                        .any(|w| w == b"WELCOME-SHELL")
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("re-entered target shell welcome banner");
+
+        // 4. Cross-connection follower SFTP closes automatically when the TUI SSH client
+        //    disconnects abruptly without typing `exit`.
+        let cross_sftp_client = connect_hop().await;
+        let mut cross_sftp_ch = cross_sftp_client.channel_open_session().await.unwrap();
+        cross_sftp_ch.request_subsystem(true, "sftp").await.unwrap();
+        loop {
+            match cross_sftp_ch.wait().await {
+                Some(ChannelMsg::Success) => break,
+                Some(ChannelMsg::WindowAdjusted { .. }) => continue,
+                other => panic!("expected cross-connection SFTP Success, got {other:?}"),
+            }
+        }
+        cross_sftp_ch.data(&b"CROSS-PING"[..]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut got = Vec::new();
+            while let Some(msg) = cross_sftp_ch.wait().await {
+                if let ChannelMsg::Data { data } = msg {
+                    got.extend_from_slice(&data);
+                    if got == b"CROSS-PING" {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("cross-connection SFTP roundtrip");
+
         tui_client
+            .disconnect(russh::Disconnect::ByApplication, "tab closed", "en")
+            .await
+            .ok();
+        drop(tui_ch);
+        drop(tui_client);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while let Some(msg) = cross_sftp_ch.wait().await {
+                if matches!(msg, ChannelMsg::Close) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("cross-connection follower SFTP must close promptly when TUI client disconnects");
+
+        cross_sftp_client
             .disconnect(russh::Disconnect::ByApplication, "done", "en")
             .await
             .ok();

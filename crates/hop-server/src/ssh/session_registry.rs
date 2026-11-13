@@ -9,7 +9,7 @@ use std::{
 };
 
 use hop_core::Asset;
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{mpsc, watch, Mutex, Notify};
 
 pub(crate) const TERMINATED_BY_MANAGEMENT: &str = "terminated by management request";
 
@@ -17,6 +17,19 @@ pub(crate) const TERMINATED_BY_MANAGEMENT: &str = "terminated by management requ
 pub(crate) enum TerminateSessionResult {
     Signaled,
     NotFound,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedTuiTarget {
+    pub asset: Asset,
+    pub parent_closed: watch::Receiver<bool>,
+}
+
+#[derive(Debug)]
+struct SelectedTuiTarget {
+    token: u64,
+    asset: Asset,
+    closed_tx: watch::Sender<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -37,7 +50,7 @@ impl TuiAffinityKey {
 #[derive(Debug, Default)]
 struct TuiAffinityEntry {
     open_selectors: HashSet<u64>,
-    selected_targets: Vec<(u64, Asset)>,
+    selected_targets: Vec<SelectedTuiTarget>,
 }
 
 impl TuiAffinityEntry {
@@ -99,15 +112,27 @@ impl TuiTargetGuard {
         let Some(token) = self.token.take() else {
             return;
         };
+        let mut closed_senders = Vec::new();
         if let Ok(mut store) = self.store.lock() {
             let mut remove_entry = false;
             if let Some(entry) = store.entries.get_mut(&self.key) {
-                entry.selected_targets.retain(|(id, _)| *id != token);
+                let mut idx = 0;
+                while idx < entry.selected_targets.len() {
+                    if entry.selected_targets[idx].token == token {
+                        let removed = entry.selected_targets.remove(idx);
+                        closed_senders.push(removed.closed_tx);
+                    } else {
+                        idx += 1;
+                    }
+                }
                 remove_entry = entry.is_empty();
             }
             if remove_entry {
                 store.entries.remove(&self.key);
             }
+        }
+        for closed_tx in closed_senders {
+            let _ = closed_tx.send(true);
         }
         self.notify.notify_waiters();
     }
@@ -223,8 +248,9 @@ impl ActiveSessionRegistry {
         key_id: &str,
         peer_ip: Option<IpAddr>,
         asset: Asset,
-    ) -> TuiTargetGuard {
+    ) -> (TuiTargetGuard, watch::Receiver<bool>) {
         let key = TuiAffinityKey::new(key_id, peer_ip);
+        let (closed_tx, closed_rx) = watch::channel(false);
         let token = {
             let mut store = self.affinity.lock().expect("tui affinity mutex poisoned");
             let token = store.alloc_token();
@@ -233,16 +259,23 @@ impl ActiveSessionRegistry {
                 .entry(key.clone())
                 .or_default()
                 .selected_targets
-                .push((token, asset));
+                .push(SelectedTuiTarget {
+                    token,
+                    asset,
+                    closed_tx,
+                });
             token
         };
         self.affinity_notify.notify_waiters();
-        TuiTargetGuard {
-            store: Arc::clone(&self.affinity),
-            notify: Arc::clone(&self.affinity_notify),
-            key,
-            token: Some(token),
-        }
+        (
+            TuiTargetGuard {
+                store: Arc::clone(&self.affinity),
+                notify: Arc::clone(&self.affinity_notify),
+                key,
+                token: Some(token),
+            },
+            closed_rx,
+        )
     }
 
     /// Resolve the active TUI-selected asset for `(key_id, peer_ip)`. If a TUI
@@ -253,7 +286,7 @@ impl ActiveSessionRegistry {
         key_id: &str,
         peer_ip: Option<IpAddr>,
         wait_timeout: Duration,
-    ) -> Option<Asset> {
+    ) -> Option<ResolvedTuiTarget> {
         let key = TuiAffinityKey::new(key_id, peer_ip);
         let deadline = tokio::time::Instant::now() + wait_timeout;
         loop {
@@ -266,8 +299,16 @@ impl ActiveSessionRegistry {
                 }
                 let store = self.affinity.lock().expect("tui affinity mutex poisoned");
                 let entry = store.entries.get(&key)?;
-                if let Some((_, asset)) = entry.selected_targets.last() {
-                    return Some(asset.clone());
+                if let Some(selected) = entry
+                    .selected_targets
+                    .iter()
+                    .rev()
+                    .find(|target| !*target.closed_tx.borrow())
+                {
+                    return Some(ResolvedTuiTarget {
+                        asset: selected.asset.clone(),
+                        parent_closed: selected.closed_tx.subscribe(),
+                    });
                 }
                 if entry.open_selectors.is_empty() {
                     return None;
@@ -340,7 +381,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tui_affinity_waits_for_pending_selector_and_normalizes_ipv4_mapped_ip() {
+    async fn tui_affinity_waits_for_pending_selector_and_signals_followers_on_release() {
         let registry = ActiveSessionRegistry::default();
         let v4: IpAddr = "10.253.0.1".parse().unwrap();
         let mapped: IpAddr = "::ffff:10.253.0.1".parse().unwrap();
@@ -359,12 +400,14 @@ mod tests {
         });
 
         tokio::time::sleep(Duration::from_millis(30)).await;
-        let target_guard =
+        let (target_guard, mut direct_closed_rx) =
             registry.select_tui_target("key-1", Some(mapped), sample_asset("a1", "kwrt"));
         drop(selector);
 
-        let resolved = waiter.await.unwrap().expect("expected selected asset");
-        assert_eq!(resolved.name, "kwrt");
+        let mut resolved = waiter.await.unwrap().expect("expected selected asset");
+        assert_eq!(resolved.asset.name, "kwrt");
+        assert!(!*resolved.parent_closed.borrow());
+        assert!(!*direct_closed_rx.borrow());
 
         // Different key or IP never sees this selection.
         assert!(registry
@@ -381,6 +424,8 @@ mod tests {
             .is_none());
 
         drop(target_guard);
+        assert!(*resolved.parent_closed.borrow_and_update());
+        assert!(*direct_closed_rx.borrow_and_update());
         assert!(registry
             .resolve_tui_target("key-1", Some(v4), Duration::from_millis(50))
             .await

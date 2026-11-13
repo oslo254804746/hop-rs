@@ -12,10 +12,11 @@ use hop_core::{validate_tcp_port, Asset, Catalog, MasterKey, NewSession};
 use russh::{client, server, Channel, ChannelOpenFailure};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    sync::{mpsc, Mutex},
+    sync::{mpsc, watch, Mutex},
 };
 
 use super::{
+    bridge::wait_parent_closed,
     client::{open_asset_stream, ManagedClientSession},
     server::{audit_denied_attempt, AuthInfo, DenialReason, AUTHORIZATION_DENIED},
     session_registry::{ActiveSessionRegistry, TERMINATED_BY_MANAGEMENT},
@@ -130,6 +131,7 @@ async fn pump_bidirectional<S>(
     channel: Channel<server::Msg>,
     stream: S,
     terminate_rx: &mut mpsc::UnboundedReceiver<()>,
+    parent_closed: &mut Option<watch::Receiver<bool>>,
     terminated: &mut bool,
 ) -> Result<()>
 where
@@ -170,6 +172,12 @@ where
     let copy_result = tokio::select! {
         Some(()) = terminate_rx.recv() => {
             *terminated = true;
+            let _ = tcp_write.shutdown().await;
+            let _ = channel_write.eof().await;
+            let _ = channel_write.close().await;
+            return Ok(());
+        }
+        () = wait_parent_closed(parent_closed) => {
             let _ = tcp_write.shutdown().await;
             let _ = channel_write.eof().await;
             let _ = channel_write.close().await;
@@ -271,7 +279,14 @@ pub async fn bridge_direct_tcpip(
                     .with_context(|| format!("connect {}:{}", asset.hostname, asset.port));
             }
         };
-        pump_bidirectional(channel, stream, &mut terminate_rx, &mut terminated).await
+        pump_bidirectional(
+            channel,
+            stream,
+            &mut terminate_rx,
+            &mut None,
+            &mut terminated,
+        )
+        .await
     }
     .await;
 
@@ -300,6 +315,7 @@ pub async fn bridge_managed_direct_tcpip(
     active_sessions: ActiveSessionRegistry,
     auth: AuthInfo,
     asset: Asset,
+    mut parent_closed: Option<watch::Receiver<bool>>,
     host_to_connect: String,
     port_to_connect: u32,
     originator_address: String,
@@ -342,6 +358,10 @@ pub async fn bridge_managed_direct_tcpip(
                 reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
                 return Ok(());
             }
+            () = wait_parent_closed(&mut parent_closed) => {
+                reply.reject(ChannelOpenFailure::AdministrativelyProhibited).await;
+                return Ok(());
+            }
             opened = open_managed_target_tcpip(
                 &direct_client,
                 &db,
@@ -374,6 +394,7 @@ pub async fn bridge_managed_direct_tcpip(
             channel,
             target_channel.into_stream(),
             &mut terminate_rx,
+            &mut parent_closed,
             &mut terminated,
         )
         .await
