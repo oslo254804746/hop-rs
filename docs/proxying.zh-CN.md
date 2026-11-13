@@ -37,22 +37,63 @@ assets:
 
 设置凭据后，Hop 可以提供以下能力：
 
-- 在 TUI 中选择资产并建立交互式 Shell。
+- 在 TUI 中选择资产并建立交互式 Shell，同时让 GUI 客户端的 SFTP 文件面板自动跟随所选目标。
 - 使用资产名直连。
-- 执行远程命令。
+- 执行远程命令（`exec`）。
 - 传输 SCP 和 SFTP 文件。
+- 在托管会话上直接发起 `-L` 本地端口转发、`-D` 动态 SOCKS5 代理，以及无需本地保存目标凭据的 Cursor / VS Code Remote-SSH 连接。
 
 ```bash
-ssh -p 2222 menu@hop.example.com
+ssh -p 2222 hop@hop.example.com
 ssh -p 2222 nas@hop.example.com
 ssh -p 2222 nas@hop.example.com 'uname -a'
 scp -P 2222 backup.tar nas@hop.example.com:/tmp/backup.tar
 sftp -P 2222 nas@hop.example.com
+ssh -p 2222 -L 15432:127.0.0.1:5432 nas@hop.example.com
+ssh -p 2222 -D 1080 -N nas@hop.example.com
 ```
 
-这里的 `nas` 是 Hop 中的资产名。目标服务器的 SSH 用户名来自 `nas-root` 凭据。
+这里的 `nas` 是 Hop 中的资产名。目标服务器的 SSH 用户名来自 `nas-root` 凭据。托管模式下的 `direct-tcpip` 转发直接复用目标机已认证的 SSH 会话，可通过全局 `ssh.allow_managed_tcp_forwarding`（默认 `true`）或单资产 `allow_tcp_forwarding`（默认 `true`）精细开关；因此 `hop-server ssh-config --mode relay` 生成的配置也可直接用于 Cursor / VS Code Remote-SSH，而无需在本地电脑存放目标机私钥。
+
+### TUI 选机与 GUI 客户端 SFTP 自动跟随
+
+当使用 Netcatty、Xterminal、WindTerm、MobaXterm 等桌面终端以 `ssh -p 2222 hop@hop.example.com`（或 `menu`、`+tui`）进入交互式选机界面时：
+
+- 客户端在同一 SSH 连接多路复用、或使用同一把入口公钥从同一来源 IP 并发打开的 SFTP / `exec` / 端口转发通道，会自动等待或绑定当前 TUI 选中的目标资产；
+- 一旦目标 Shell 退出回到 TUI 列表或主连接断开，所有跟随该目标打开的 SFTP 与转发通道会立即同步关闭，不会残留悬空的目标连接。
 
 SSH 资产也可以不配置托管凭据。此时 Hop 仍允许经过授权的 TCP 转发和 ProxyJump，但不能代替用户建立托管 Shell、远程命令或 SFTP 会话。
+
+## 链式多级跳板（`via_asset`）
+
+当内网服务器或数据库无法由 Hop 直接访问，而必须经由某台已纳管的公网跳板机中转时，可以为 `ssh` 或 `tcp` 资产指定 `via_asset`（面板与 API 中对应 `via_asset_id`）：
+
+```yaml
+assets:
+  edge-bastion:
+    type: ssh
+    host: 203.0.113.10
+    port: 22
+    credential: bastion-key
+
+  private-app:
+    type: ssh
+    host: 10.10.0.25
+    port: 22
+    credential: app-key
+    via_asset: edge-bastion
+
+  private-postgres:
+    type: tcp
+    host: 10.10.0.50
+    port: 5432
+    via_asset: private-app
+```
+
+- 上游跳板必须是配置了托管凭据的 `ssh` 资产；
+- 支持最多 4 跳级联，保存或启动时自动校验并拒绝环路；
+- 每一跳 SSH 均独立执行 Known Hosts（TOFU）主机密钥核验；
+- 连接时客户端仍只需直连最终资产名（例如 `ssh -p 2222 private-app@hop.example.com` 或 `-L 15432:private-postgres.hop:5432`），Hop 会在内部自动逐级打通隧道，按需与定时拨测也会沿完整跳板链路测算真实握手延迟。
 
 ## ProxyJump
 
@@ -127,9 +168,9 @@ mysql --host 127.0.0.1 --port 13306 --user app
 每一条连接路径都使用同一套 Access Key 资产白名单：
 
 - TUI 只显示当前 Key 可以访问的资产。
-- 资产名直连、远程命令和 SFTP 会再次检查授权。
+- 资产名直连、远程命令、SFTP 与托管端口转发会再次检查授权及转发开关。
 - ProxyJump 和 TCP 转发只接受 Catalog 中存在且已授权的目标。
-- 手工构造 `host:port` 不能绕过白名单。
+- 手工构造 `host:port` 不能绕过白名单；被拒绝的访问或转发会在会话历史和 `audit_events` 中记录精确拒绝原因。
 
 Access Key 未设置 `assets` 时可以访问全部资产。`assets: []` 表示认证成功，但不能发现或连接任何资产。非空数组是严格白名单。
 

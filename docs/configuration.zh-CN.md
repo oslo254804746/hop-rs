@@ -20,6 +20,7 @@ ssh:
   keepalive_interval: 30
   connect_timeout: 10
   proxy_policy: assets_only
+  allow_managed_tcp_forwarding: true
   allowed_client_ip_ranges:
     - "0.0.0.0/0"
     - "::/0"
@@ -28,6 +29,20 @@ runtime:
   temp_dir: /tmp/hop
   log_level: info
   session_retention_days: 30
+
+probe:
+  enabled: true
+  interval_seconds: 300
+  timeout_ms: 4000
+  failure_threshold: 2
+  notify_on_recovery: true
+
+notifications:
+  ops-tg:
+    type: telegram
+    enabled: true
+    bot_token: replace-with-bot-token
+    chat_id: "-1001234567890"
 
 credentials:
   password-login:
@@ -48,7 +63,14 @@ assets:
     port: 22
     display_name: Home NAS
     description: Storage host
+    tags: [home, storage]
     credential: password-login
+    allow_tcp_forwarding: true
+  internal-db:
+    type: tcp
+    host: 10.0.0.50
+    port: 5432
+    via_asset: nas
   metrics:
     type: tcp
     host: 192.168.1.30
@@ -58,7 +80,7 @@ access_keys:
   laptop:
     public_key_file: ./keys/laptop.pub
     enabled: true
-    assets: [nas]
+    assets: [nas, internal-db]
   operator:
     public_key: "ssh-ed25519 AAAAC3... operator@device"
 ```
@@ -82,6 +104,8 @@ hop-server --config ./hop.yaml serve
 | `api` | 禁用 | Control API 与网页管理认证 |
 | `ssh` | 见下表 | SSH 运行参数 |
 | `runtime` | 见下表 | 临时目录、日志与会话保留参数 |
+| `probe` | 未配置（保持数据库当前策略） | 启动时写入的后台定时拨测策略 |
+| `notifications` | `{}` | 以名称为键的告警通知通道（Telegram / Bark / Webhook） |
 | `credentials` | `{}` | 以名称为键的目标凭据 |
 | `assets` | `{}` | 以名称为键的 SSH/TCP 资产 |
 | `access_keys` | `{}` | 以名称为键的入口公钥 |
@@ -119,6 +143,7 @@ api:
 | `keepalive_interval` | `30` | 秒 |
 | `connect_timeout` | `10` | 目标连接超时秒数 |
 | `proxy_policy` | `assets_only` | 当前只能是 `assets_only` |
+| `allow_managed_tcp_forwarding` | `true` | 是否全局允许托管 SSH 会话打开 `direct-tcpip`（`-L` / `-D` / Remote-SSH）端口转发 |
 | `allowed_client_ip_ranges` | `["0.0.0.0/0", "::/0"]` | SSH 客户端来源 IP 允许的 CIDR 列表，同时支持 IPv4/IPv6 |
 
 `allowed_client_ip_ranges` 在 SSH TCP 连接刚建立时依据 TCP 对端地址过滤，早于 SSH 握手和公钥认证，不读取或信任代理头。缺省字段等价于同时允许 `0.0.0.0/0` 和 `::/0`，因此兼容旧配置；显式写空列表 `[]` 则拒绝所有客户端。每一项必须是有效 CIDR，非法值会在 `config validate` 阶段指出其索引。IPv4-mapped IPv6 地址也会按对应 IPv4 地址与 IPv4 CIDR 匹配。若前置了 TCP 代理或 NAT，应将 Hop 实际看到的对端 IP 加入允许范围。
@@ -132,6 +157,28 @@ api:
 | `temp_dir` | `/tmp/hop` | 临时文件目录 |
 | `log_level` | `info` | 日志级别 |
 | `session_retention_days` | `30` | 已结束会话与审计事件保留天数（`0` 表示禁用自动清理） |
+
+## `probe`
+
+可选顶层对象，用于在启动时同步后台定时拨测策略（省略时不覆盖面板中已保存的拨测策略）：
+
+| 字段 | 默认值 | 约束与说明 |
+|---|---|---|
+| `enabled` | `false` | 是否启用后台定时拨测 |
+| `interval_seconds` | `300` | 拨测周期秒数（`30` ~ `86400`） |
+| `timeout_ms` | `4000` | 单资产连接与协议握手超时毫秒数（`500` ~ `30000`） |
+| `failure_threshold` | `2` | 连续失败多少次后触发故障告警（`1` ~ `20`） |
+| `notify_on_recovery` | `true` | 资产从告警状态恢复正常时是否发送恢复通知 |
+
+## `notifications`
+
+可选映射表，用于在启动时同步加密告警通知通道。每项 `type` 支持 `telegram`、`bark` 或 `webhook`，可选 `enabled`（默认 `true`）：
+
+- `type: telegram`：必填 `bot_token`、`chat_id`，可选自定义 `api_base_url`（`http://` 或 `https://`）；
+- `type: bark`：必填 `device_key`，可选自建 Bark 服务 `server_url`；
+- `type: webhook`：必填 `url`，可选 `secret`（启用 `X-Hop-Signature-256` HMAC-SHA256 请求体签名）。
+
+通知通道中的 `bot_token`、`device_key` 与 `secret` 均使用 `hop.secret` 主密钥加密落库，API 永不回读明文。
 
 ## `credentials`
 
@@ -150,6 +197,8 @@ api:
 | `description` | 可选 | 描述 |
 | `tags` | 可选 | 字符串数组标签（如 `[hk, cn2]`），用于面板分组和 TUI `#标签` 过滤 |
 | `credential` | 可选 | 必须引用同文件 `credentials` 中的名称；TCP 不允许凭据 |
+| `via_asset` | 可选 | 上游跳板资产名称（必须引用已配置托管凭据的 `ssh` 资产，最大深度 4 跳且禁止环路） |
+| `allow_tcp_forwarding` | 可选 | 默认 `true`；设为 `false` 时禁止在该托管 SSH 资产会话上打开 `-L` / `-D` 端口转发 |
 
 ## `access_keys`
 

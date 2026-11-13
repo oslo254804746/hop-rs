@@ -38,25 +38,46 @@ printf '%s\n' "$TARGET_PASSWORD" | hop-server --config /etc/hop/hop.yaml credent
 
 配置文件中的 `password`、`private_key` 与 `passphrase` 是直接字符串，因此配置文件必须为 `0600`。
 
-## 资产、按需测延迟与 `~/.ssh/config`
+## 资产、链式跳板与 `~/.ssh/config`
 
 ```bash
 hop-server --config /etc/hop/hop.yaml asset add \
   --name nas --protocol ssh --hostname 192.168.1.20 --port 22 \
   --display-name "Home NAS" --tags home,storage --credential nas-root
 hop-server --config /etc/hop/hop.yaml asset add \
-  --name metrics --protocol tcp --hostname 192.168.1.30 --port 9090
+  --name internal-db --protocol tcp --hostname 10.0.0.50 --port 5432 \
+  --via-asset nas
 hop-server --config /etc/hop/hop.yaml asset list
 hop-server --config /etc/hop/hop.yaml asset probe
 ```
 
-用户可直接通过资产名称连接，或一键生成终端直连 / Cursor、VS Code Remote-SSH（`ProxyJump`）的 `~/.ssh/config`：
+`--via-asset <名称或ID>` 可让内网 SSH/TCP 资产经由上游托管 SSH 跳板机（最多 4 跳）级联访问；`--allow-tcp-forwarding <true|false>` 可按资产控制托管模式下的 `-L` / `-D` 端口转发。用户可直接通过资产名称连接，或一键生成托管免密直连（`--mode relay`，支持端口转发与 Cursor / VS Code Remote-SSH）及端到端 `ProxyJump` 的 `~/.ssh/config`：
 
 ```bash
 ssh -p 2222 nas@hop.example.com
+ssh -p 2222 -L 15432:127.0.0.1:5432 nas@hop.example.com
 hop-server --config /etc/hop/hop.yaml ssh-config --host hop.example.com --mode relay
 hop-server --config /etc/hop/hop.yaml ssh-config --host hop.example.com --mode proxyjump
 ```
+
+## 新机一键密钥洗密（SSH Key Bootstrap）
+
+对于刚开通密码登录的 Linux 服务器，可在面板资产操作中选择“一键密钥洗密”（`POST /api/v1/assets/{id}/bootstrap-key`）或使用 CLI：
+
+```bash
+printf '%s\n' "$ROOT_PASSWORD" | hop-server --config /etc/hop/hop.yaml \
+  asset bootstrap-key nas --username root --password-stdin --disable-password-auth
+```
+
+Hop 会在内存中生成 Ed25519 密钥对、以 `0700`/`0600` 权限幂等写入目标 `~/.ssh/authorized_keys`、发起全新第二次 SSH 连接验活新私钥，验活通过后才原子替换资产的保险库凭据（验活失败绝不删除原密码凭据），并仅在显式指定 `--disable-password-auth` 时收紧目标 `sshd` 的 `PasswordAuthentication no`。
+
+## 定时拨测与告警通知
+
+除按需探测（`POST /api/v1/assets/probe`）外，可在面板“拨测与告警”页（或 `hop.yaml` 的 `probe` / `notifications`）配置后台定时拨测与告警通道：
+
+- `GET / PUT /api/v1/probe/settings`：配置定时开关、周期（30~86400 秒）、超时、连续失败阈值与恢复通知；
+- `GET /api/v1/assets/probe-history` 与 `GET /api/v1/assets/{id}/probe-history`：查询最近 RTT 采样序列以渲染趋势火花线；
+- `GET / POST /api/v1/notifications/channels`、`PUT / DELETE /api/v1/notifications/channels/{id}` 与 `POST /api/v1/notifications/channels/{id}/test`：管理并测试 **Telegram Bot**、**Bark** 与 **HMAC-SHA256 Webhook** 通知通道。
 
 ## 会话与审计事件
 

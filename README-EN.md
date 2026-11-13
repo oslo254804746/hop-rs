@@ -1,6 +1,6 @@
 # Hop
 
-Hop is a lightweight (~3.7 MB static binary), zero-agent self-hosted SSH relay and encrypted credential vault. Ingress accepts registered public keys only, target VPS credentials stay encrypted at rest, and both the official web panel and CLI provide on-demand SSH/TCP protocol latency probing, audit trails, and `~/.ssh/config` generation for Multi-VPS operators and Cursor / VS Code Remote-SSH workflows.
+Hop is a lightweight (~3.7 MB static binary), zero-agent self-hosted SSH relay and encrypted credential vault. Ingress accepts registered public keys only, target VPS credentials stay encrypted at rest, and Hop supports managed-mode `-L` / `-D` port forwarding & Cursor / VS Code Remote-SSH over vault credentials, `via_asset` multi-hop chaining across private subnets, one-click Ed25519 SSH key bootstrap, scheduled SSH/TCP latency probing with Telegram / Bark / Webhook alerts, audit trails, and `~/.ssh/config` generation.
 
 ## Quick start: web panel (recommended)
 
@@ -19,7 +19,7 @@ Open:
 - Panel: `http://localhost:8080`
 - SSH: `localhost:2222`
 
-On first load, enter only the webpage management Token from `hop.yaml`. The panel uses same-origin `/api/v1`; the backend management port is not published to the host. Add ingress public keys, target credentials, and assets directly in the panel, probe SSH banner / TCP reachability on demand, review audit events, export `~/.ssh/config`, and reset Known Hosts records under **Host trust** after verified rebuilds.
+On first load, enter only the webpage management Token from `hop.yaml`. The panel uses same-origin `/api/v1`; the backend management port is not published to the host. Add ingress public keys, target credentials, and assets (including `via` jump hosts) directly in the panel, bootstrap fresh password-based servers onto Ed25519 keys in one click, configure scheduled probes with RTT sparklines and Telegram / Bark / Webhook alerts, review audit events, export `~/.ssh/config`, and reset Known Hosts records under **Host trust** after verified rebuilds.
 
 Compose always mounts the single `./hop.yaml` read-only. `examples/panel-first.yaml` and `examples/config-first.yaml` are alternative starting templates; they are never loaded, inherited, or merged together.
 
@@ -34,7 +34,7 @@ cargo run --release -p hop-server -- --config ./hop.yaml config validate
 cargo run --release -p hop-server -- --config ./hop.yaml serve
 ```
 
-One `hop.yaml` contains listeners, data directory, webpage management Token, SSH runtime settings, target credentials, assets (including `tags` and `display_name`), and ingress public keys. At startup, Hop applies its declared resources through the internal atomic Apply engine. Any error prevents listeners from starting and never leaves a partial Catalog.
+One `hop.yaml` contains listeners, data directory, webpage management Token, SSH runtime settings, optional scheduled probe & notification channels, target credentials, assets (including `tags`, `display_name`, `via_asset`, and `allow_tcp_forwarding`), and ingress public keys. At startup, Hop applies its declared resources through the internal atomic Apply engine. Any error prevents listeners from starting and never leaves a partial Catalog.
 
 ## Configuration and examples
 
@@ -42,7 +42,7 @@ One `hop.yaml` contains listeners, data directory, webpage management Token, SSH
 - [`examples/config-first.yaml`](examples/config-first.yaml): declares credentials, assets, and ingress keys for a headless deployment.
 - `hop.yaml`: the only runtime configuration, copied from one example and excluded by `.gitignore`.
 
-`password`, `private_key`, and `passphrase` are direct YAML strings, so protect the file with `chmod 0600` and keep it out of version control. Each ingress key must set exactly one of `public_key` or `public_key_file`. Relative paths resolve from the configuration file directory.
+`password`, `private_key`, `passphrase`, and notification secrets are direct YAML strings, so protect the file with `chmod 0600` and keep it out of version control. Each ingress key must set exactly one of `public_key` or `public_key_file`. Relative paths resolve from the configuration file directory.
 
 If `api.token` is missing or empty, only the Control API is disabled; SSH continues to run. `change-me` is a first-run placeholder and triggers warnings in both backend and panel. Replace it for every real deployment.
 
@@ -55,13 +55,17 @@ If `api.token` is missing or empty, only the Control API is disabled; SSH contin
 ## Connect and `~/.ssh/config`
 
 ```bash
-# Managed vault relay (Hop logs into the target using stored credentials)
+# Managed vault relay (Hop logs into the target using stored credentials; supports -L / -D port forwarding)
 ssh -p 2222 <asset-name>@<hop-host>
+ssh -p 2222 -L 15432:127.0.0.1:5432 <asset-name>@<hop-host>
 
-# Interactive TUI selector (/ fuzzy search, #tag filter, r RTT probe, and automatic GUI SFTP follow)
+# Interactive TUI selector (/ fuzzy search, #tag filter, r RTT probe, and parent-bound GUI SFTP follow)
 ssh -p 2222 hop@<hop-host>
 
-# Generate ~/.ssh/config for terminal relay or Cursor / VS Code Remote-SSH (ProxyJump)
+# Bootstrap an Ed25519 key onto a password-based server and rotate its vault credential
+printf '%s\n' "$ROOT_PASSWORD" | hop-server --config ./hop.yaml asset bootstrap-key <asset-name> --password-stdin
+
+# Generate ~/.ssh/config for managed relay (supports Cursor / VS Code Remote-SSH) or end-to-end ProxyJump
 hop-server --config ./hop.yaml ssh-config --host <hop-host> --mode relay
 hop-server --config ./hop.yaml ssh-config --host <hop-host> --mode proxyjump
 ```
@@ -70,6 +74,7 @@ Hop ingress advertises `publickey` authentication only. An unregistered key rece
 
 ## Documentation
 
+- [v0.3.0 release notes](docs/releases/v0.3.0.md)
 - [Deployment](docs/deployment.md)
 - [Configuration reference (Chinese)](docs/configuration.zh-CN.md)
 - [Administrator guide](docs/admin-guide.md)

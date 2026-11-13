@@ -4,6 +4,60 @@ All notable user-visible changes to Hop are recorded here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-13
+
+### Added
+
+- Added managed-mode SSH TCP port forwarding (`direct-tcpip` over vault-authenticated
+  target sessions), enabling `ssh -L`, `ssh -D`, and Cursor / VS Code Remote-SSH
+  over `--mode relay` without storing target credentials locally. Controlled via
+  `ssh.allow_managed_tcp_forwarding` (default `true`) and per-asset
+  `allow_tcp_forwarding` (default `true`, CLI `--allow-tcp-forwarding`).
+- Added chained multi-hop SSH/TCP relay (`via_asset` in `hop.yaml`, `--via-asset`
+  in CLI, `via_asset_id` in Control API and Web Panel) up to 4 hops deep with
+  cycle validation and per-hop TOFU host-key verification across shell, `exec`,
+  SFTP, port forwarding, and zero-agent probes.
+- Added TUI-selected target SFTP follow and parent-bound lifecycle management for
+  `hop@<hop-host>` (`menu`, `hop`, `+tui`): multiplexed and concurrent same-key /
+  same-IP SFTP, `exec`, and `direct-tcpip` channels wait cleanly for TUI target
+  selection, attach to the chosen asset, and close automatically as soon as the
+  parent TUI target session exits or disconnects.
+- Added zero-agent one-click SSH key bootstrap and password rotation
+  (`POST /api/v1/assets/{id}/bootstrap-key` and `hop-server asset bootstrap-key`),
+  verifying a fresh Ed25519 SSH login before rotating the encrypted vault
+  credential and optionally disabling `sshd` `PasswordAuthentication`.
+- Added a background probe scheduler (`GET/PUT /api/v1/probe/settings` and
+  `probe` in `hop.yaml`), per-asset RTT sample history
+  (`GET /api/v1/assets/probe-history`, `GET /api/v1/assets/{id}/probe-history`),
+  and encrypted **Telegram**, **Bark**, and **HMAC-SHA256 Webhook** alert
+  channels (`GET/POST/PUT/DELETE /api/v1/notifications/channels`,
+  `POST /api/v1/notifications/channels/{id}/test`, and `notifications` in
+  `hop.yaml`) with failure-threshold and recovery state tracking.
+- Recorded granular access and port-forwarding denial reasons on `sessions.error`
+  and `audit_events` (`session.access_denied`, `session.forward_denied`).
+
+### Fixed
+
+- Terminated follower SFTP, `exec`, and port-forwarding sessions immediately when
+  an interactive TUI target shell exits back to the selector or disconnects,
+  preventing orphaned GUI SFTP panels in clients such as Netcatty.
+- Removed runtime inline style mutations in the Web Panel so sparklines and
+  dialogs satisfy strict `style-src 'self'` Content-Security-Policy rules with
+  zero browser console CSP violations.
+- Synchronized `document.title` with the active locale and wrapped SHA256
+  fingerprints cleanly on mobile viewports.
+
+### Compatibility and upgrade
+
+- Existing `v0.2.x` SQLite databases are upgraded automatically inside a startup
+  transaction (`via_asset_id`, `allow_tcp_forwarding`, `asset_probe_samples`,
+  `probe_settings`, and `notification_channels`), preserving all existing assets,
+  encrypted credentials, access keys, Known Hosts, sessions, and audit events.
+- Back up `hop.yaml` and `data_dir` (`hop.db`, `hop.secret`, `hop_host_key`) as a
+  pair before upgrading, then update `hop-rs`, `hop-rs-frontend`, and
+  `luci-app-hop` together to `v0.3.0`. See the
+  [full v0.3.0 release notes](docs/releases/v0.3.0.md).
+
 ## [0.2.9] - 2026-11-11
 
 ### Added
@@ -264,7 +318,8 @@ See the [full v0.1.6 release notes](docs/releases/v0.1.6.md).
 
 See the [full v0.1.5 release notes](docs/releases/v0.1.5.md).
 
-[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/oslo254804746/hop-rs/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/oslo254804746/hop-rs/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/oslo254804746/hop-rs/compare/v0.2.5...v0.2.8
 [0.2.5]: https://github.com/oslo254804746/hop-rs/compare/v0.2.4...v0.2.5

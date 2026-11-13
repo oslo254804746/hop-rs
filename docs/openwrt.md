@@ -66,7 +66,7 @@ Node.js, Docker, built-in Admin Web, or Rust toolchain dependency.
 
 Installation, UCI fields, core updates, resource manifests, firewall scope,
 and backup are documented in the
-[`luci-app-hop` configuration guide](https://github.com/oslo254804746/luci-app-hop/blob/dev/docs/configuration.zh-CN.md).
+[`luci-app-hop` configuration guide](https://github.com/oslo254804746/luci-app-hop/blob/master/docs/configuration.zh-CN.md).
 
 ## 2026-08-14 host baseline
 

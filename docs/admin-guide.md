@@ -38,25 +38,46 @@ printf '%s\n' "$TARGET_PASSWORD" | hop-server --config /etc/hop/hop.yaml credent
 
 Direct secrets in YAML require `0600` permissions.
 
-## Assets, latency probing, and `~/.ssh/config`
+## Assets, multi-hop chaining, and `~/.ssh/config`
 
 ```bash
 hop-server --config /etc/hop/hop.yaml asset add \
   --name nas --protocol ssh --hostname 192.168.1.20 --port 22 \
   --display-name "Home NAS" --tags home,storage --credential nas-root
 hop-server --config /etc/hop/hop.yaml asset add \
-  --name metrics --protocol tcp --hostname 192.168.1.30 --port 9090
+  --name internal-db --protocol tcp --hostname 10.0.0.50 --port 5432 \
+  --via-asset nas
 hop-server --config /etc/hop/hop.yaml asset list
 hop-server --config /etc/hop/hop.yaml asset probe
 ```
 
-Connect directly using the asset name or generate `~/.ssh/config` blocks for terminal relay or Cursor / VS Code Remote-SSH (`ProxyJump`):
+Use `--via-asset <name_or_id>` to chain private-subnet SSH/TCP targets through an upstream managed SSH jump host (up to 4 hops), and `--allow-tcp-forwarding <true|false>` to control managed-mode `-L` / `-D` port forwarding per asset. Connect directly using the asset name or generate `~/.ssh/config` blocks for managed vault relay (`--mode relay`, supporting `-L` / `-D` and Cursor / VS Code Remote-SSH without local target keys) or end-to-end `ProxyJump`:
 
 ```bash
 ssh -p 2222 nas@hop.example.com
+ssh -p 2222 -L 15432:127.0.0.1:5432 nas@hop.example.com
 hop-server --config /etc/hop/hop.yaml ssh-config --host hop.example.com --mode relay
 hop-server --config /etc/hop/hop.yaml ssh-config --host hop.example.com --mode proxyjump
 ```
+
+## One-click SSH key bootstrap
+
+For newly provisioned password-based Linux servers, trigger **Bootstrap SSH key** in the panel (`POST /api/v1/assets/{id}/bootstrap-key`) or run the CLI:
+
+```bash
+printf '%s\n' "$ROOT_PASSWORD" | hop-server --config /etc/hop/hop.yaml \
+  asset bootstrap-key nas --username root --password-stdin --disable-password-auth
+```
+
+Hop generates an Ed25519 keypair in memory, installs `~/.ssh/authorized_keys` idempotently with `0700`/`0600` permissions, verifies a fresh second SSH connection with the new private key before rotating the asset's encrypted vault credential (never deleting the existing password credential if verification fails), and hardens `sshd` `PasswordAuthentication no` only when `--disable-password-auth` is explicitly requested.
+
+## Scheduled probing and alerts
+
+Alongside on-demand probing (`POST /api/v1/assets/probe`), configure background probing and encrypted alert channels on the panel's **Alerts** page (or via `probe` and `notifications` in `hop.yaml`):
+
+- `GET / PUT /api/v1/probe/settings`: configure background scheduler enablement, interval (30–86400s), timeout, consecutive failure threshold, and recovery notifications;
+- `GET /api/v1/assets/probe-history` and `GET /api/v1/assets/{id}/probe-history`: fetch recent RTT samples for sparklines;
+- `GET / POST /api/v1/notifications/channels`, `PUT / DELETE /api/v1/notifications/channels/{id}`, and `POST /api/v1/notifications/channels/{id}/test`: manage and test **Telegram Bot**, **Bark**, and **HMAC-SHA256 Webhook** channels.
 
 ## Sessions and audit events
 
