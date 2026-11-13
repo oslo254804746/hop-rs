@@ -58,8 +58,8 @@ If `api.token` is missing or empty, only the Control API is disabled; SSH contin
 # Managed vault relay (Hop logs into the target using stored credentials)
 ssh -p 2222 <asset-name>@<hop-host>
 
-# Interactive TUI selector (supports / fuzzy search, #tag filter, r to probe RTT)
-ssh -p 2222 menu@<hop-host>
+# Interactive TUI selector (/ fuzzy search, #tag filter, r RTT probe, and automatic GUI SFTP follow)
+ssh -p 2222 hop@<hop-host>
 
 # Generate ~/.ssh/config for terminal relay or Cursor / VS Code Remote-SSH (ProxyJump)
 hop-server --config ./hop.yaml ssh-config --host <hop-host> --mode relay

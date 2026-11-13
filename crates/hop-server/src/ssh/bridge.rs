@@ -1,4 +1,9 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    sync::{Arc, Mutex as StdMutex},
+    time::{Duration, Instant},
+};
 
 use hop_core::{Asset, Catalog, MasterKey, NewSession};
 use russh::{server::Handle, ChannelId, ChannelMsg};
@@ -6,12 +11,19 @@ use tokio::sync::{mpsc, Mutex};
 
 use super::{
     client,
-    server::{start_tui_session, AuthInfo, ChannelState, PtySize, AUTHORIZATION_DENIED},
-    session_registry::{ActiveSessionRegistry, TERMINATED_BY_MANAGEMENT},
+    server::{
+        accepts_sftp_request, audit_denied_attempt, spawn_tui_termination_watcher,
+        start_tui_session, AuthInfo, ChannelState, DenialReason, PtySize, AUTHORIZATION_DENIED,
+    },
+    session_registry::{ActiveSessionRegistry, TuiTargetGuard, TERMINATED_BY_MANAGEMENT},
 };
 use crate::tui::TuiResources;
 
 pub type SharedChannels = Arc<Mutex<HashMap<ChannelId, ChannelState>>>;
+pub type SelectedAssetCleanup = (
+    Arc<StdMutex<Option<Asset>>>,
+    Arc<Mutex<Option<Arc<client::ManagedClientSession>>>>,
+);
 
 #[derive(Clone)]
 pub struct BridgeControl {
@@ -43,6 +55,7 @@ pub struct ManagedBridgeOptions {
     pub master_key: Arc<MasterKey>,
     pub active_sessions: ActiveSessionRegistry,
     pub auth: AuthInfo,
+    pub peer_ip: Option<IpAddr>,
     pub client_ip: Option<String>,
     pub asset: Asset,
     pub channel_id: ChannelId,
@@ -53,7 +66,25 @@ pub struct ManagedBridgeOptions {
     pub command: Option<Vec<u8>>,
     pub session_mode: ManagedSessionMode,
     pub return_to_tui: Option<(SharedChannels, TuiResources)>,
-    pub connect_timeout: std::time::Duration,
+    pub tui_target_guard: Option<TuiTargetGuard>,
+    pub selected_asset_cleanup: Option<SelectedAssetCleanup>,
+    pub connect_timeout: Duration,
+}
+
+pub struct DeferredSftpBridgeOptions {
+    pub db: Catalog,
+    pub master_key: Arc<MasterKey>,
+    pub active_sessions: ActiveSessionRegistry,
+    pub auth: AuthInfo,
+    pub peer_ip: Option<IpAddr>,
+    pub client_ip: Option<String>,
+    pub channel_id: ChannelId,
+    pub handle: Handle,
+    pub channels: SharedChannels,
+    pub pty: PtySize,
+    pub pty_term: String,
+    pub connect_timeout: Duration,
+    pub wait_timeout: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +99,99 @@ pub fn spawn_managed_bridge(options: ManagedBridgeOptions) -> BridgeControl {
     let (input_tx, input_rx) = mpsc::unbounded_channel();
     let (resize_tx, resize_rx) = mpsc::unbounded_channel();
     tokio::spawn(run_managed_bridge(options, input_rx, resize_rx));
+    BridgeControl {
+        input: input_tx,
+        resize: resize_tx,
+    }
+}
+
+pub fn spawn_deferred_sftp_bridge(options: DeferredSftpBridgeOptions) -> BridgeControl {
+    let (input_tx, input_rx) = mpsc::unbounded_channel();
+    let (resize_tx, resize_rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let resolved = options
+            .active_sessions
+            .resolve_tui_target(&options.auth.key_id, options.peer_ip, options.wait_timeout)
+            .await;
+        let Some(candidate) = resolved else {
+            options.channels.lock().await.remove(&options.channel_id);
+            let _ = options
+                .handle
+                .exit_status_request(options.channel_id, 1)
+                .await;
+            let _ = options.handle.eof(options.channel_id).await;
+            let _ = options.handle.close(options.channel_id).await;
+            return;
+        };
+        let fresh = options
+            .db
+            .get_asset_by_id(&candidate.id)
+            .await
+            .ok()
+            .flatten();
+        let Some(asset) = fresh.filter(|a| accepts_sftp_request("sftp", Some(a))) else {
+            options.channels.lock().await.remove(&options.channel_id);
+            let _ = options
+                .handle
+                .exit_status_request(options.channel_id, 1)
+                .await;
+            let _ = options.handle.eof(options.channel_id).await;
+            let _ = options.handle.close(options.channel_id).await;
+            return;
+        };
+        if !options
+            .db
+            .key_can_access_asset(&options.auth.key_id, &asset.id)
+            .await
+            .unwrap_or(false)
+        {
+            audit_denied_attempt(
+                &options.db,
+                &options.auth,
+                "sftp",
+                DenialReason::TargetNotAuthorized,
+                Some(asset.id.clone()),
+                Some(asset.name.clone()),
+                Some(asset.hostname.clone()),
+                Some(asset.port),
+                options.client_ip.clone(),
+            )
+            .await;
+            options.channels.lock().await.remove(&options.channel_id);
+            let _ = options
+                .handle
+                .exit_status_request(options.channel_id, 1)
+                .await;
+            let _ = options.handle.eof(options.channel_id).await;
+            let _ = options.handle.close(options.channel_id).await;
+            return;
+        }
+        run_managed_bridge(
+            ManagedBridgeOptions {
+                db: options.db,
+                master_key: options.master_key,
+                active_sessions: options.active_sessions,
+                auth: options.auth,
+                peer_ip: options.peer_ip,
+                client_ip: options.client_ip,
+                asset,
+                channel_id: options.channel_id,
+                handle: options.handle,
+                pty: options.pty,
+                pty_term: options.pty_term,
+                pty_requested: false,
+                command: None,
+                session_mode: ManagedSessionMode::Sftp,
+                return_to_tui: None,
+                tui_target_guard: None,
+                selected_asset_cleanup: None,
+                connect_timeout: options.connect_timeout,
+            },
+            input_rx,
+            resize_rx,
+        )
+        .await;
+    });
     BridgeControl {
         input: input_tx,
         resize: resize_tx,
@@ -203,14 +327,16 @@ async fn run_managed_bridge(
             }
             Err(err) => {
                 let message = health_error_message(&err);
-                let _ = options
-                    .db
-                    .record_asset_health_failure(
-                        &options.asset.id,
-                        Some("managed_connect_failed"),
-                        Some(&message),
-                    )
-                    .await;
+                if !(is_sftp && message.contains("sftp subsystem")) {
+                    let _ = options
+                        .db
+                        .record_asset_health_failure(
+                            &options.asset.id,
+                            Some("managed_connect_failed"),
+                            Some(&message),
+                        )
+                        .await;
+                }
                 return Err(err);
             }
         };
@@ -299,6 +425,15 @@ async fn run_managed_bridge(
     }
     .await;
 
+    if let Some((selected_slot, direct_client)) = options.selected_asset_cleanup.take() {
+        if let Ok(mut guard) = selected_slot.lock() {
+            *guard = None;
+        }
+        if let Some(cached) = direct_client.lock().await.take() {
+            cached.disconnect("tui target closed").await;
+        }
+    }
+
     if let Some(session_id) = session_id {
         options.active_sessions.unregister(&session_id).await;
         let _ = match &result {
@@ -319,6 +454,7 @@ async fn run_managed_bridge(
     }
 
     if terminated {
+        drop(options.tui_target_guard.take());
         let _ = options
             .handle
             .exit_status_request(options.channel_id, 255)
@@ -326,6 +462,10 @@ async fn run_managed_bridge(
         let _ = options.handle.eof(options.channel_id).await;
         let _ = options.handle.close(options.channel_id).await;
     } else if let Some((channels, mut tui)) = options.return_to_tui.take() {
+        let reopened_selector_guard = options
+            .active_sessions
+            .register_tui_selector(&options.auth.key_id, options.peer_ip);
+        drop(options.tui_target_guard.take());
         let message = match &result {
             Ok(_) => "\r\nTarget session ended. Returning to Hop...\r\n",
             Err(err) => {
@@ -357,14 +497,31 @@ async fn run_managed_bridge(
                             .await
                             .is_ok()
                         {
+                            let reopened_session_id = audit.id().to_string();
+                            let (reopen_tx, reopen_rx) = mpsc::unbounded_channel();
                             channels.lock().await.insert(
                                 options.channel_id,
                                 ChannelState::Tui {
                                     tui: Box::new(tui),
                                     audit,
+                                    selector_guard: reopened_selector_guard,
                                 },
                             );
+                            spawn_tui_termination_watcher(
+                                options.db.clone(),
+                                options.active_sessions.clone(),
+                                reopened_session_id.clone(),
+                                channels.clone(),
+                                options.channel_id,
+                                options.handle.clone(),
+                                reopen_rx,
+                            );
+                            options
+                                .active_sessions
+                                .register(reopened_session_id, reopen_tx)
+                                .await;
                         } else {
+                            drop(reopened_selector_guard);
                             let error = "ssh channel closed while reopening Hop TUI";
                             let _ = audit.finish(&options.db, "failed", Some(error)).await;
                             let _ = options.handle.eof(options.channel_id).await;
@@ -372,6 +529,7 @@ async fn run_managed_bridge(
                         }
                     }
                     Err(err) => {
+                        drop(reopened_selector_guard);
                         let error = err.to_string();
                         let _ = audit.finish(&options.db, "failed", Some(&error)).await;
                         let _ = options
@@ -386,6 +544,7 @@ async fn run_managed_bridge(
                     }
                 },
                 Err(err) => {
+                    drop(reopened_selector_guard);
                     let _ = options
                         .handle
                         .data(
@@ -397,8 +556,11 @@ async fn run_managed_bridge(
                     let _ = options.handle.close(options.channel_id).await;
                 }
             }
+        } else {
+            drop(reopened_selector_guard);
         }
     } else {
+        drop(options.tui_target_guard.take());
         if let Err(err) = &result {
             if options.session_mode == ManagedSessionMode::Sftp {
                 let _ = options

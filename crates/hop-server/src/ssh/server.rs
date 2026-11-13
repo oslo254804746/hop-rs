@@ -1,7 +1,13 @@
-use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    io,
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
 use anyhow::{bail, Context, Result};
-use hop_core::{Asset, Catalog, HopConfig, MasterKey, NewSession};
+use hop_core::{Asset, Catalog, HopConfig, MasterKey, NewAuditEvent, NewSession};
 use russh::{
     keys::{ssh_key::HashAlg, PublicKey},
     server::{self, Msg, Session},
@@ -18,10 +24,13 @@ use crate::tui::{TuiAction, TuiResources};
 
 use super::{
     bridge::{
-        self, BridgeControl, BridgeInput, ManagedBridgeOptions, ManagedSessionMode, SharedChannels,
+        self, BridgeControl, BridgeInput, DeferredSftpBridgeOptions, ManagedBridgeOptions,
+        ManagedSessionMode, SharedChannels,
     },
     host_key, proxy,
-    session_registry::{ActiveSessionRegistry, TERMINATED_BY_MANAGEMENT},
+    session_registry::{
+        ActiveSessionRegistry, TuiSelectorGuard, TuiTargetGuard, TERMINATED_BY_MANAGEMENT,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -31,7 +40,41 @@ pub struct AuthInfo {
     pub name: String,
 }
 
-pub(crate) const AUTHORIZATION_DENIED: &str = "target not authorized or not found";
+pub(crate) const AUTHORIZATION_DENIED: &str = "target not authorized";
+const TUI_SFTP_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DenialReason {
+    TargetNotAuthorized,
+    TargetNotFound,
+    ForwardingDisabledForAsset,
+    ForwardingDisabledByServer,
+    TargetNotManagedSsh,
+}
+
+impl DenialReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::TargetNotAuthorized => "target not authorized",
+            Self::TargetNotFound => "target not found",
+            Self::ForwardingDisabledForAsset => "tcp forwarding disabled for asset",
+            Self::ForwardingDisabledByServer => "managed tcp forwarding disabled by server policy",
+            Self::TargetNotManagedSsh => "target does not support managed ssh forwarding",
+        }
+    }
+
+    pub(crate) fn audit_action(self, mode: &str) -> &'static str {
+        match self {
+            Self::ForwardingDisabledForAsset
+            | Self::ForwardingDisabledByServer
+            | Self::TargetNotManagedSsh => "session.forward_denied",
+            Self::TargetNotFound if matches!(mode, "managed-tcp-forward" | "tcp-forward") => {
+                "session.forward_denied"
+            }
+            Self::TargetNotAuthorized | Self::TargetNotFound => "session.access_denied",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct PtySize {
@@ -52,6 +95,11 @@ pub enum ChannelState {
     Tui {
         tui: Box<TuiResources>,
         audit: ActiveTuiSession,
+        #[expect(
+            dead_code,
+            reason = "RAII guard dropped when channel leaves TUI selector state"
+        )]
+        selector_guard: TuiSelectorGuard,
     },
     Managed {
         control: BridgeControl,
@@ -230,7 +278,9 @@ impl HopSshServer {
             active_sessions: self.active_sessions.clone(),
             auth: None,
             direct_asset: None,
+            selected_asset: Arc::new(StdMutex::new(None)),
             direct_client: Arc::new(Mutex::new(None)),
+            peer_ip: Some(peer_addr.ip().to_canonical()),
             client_ip: Some(peer_addr.to_string()),
             channels: Arc::new(Mutex::new(HashMap::new())),
             ptys: HashMap::new(),
@@ -246,7 +296,9 @@ pub struct HopSshHandler {
     active_sessions: ActiveSessionRegistry,
     auth: Option<AuthInfo>,
     direct_asset: Option<Asset>,
+    selected_asset: Arc<StdMutex<Option<Asset>>>,
     direct_client: Arc<Mutex<Option<Arc<super::client::ManagedClientSession>>>>,
+    peer_ip: Option<IpAddr>,
     client_ip: Option<String>,
     channels: SharedChannels,
     ptys: HashMap<ChannelId, PtySize>,
@@ -256,6 +308,15 @@ pub struct HopSshHandler {
 impl HopSshHandler {
     fn auth_info(&self) -> Option<AuthInfo> {
         self.auth.clone()
+    }
+
+    fn effective_managed_asset(&self) -> Option<Asset> {
+        self.direct_asset.clone().or_else(|| {
+            self.selected_asset
+                .lock()
+                .expect("selected_asset mutex poisoned")
+                .clone()
+        })
     }
 
     fn pty_size(&self, channel: ChannelId) -> PtySize {
@@ -295,12 +356,46 @@ impl HopSshHandler {
         Ok(Some(asset))
     }
 
+    async fn resolve_channel_managed_asset(&self, wait_timeout: Duration) -> Result<Option<Asset>> {
+        if let Some(asset) = self.direct_asset.clone() {
+            return Ok(Some(asset));
+        }
+        let selected = self
+            .selected_asset
+            .lock()
+            .expect("selected_asset mutex poisoned")
+            .clone();
+        if let Some(selected) = selected {
+            return self
+                .db
+                .get_asset_by_id(&selected.id)
+                .await
+                .map_err(Into::into);
+        }
+        let Some(auth) = self.auth_info() else {
+            return Ok(None);
+        };
+        let Some(candidate) = self
+            .active_sessions
+            .resolve_tui_target(&auth.key_id, self.peer_ip, wait_timeout)
+            .await
+        else {
+            return Ok(None);
+        };
+        self.db
+            .get_asset_by_id(&candidate.id)
+            .await
+            .map_err(Into::into)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn start_managed(
         &mut self,
         channel_id: ChannelId,
         handle: russh::server::Handle,
         asset: Asset,
         tui: Option<TuiResources>,
+        tui_target_guard: Option<TuiTargetGuard>,
         mode: ManagedSessionMode,
         command: Option<Vec<u8>>,
     ) -> Result<()> {
@@ -310,6 +405,7 @@ impl HopSshHandler {
                 &self.db,
                 &auth,
                 managed_session_mode_name(mode),
+                DenialReason::TargetNotAuthorized,
                 Some(asset.id.clone()),
                 Some(asset.name.clone()),
                 Some(asset.hostname.clone()),
@@ -319,11 +415,18 @@ impl HopSshHandler {
             .await;
             bail!(AUTHORIZATION_DENIED);
         }
+        let selected_asset_cleanup = (mode == ManagedSessionMode::Tui).then(|| {
+            (
+                Arc::clone(&self.selected_asset),
+                Arc::clone(&self.direct_client),
+            )
+        });
         let options = ManagedBridgeOptions {
             db: self.db.clone(),
             master_key: self.master_key.clone(),
             active_sessions: self.active_sessions.clone(),
             auth,
+            peer_ip: self.peer_ip,
             client_ip: self.client_ip.clone(),
             asset,
             channel_id,
@@ -334,6 +437,8 @@ impl HopSshHandler {
             command,
             session_mode: mode,
             return_to_tui: tui.map(|tui| (self.channels.clone(), tui)),
+            tui_target_guard,
+            selected_asset_cleanup,
             connect_timeout: self.config.connect_timeout(),
         };
         let control = bridge::spawn_managed_bridge(options);
@@ -365,17 +470,44 @@ fn managed_session_mode_name(mode: ManagedSessionMode) -> &'static str {
     }
 }
 
+async fn classify_proxy_denial(
+    db: &Catalog,
+    host_to_connect: &str,
+    port: i64,
+) -> (DenialReason, Option<Asset>) {
+    let normalized_name = host_to_connect
+        .strip_suffix(".hop")
+        .unwrap_or(host_to_connect);
+    if let Ok(assets) = db.list_assets().await {
+        if let Some(found) = assets.into_iter().find(|asset| {
+            asset.port == port
+                && (asset.hostname == host_to_connect || asset.name == normalized_name)
+        }) {
+            return (DenialReason::TargetNotAuthorized, Some(found));
+        }
+    }
+    (DenialReason::TargetNotFound, None)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn audit_denied_attempt(
     db: &Catalog,
     auth: &AuthInfo,
     mode: &str,
+    reason: DenialReason,
     asset_id: Option<String>,
     asset_name: Option<String>,
     target_host: Option<String>,
     target_port: Option<i64>,
     client_ip: Option<String>,
 ) {
+    let target_endpoint = match (&target_host, target_port) {
+        (Some(host), Some(port)) => Some(format!("{host}:{port}")),
+        (Some(host), None) => Some(host.clone()),
+        _ => None,
+    };
+    let target_label = asset_name.clone().or_else(|| target_endpoint.clone());
+    let mut session_id = None;
     if let Ok(session) = db
         .start_session(NewSession {
             key_id: Some(auth.key_id.clone()),
@@ -386,14 +518,36 @@ pub(crate) async fn audit_denied_attempt(
             asset_name,
             target_host,
             target_port,
-            client_ip,
+            client_ip: client_ip.clone(),
         })
         .await
     {
         let _ = db
-            .finish_session(&session.id, "failed", Some(AUTHORIZATION_DENIED))
+            .finish_session(&session.id, "failed", Some(reason.as_str()))
             .await;
+        session_id = Some(session.id);
     }
+
+    let _ = db
+        .record_audit_event(NewAuditEvent {
+            actor_label: "ssh-ingress".to_string(),
+            action: reason.audit_action(mode).to_string(),
+            target_type: "session".to_string(),
+            target_id: session_id,
+            target_label,
+            result: "denied".to_string(),
+            source_ip: client_ip,
+            details_json: Some(
+                serde_json::json!({
+                    "key_name": auth.name,
+                    "mode": mode,
+                    "reason": reason.as_str(),
+                    "target": target_endpoint,
+                })
+                .to_string(),
+            ),
+        })
+        .await;
 }
 
 pub(crate) async fn start_tui_session(
@@ -417,7 +571,7 @@ pub(crate) async fn start_tui_session(
     Ok(ActiveTuiSession::new(session.id))
 }
 
-fn spawn_tui_termination_watcher(
+pub(crate) fn spawn_tui_termination_watcher(
     db: Catalog,
     active_sessions: ActiveSessionRegistry,
     session_id: String,
@@ -434,7 +588,7 @@ fn spawn_tui_termination_watcher(
         let terminated = {
             let mut channels = channels.lock().await;
             match channels.remove(&channel_id) {
-                Some(ChannelState::Tui { mut tui, audit }) => {
+                Some(ChannelState::Tui { mut tui, audit, .. }) => {
                     let mut output = tui.leave_screen().unwrap_or_default();
                     output.extend_from_slice(
                         format!("\r\n{TERMINATED_BY_MANAGEMENT}\r\n").as_bytes(),
@@ -606,13 +760,22 @@ impl server::Handler for HopSshHandler {
             .trim()
             .to_ascii_lowercase()
             .ends_with(".hop");
-        if let Some(direct) = self.direct_asset.as_ref().filter(|_| !is_dot_hop) {
+        if let Some(direct) = self.effective_managed_asset().filter(|_| !is_dot_hop) {
             let fresh_asset = self.db.get_asset_by_id(&direct.id).await?;
-            let Some(asset) = fresh_asset.filter(|a| accepts_managed_ssh_asset(Some(a))) else {
+            let Some(asset) = fresh_asset
+                .clone()
+                .filter(|a| accepts_managed_ssh_asset(Some(a)))
+            else {
+                let reason = if fresh_asset.is_none() {
+                    DenialReason::TargetNotFound
+                } else {
+                    DenialReason::TargetNotManagedSsh
+                };
                 audit_denied_attempt(
                     &self.db,
                     &auth,
                     "managed-tcp-forward",
+                    reason,
                     Some(direct.id.clone()),
                     Some(direct.name.clone()),
                     Some(host_to_connect.to_string()),
@@ -633,10 +796,18 @@ impl server::Handler for HopSshHandler {
             let forwarding_enabled =
                 self.config.ssh.allow_managed_tcp_forwarding && asset.allow_tcp_forwarding;
             if !key_authorized || !forwarding_enabled {
+                let reason = if !key_authorized {
+                    DenialReason::TargetNotAuthorized
+                } else if !self.config.ssh.allow_managed_tcp_forwarding {
+                    DenialReason::ForwardingDisabledByServer
+                } else {
+                    DenialReason::ForwardingDisabledForAsset
+                };
                 audit_denied_attempt(
                     &self.db,
                     &auth,
                     "managed-tcp-forward",
+                    reason,
                     Some(asset.id.clone()),
                     Some(asset.name.clone()),
                     Some(host_to_connect.to_string()),
@@ -649,7 +820,7 @@ impl server::Handler for HopSshHandler {
                     asset = asset.name,
                     host_to_connect,
                     port_to_connect,
-                    forwarding_enabled,
+                    reason = reason.as_str(),
                     client_ip = ?self.client_ip,
                     "rejected managed tcp forwarding request"
                 );
@@ -697,12 +868,15 @@ impl server::Handler for HopSshHandler {
             .find_proxy_asset_for_key(&auth.key_id, host_to_connect, i64::from(port_to_connect))
             .await?;
         let Some(asset) = target else {
+            let (reason, matched) =
+                classify_proxy_denial(&self.db, host_to_connect, i64::from(port_to_connect)).await;
             audit_denied_attempt(
                 &self.db,
                 &auth,
                 "tcp-forward",
-                None,
-                None,
+                reason,
+                matched.as_ref().map(|a| a.id.clone()),
+                matched.as_ref().map(|a| a.name.clone()),
                 Some(host_to_connect.to_string()),
                 Some(i64::from(port_to_connect)),
                 self.client_ip.clone(),
@@ -712,8 +886,9 @@ impl server::Handler for HopSshHandler {
                 key_id = auth.key_id,
                 host_to_connect,
                 port_to_connect,
+                reason = reason.as_str(),
                 client_ip = ?self.client_ip,
-                "rejected proxy target: {AUTHORIZATION_DENIED}"
+                "rejected proxy target"
             );
             reply
                 .reject(ChannelOpenFailure::AdministrativelyProhibited)
@@ -782,6 +957,7 @@ impl server::Handler for HopSshHandler {
                 session.handle(),
                 asset,
                 None,
+                None,
                 ManagedSessionMode::Direct,
                 None,
             )
@@ -795,12 +971,16 @@ impl server::Handler for HopSshHandler {
         send_tui_output(session, channel, tui.enter_screen()?)?;
         let audit = self.start_tui_session().await?;
         let session_id = audit.id().to_string();
+        let selector_guard = self
+            .active_sessions
+            .register_tui_selector(&auth.key_id, self.peer_ip);
         let (terminate_tx, terminate_rx) = mpsc::unbounded_channel();
         self.channels.lock().await.insert(
             channel,
             ChannelState::Tui {
                 tui: Box::new(tui),
                 audit,
+                selector_guard,
             },
         );
         spawn_tui_termination_watcher(
@@ -824,7 +1004,18 @@ impl server::Handler for HopSshHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let Some(asset) = self.direct_asset.clone() else {
+        let has_local_tui = self
+            .channels
+            .lock()
+            .await
+            .values()
+            .any(|state| matches!(state, ChannelState::Tui { .. }));
+        let wait_timeout = if has_local_tui {
+            Duration::ZERO
+        } else {
+            TUI_SFTP_WAIT_TIMEOUT
+        };
+        let Some(asset) = self.resolve_channel_managed_asset(wait_timeout).await? else {
             session.channel_failure(channel)?;
             return Ok(());
         };
@@ -833,15 +1024,22 @@ impl server::Handler for HopSshHandler {
             return Ok(());
         }
 
-        self.start_managed(
-            channel,
-            session.handle(),
-            asset,
-            None,
-            ManagedSessionMode::Exec,
-            Some(data.to_vec()),
-        )
-        .await?;
+        if self
+            .start_managed(
+                channel,
+                session.handle(),
+                asset,
+                None,
+                None,
+                ManagedSessionMode::Exec,
+                Some(data.to_vec()),
+            )
+            .await
+            .is_err()
+        {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
         session.channel_success(channel)?;
         Ok(())
     }
@@ -852,7 +1050,49 @@ impl server::Handler for HopSshHandler {
         name: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let Some(asset) = self.direct_asset.clone() else {
+        if name != "sftp" {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+
+        let has_local_tui = self
+            .channels
+            .lock()
+            .await
+            .values()
+            .any(|state| matches!(state, ChannelState::Tui { .. }));
+        if self.effective_managed_asset().is_none() && has_local_tui {
+            let Some(auth) = self.auth_info() else {
+                session.channel_failure(channel)?;
+                return Ok(());
+            };
+            session.channel_success(channel)?;
+            let control = bridge::spawn_deferred_sftp_bridge(DeferredSftpBridgeOptions {
+                db: self.db.clone(),
+                master_key: Arc::clone(&self.master_key),
+                active_sessions: self.active_sessions.clone(),
+                auth,
+                peer_ip: self.peer_ip,
+                client_ip: self.client_ip.clone(),
+                channel_id: channel,
+                handle: session.handle(),
+                channels: Arc::clone(&self.channels),
+                pty: self.pty_size(channel),
+                pty_term: self.pty_term(channel),
+                connect_timeout: self.config.connect_timeout(),
+                wait_timeout: TUI_SFTP_WAIT_TIMEOUT,
+            });
+            self.channels
+                .lock()
+                .await
+                .insert(channel, ChannelState::Managed { control });
+            return Ok(());
+        }
+
+        let Some(asset) = self
+            .resolve_channel_managed_asset(TUI_SFTP_WAIT_TIMEOUT)
+            .await?
+        else {
             session.channel_failure(channel)?;
             return Ok(());
         };
@@ -861,16 +1101,23 @@ impl server::Handler for HopSshHandler {
             return Ok(());
         }
 
+        if self
+            .start_managed(
+                channel,
+                session.handle(),
+                asset,
+                None,
+                None,
+                ManagedSessionMode::Sftp,
+                None,
+            )
+            .await
+            .is_err()
+        {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
         session.channel_success(channel)?;
-        self.start_managed(
-            channel,
-            session.handle(),
-            asset,
-            None,
-            ManagedSessionMode::Sftp,
-            None,
-        )
-        .await?;
         Ok(())
     }
 
@@ -880,7 +1127,7 @@ impl server::Handler for HopSshHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let mut connect: Option<(Asset, TuiResources)> = None;
+        let mut connect: Option<(Asset, TuiResources, Option<TuiTargetGuard>)> = None;
         let mut finish_tui: Option<(ActiveTuiSession, &'static str, Option<String>)> = None;
         let mut probe_tui = false;
         let mut close = false;
@@ -906,7 +1153,9 @@ impl server::Handler for HopSshHandler {
             match action {
                 Some(TuiAction::None) | None => {}
                 Some(TuiAction::Quit) => {
-                    if let Some(ChannelState::Tui { mut tui, audit }) = channels.remove(&channel) {
+                    if let Some(ChannelState::Tui { mut tui, audit, .. }) =
+                        channels.remove(&channel)
+                    {
                         output.append(&mut tui.leave_screen()?);
                         finish_tui = Some((audit, "ok", None));
                     }
@@ -924,12 +1173,25 @@ impl server::Handler for HopSshHandler {
                         output.extend_from_slice(
                             b"\r\nAsset has no managed credential; use ProxyJump instead.\r\n",
                         );
-                    } else if let Some(ChannelState::Tui { mut tui, audit }) =
-                        channels.remove(&channel)
-                    {
-                        output.append(&mut tui.leave_screen()?);
-                        finish_tui = Some((audit, "connected", None));
-                        connect = Some((*asset, *tui));
+                    } else {
+                        let target_guard = self.auth_info().map(|auth| {
+                            self.active_sessions.select_tui_target(
+                                &auth.key_id,
+                                self.peer_ip,
+                                (*asset).clone(),
+                            )
+                        });
+                        if let Some(ChannelState::Tui { mut tui, audit, .. }) =
+                            channels.remove(&channel)
+                        {
+                            *self
+                                .selected_asset
+                                .lock()
+                                .expect("selected_asset mutex poisoned") = Some((*asset).clone());
+                            output.append(&mut tui.leave_screen()?);
+                            finish_tui = Some((audit, "connected", None));
+                            connect = Some((*asset, *tui, target_guard));
+                        }
                     }
                 }
             }
@@ -980,12 +1242,16 @@ impl server::Handler for HopSshHandler {
             session.eof(channel)?;
             session.close(channel)?;
         }
-        if let Some((asset, tui)) = connect {
+        if let Some((asset, tui, target_guard)) = connect {
+            if let Some(cached) = self.direct_client.lock().await.take() {
+                cached.disconnect("switching tui target").await;
+            }
             self.start_managed(
                 channel,
                 session.handle(),
                 asset,
                 Some(tui),
+                target_guard,
                 ManagedSessionMode::Tui,
                 None,
             )
@@ -1007,7 +1273,9 @@ impl server::Handler for HopSshHandler {
                     let _ = control.input.send(BridgeInput::Eof);
                 }
                 Some(ChannelState::Tui { .. }) => {
-                    if let Some(ChannelState::Tui { mut tui, audit }) = channels.remove(&channel) {
+                    if let Some(ChannelState::Tui { mut tui, audit, .. }) =
+                        channels.remove(&channel)
+                    {
                         if let Ok(output) = tui.leave_screen() {
                             let _ = send_tui_output(session, channel, output);
                         }
@@ -1031,7 +1299,7 @@ impl server::Handler for HopSshHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         let state = self.channels.lock().await.remove(&channel);
-        if let Some(ChannelState::Tui { mut tui, audit }) = state {
+        if let Some(ChannelState::Tui { mut tui, audit, .. }) = state {
             if let Ok(output) = tui.leave_screen() {
                 let _ = send_tui_output(session, channel, output);
             }
@@ -1072,7 +1340,7 @@ impl server::Handler for HopSshHandler {
     }
 }
 
-fn accepts_sftp_request(name: &str, asset: Option<&Asset>) -> bool {
+pub(crate) fn accepts_sftp_request(name: &str, asset: Option<&Asset>) -> bool {
     name == "sftp" && accepts_managed_ssh_asset(asset)
 }
 
@@ -1160,7 +1428,9 @@ mod tests {
             active_sessions: ActiveSessionRegistry::default(),
             auth: None,
             direct_asset: None,
+            selected_asset: Arc::new(StdMutex::new(None)),
             direct_client: Arc::new(Mutex::new(None)),
+            peer_ip: None,
             client_ip: None,
             channels: Arc::new(Mutex::new(HashMap::new())),
             ptys: HashMap::new(),
@@ -1176,6 +1446,7 @@ mod tests {
         commands: Arc<StdMutex<Vec<Vec<u8>>>>,
         ptys: Arc<StdMutex<Vec<(u32, u32)>>>,
         forwards: Arc<StdMutex<Vec<(String, u32)>>>,
+        subsystems: Arc<StdMutex<Vec<String>>>,
         session_channels: std::collections::HashSet<ChannelId>,
     }
 
@@ -1194,6 +1465,7 @@ mod tests {
                 commands: Arc::new(StdMutex::new(Vec::new())),
                 ptys: Arc::new(StdMutex::new(Vec::new())),
                 forwards: Arc::new(StdMutex::new(Vec::new())),
+                subsystems: Arc::new(StdMutex::new(Vec::new())),
                 session_channels: std::collections::HashSet::new(),
             }
         }
@@ -1281,6 +1553,31 @@ mod tests {
         ) -> Result<(), Self::Error> {
             self.ptys.lock().unwrap().push((col_width, row_height));
             session.channel_success(channel)?;
+            Ok(())
+        }
+
+        async fn shell_request(
+            &mut self,
+            channel: ChannelId,
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            session.channel_success(channel)?;
+            session.data(channel, b"WELCOME-SHELL\n".to_vec())?;
+            Ok(())
+        }
+
+        async fn subsystem_request(
+            &mut self,
+            channel: ChannelId,
+            name: &str,
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            self.subsystems.lock().unwrap().push(name.to_string());
+            if name == "sftp" {
+                session.channel_success(channel)?;
+            } else {
+                session.channel_failure(channel)?;
+            }
             Ok(())
         }
 
@@ -2432,8 +2729,356 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].mode, "managed-tcp-forward");
         assert_eq!(sessions[0].status, "failed");
+        assert_eq!(
+            sessions[0].error.as_deref(),
+            Some("tcp forwarding disabled for asset")
+        );
+
+        let audits = db.list_audit_events(10).await.unwrap();
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action, "session.forward_denied");
+        assert_eq!(audits[0].target_type, "session");
+        assert_eq!(audits[0].result, "denied");
+        assert_eq!(audits[0].actor_label, "ssh-ingress");
+        assert!(audits[0]
+            .details_json
+            .as_deref()
+            .unwrap_or_default()
+            .contains("tcp forwarding disabled for asset"));
 
         hop_client
+            .disconnect(russh::Disconnect::ByApplication, "done", "en")
+            .await
+            .ok();
+        hop_task.abort();
+        target_task.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_direct_tcpip_distinguishes_unauthorized_vs_missing_targets_in_audit() {
+        let db = Catalog::in_memory().await.unwrap();
+        let master_key = Arc::new(MasterKey::from_bytes([17; 32]));
+        let protected = db
+            .add_asset(NewAsset::new("protected-db", "10.99.0.10", 5432))
+            .await
+            .unwrap();
+
+        let client_key =
+            russh::keys::PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap();
+        let client_public_key = client_key.public_key();
+        db.add_authorized_key_with_access(
+            NewAuthorizedKey::new(
+                "contractor-key",
+                client_public_key.to_openssh().unwrap(),
+                key_fingerprint(client_public_key),
+            ),
+            AssetAccessMode::Restricted,
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hop_addr = probe.local_addr().unwrap();
+        drop(probe);
+        let temp = tempfile::tempdir().unwrap();
+        let config = HopConfig {
+            listen: hop_addr.to_string(),
+            data_dir: temp.path().to_path_buf(),
+            ssh: hop_core::config::SshConfig {
+                banner: String::new(),
+                keepalive_interval: 0,
+                connect_timeout: 5,
+                ..hop_core::config::SshConfig::default()
+            },
+            ..HopConfig::default()
+        };
+        let (_shutdown_tx, shutdown) = watch::channel(false);
+        let hop_task = tokio::spawn(serve_ssh_with_shutdown(
+            hop_addr,
+            config,
+            db.clone(),
+            master_key,
+            ActiveSessionRegistry::default(),
+            shutdown,
+        ));
+
+        let mut hop_client = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match russh::client::connect(
+                    Arc::new(russh::client::Config::default()),
+                    hop_addr,
+                    AcceptAnyServerKey,
+                )
+                .await
+                {
+                    Ok(client) => break Some(client),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let hash_alg = hop_client
+            .best_supported_rsa_hash()
+            .await
+            .unwrap()
+            .flatten();
+        let auth = hop_client
+            .authenticate_publickey(
+                "proxy",
+                PrivateKeyWithHashAlg::new(Arc::new(client_key), hash_alg),
+            )
+            .await
+            .unwrap();
+        assert!(auth.success());
+
+        assert!(hop_client
+            .channel_open_direct_tcpip("10.99.0.10", 5432, "127.0.0.1", 52100)
+            .await
+            .is_err());
+        assert!(hop_client
+            .channel_open_direct_tcpip("10.99.0.99", 9999, "127.0.0.1", 52101)
+            .await
+            .is_err());
+
+        let sessions = db.list_sessions(10).await.unwrap();
+        assert_eq!(sessions.len(), 2);
+        let missing = sessions
+            .iter()
+            .find(|s| s.target_port == Some(9999))
+            .unwrap();
+        assert_eq!(missing.error.as_deref(), Some("target not found"));
+        let unauthorized = sessions
+            .iter()
+            .find(|s| s.target_port == Some(5432))
+            .unwrap();
+        assert_eq!(unauthorized.error.as_deref(), Some("target not authorized"));
+        assert_eq!(
+            unauthorized.asset_id.as_deref(),
+            Some(protected.id.as_str())
+        );
+
+        let audits = db.list_audit_events(10).await.unwrap();
+        assert_eq!(audits.len(), 2);
+        assert!(audits
+            .iter()
+            .any(|a| a.action == "session.access_denied" && a.result == "denied"));
+        assert!(audits
+            .iter()
+            .any(|a| a.action == "session.forward_denied" && a.result == "denied"));
+
+        hop_client
+            .disconnect(russh::Disconnect::ByApplication, "done", "en")
+            .await
+            .ok();
+        hop_task.abort();
+    }
+
+    #[tokio::test]
+    async fn tui_selected_target_enables_cross_connection_and_pending_sftp() {
+        use tokio::io::AsyncWriteExt;
+
+        let mut target = ExecTargetServer::default();
+        let target_state = target.clone();
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        let target_config = Arc::new(server::Config {
+            auth_rejection_time: Duration::ZERO,
+            auth_rejection_time_initial: Some(Duration::ZERO),
+            keys: vec![
+                russh::keys::PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap(),
+            ],
+            ..Default::default()
+        });
+        let target_task =
+            tokio::spawn(
+                async move { target.run_on_socket(target_config, &target_listener).await },
+            );
+
+        let db = Catalog::in_memory().await.unwrap();
+        let master_key = Arc::new(MasterKey::from_bytes([21; 32]));
+        let credential_id = "kwrt-cred";
+        let credential = db
+            .add_credential(NewCredential {
+                id: Some(credential_id.to_string()),
+                name: "kwrt-root".to_string(),
+                username: "target-user".to_string(),
+                auth_type: AuthType::Password,
+                password_enc: Some(
+                    encrypt_envelope(
+                        &master_key,
+                        &format!("{credential_id}:password"),
+                        b"target-password",
+                    )
+                    .unwrap(),
+                ),
+                private_key_enc: None,
+                passphrase_enc: None,
+            })
+            .await
+            .unwrap();
+        let mut asset = NewAsset::new(
+            "kwrt",
+            target_addr.ip().to_string(),
+            i64::from(target_addr.port()),
+        );
+        asset.credential_id = Some(credential.id);
+        db.add_asset(asset).await.unwrap();
+
+        let client_key =
+            Arc::new(russh::keys::PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap());
+        let client_public_key = client_key.public_key();
+        db.add_authorized_key(NewAuthorizedKey::new(
+            "xterminal-laptop",
+            client_public_key.to_openssh().unwrap(),
+            key_fingerprint(client_public_key),
+        ))
+        .await
+        .unwrap();
+
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hop_addr = probe.local_addr().unwrap();
+        drop(probe);
+        let temp = tempfile::tempdir().unwrap();
+        let config = HopConfig {
+            listen: hop_addr.to_string(),
+            data_dir: temp.path().to_path_buf(),
+            ssh: hop_core::config::SshConfig {
+                banner: String::new(),
+                keepalive_interval: 0,
+                connect_timeout: 5,
+                ..hop_core::config::SshConfig::default()
+            },
+            ..HopConfig::default()
+        };
+        let (_shutdown_tx, shutdown) = watch::channel(false);
+        let hop_task = tokio::spawn(serve_ssh_with_shutdown(
+            hop_addr,
+            config,
+            db.clone(),
+            master_key,
+            ActiveSessionRegistry::default(),
+            shutdown,
+        ));
+
+        #[allow(clippy::async_yields_async)]
+        async fn connect_hop_client(
+            hop_addr: std::net::SocketAddr,
+            client_key: &Arc<russh::keys::PrivateKey>,
+        ) -> russh::client::Handle<AcceptAnyServerKey> {
+            let mut client = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match russh::client::connect(
+                        Arc::new(russh::client::Config::default()),
+                        hop_addr,
+                        AcceptAnyServerKey,
+                    )
+                    .await
+                    {
+                        Ok(client) => break Some(client),
+                        Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                    }
+                }
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            let hash_alg = client.best_supported_rsa_hash().await.unwrap().flatten();
+            let auth = client
+                .authenticate_publickey(
+                    "hop",
+                    PrivateKeyWithHashAlg::new(Arc::clone(client_key), hash_alg),
+                )
+                .await
+                .unwrap();
+            assert!(auth.success());
+            client
+        }
+
+        let connect_hop = || connect_hop_client(hop_addr, &client_key);
+
+        // 1. Standalone SFTP to `hop@hop-host` with no TUI open fails fast.
+        let standalone = connect_hop().await;
+        let mut standalone_ch = standalone.channel_open_session().await.unwrap();
+        standalone_ch.request_subsystem(true, "sftp").await.unwrap();
+        let standalone_reply =
+            tokio::time::timeout(Duration::from_millis(500), standalone_ch.wait())
+                .await
+                .expect("standalone sftp without open TUI must fail fast");
+        assert!(matches!(standalone_reply, Some(ChannelMsg::Failure)));
+        standalone
+            .disconnect(russh::Disconnect::ByApplication, "done", "en")
+            .await
+            .ok();
+
+        // 2. Connection 1 opens TUI (`hop@hop-host`); Connection 2 opens SFTP concurrently BEFORE Enter!
+        let tui_client = connect_hop().await;
+        let mut tui_ch = tui_client.channel_open_session().await.unwrap();
+        tui_ch
+            .request_pty(true, "xterm-256color", 100, 30, 0, 0, &[])
+            .await
+            .unwrap();
+        tui_ch.request_shell(true).await.unwrap();
+        // Drain until TUI screen renders so `ChannelState::Tui` is active.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(ChannelMsg::Data { .. }) = tui_ch.wait().await {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("TUI initial render");
+
+        let sftp_client = connect_hop().await;
+        let sftp_waiter = tokio::spawn(async move {
+            let mut sftp_ch = sftp_client.channel_open_session().await.unwrap();
+            sftp_ch.request_subsystem(true, "sftp").await.unwrap();
+            loop {
+                match sftp_ch.wait().await {
+                    Some(ChannelMsg::Success) => break,
+                    Some(ChannelMsg::WindowAdjusted { .. }) => continue,
+                    other => panic!("expected SFTP subsystem Success, got {other:?}"),
+                }
+            }
+            let mut stream = sftp_ch.into_stream();
+            stream.write_all(b"FXP-INIT-PAYLOAD").await.unwrap();
+            stream.shutdown().await.unwrap();
+            let mut echoed = Vec::new();
+            stream.read_to_end(&mut echoed).await.unwrap();
+            sftp_client
+                .disconnect(russh::Disconnect::ByApplication, "done", "en")
+                .await
+                .ok();
+            echoed
+        });
+
+        // Simulate user taking 60ms in TUI before pressing Enter on `kwrt`.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        tui_ch.data(&b"\r"[..]).await.unwrap();
+
+        let echoed = tokio::time::timeout(Duration::from_secs(5), sftp_waiter)
+            .await
+            .expect("concurrent SFTP connection must unblock once TUI selects target")
+            .unwrap();
+        assert!(
+            echoed.starts_with(b"FXP-INIT-PAYLOAD"),
+            "unexpected SFTP stream output: {echoed:?}"
+        );
+        assert_eq!(
+            target_state.subsystems.lock().unwrap().as_slice(),
+            &["sftp"]
+        );
+
+        // Verify an explicit `sftp` session was recorded against `kwrt`.
+        let sessions = db.list_sessions(10).await.unwrap();
+        assert!(sessions
+            .iter()
+            .any(|s| s.mode == "sftp" && s.asset_name.as_deref() == Some("kwrt")));
+
+        tui_client
             .disconnect(russh::Disconnect::ByApplication, "done", "en")
             .await
             .ok();

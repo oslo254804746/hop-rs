@@ -58,8 +58,8 @@ cargo run --release -p hop-server -- --config ./hop.yaml serve
 # 直连托管 SSH 资产（Hop 自动使用保险库凭据登录目标机）
 ssh -p 2222 <asset-name>@<hop-host>
 
-# 打开交互式 TUI 选择器（支持 / 搜索、#标签过滤、r 键测延迟）
-ssh -p 2222 menu@<hop-host>
+# 打开交互式 TUI 选择器（支持 / 搜索、#标签过滤、r 键测延迟，选机后 GUI 客户端 SFTP 自动跟随）
+ssh -p 2222 hop@<hop-host>
 
 # 生成终端直连或 Cursor / VS Code Remote-SSH (ProxyJump) 的 ~/.ssh/config
 hop-server --config ./hop.yaml ssh-config --host <hop-host> --mode relay

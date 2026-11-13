@@ -17,7 +17,7 @@ use tokio::{
 
 use super::{
     client::{open_asset_stream, ManagedClientSession},
-    server::{audit_denied_attempt, AuthInfo, AUTHORIZATION_DENIED},
+    server::{audit_denied_attempt, AuthInfo, DenialReason, AUTHORIZATION_DENIED},
     session_registry::{ActiveSessionRegistry, TERMINATED_BY_MANAGEMENT},
 };
 
@@ -208,6 +208,7 @@ pub async fn bridge_direct_tcpip(
             &db,
             &auth,
             "tcp-forward",
+            DenialReason::TargetNotAuthorized,
             Some(asset.id.clone()),
             Some(asset.name.clone()),
             Some(asset.hostname.clone()),
