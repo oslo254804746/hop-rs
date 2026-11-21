@@ -24,9 +24,11 @@ use super::{
     views,
 };
 
+#[derive(Debug)]
 pub enum TuiAction {
     None,
     Quit,
+    Refresh,
     ProbeAll,
     Connect(Box<Asset>),
 }
@@ -176,14 +178,26 @@ impl TuiApp {
     }
 
     pub fn set_assets(&mut self, assets: Vec<Asset>) {
+        let selected_id = if self.assets.is_empty() {
+            None
+        } else {
+            self.selected_asset().map(|asset| asset.id)
+        };
         self.assets = assets;
         let refreshed = self.compute_filtered_assets();
-        let max_idx = refreshed.len().saturating_sub(1);
-        self.selected = self.selected.min(max_idx);
         *self.filtered_cache.borrow_mut() = FilteredAssetCache {
             query: self.query.clone(),
             assets: refreshed,
         };
+        let ordered = self.ordered_filtered_assets();
+        let max_idx = ordered.len().saturating_sub(1);
+        if let Some(id) = selected_id {
+            if let Some(pos) = ordered.iter().position(|asset| asset.id == id) {
+                self.selected = pos;
+                return;
+            }
+        }
+        self.selected = self.selected.min(max_idx);
     }
 
     pub fn filtered_assets(&self) -> Vec<Asset> {
@@ -234,8 +248,8 @@ impl TuiApp {
     fn ordered_filtered_assets(&self) -> Vec<Asset> {
         let mut assets = self.filtered_assets();
         assets.sort_by(|left, right| {
-            asset_group_label(left)
-                .cmp(&asset_group_label(right))
+            asset_group_sort_key(left)
+                .cmp(&asset_group_sort_key(right))
                 .then_with(|| left.name.cmp(&right.name))
         });
         assets
@@ -265,6 +279,10 @@ impl TuiApp {
     pub fn handle_input(&mut self, input: TuiInput) -> TuiAction {
         match input {
             TuiInput::Char('q') if !self.searching => return TuiAction::Quit,
+            TuiInput::Char('f') | TuiInput::Char('F') if !self.searching => {
+                return TuiAction::Refresh;
+            }
+            TuiInput::Refresh => return TuiAction::Refresh,
             TuiInput::Char('r') | TuiInput::Char('R') if !self.searching => {
                 return TuiAction::ProbeAll;
             }
@@ -322,11 +340,24 @@ fn tag_query(query: &str) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-fn asset_group_label(asset: &Asset) -> String {
+fn first_non_empty_tag(asset: &Asset) -> Option<&str> {
     asset
         .tags
-        .first()
-        .cloned()
+        .iter()
+        .map(|tag| tag.trim())
+        .find(|tag| !tag.is_empty())
+}
+
+fn asset_group_sort_key(asset: &Asset) -> (bool, &str) {
+    match first_non_empty_tag(asset) {
+        Some(tag) => (false, tag),
+        None => (true, ""),
+    }
+}
+
+fn asset_group_label(asset: &Asset) -> String {
+    first_non_empty_tag(asset)
+        .map(ToOwned::to_owned)
         .unwrap_or_else(|| "untagged".to_string())
 }
 
@@ -475,5 +506,73 @@ mod tests {
             TuiAction::Connect(asset) => assert_eq!(asset.name, "web-prod-01"),
             _ => panic!("expected connect"),
         }
+    }
+
+    #[test]
+    fn refresh_keys_trigger_refresh_outside_search_and_allow_typing_f_when_searching() {
+        let mut app = TuiApp::new(vec![asset("web-prod-01")]);
+        assert!(matches!(
+            app.handle_input(TuiInput::Char('f')),
+            TuiAction::Refresh
+        ));
+        assert!(matches!(
+            app.handle_input(TuiInput::Char('F')),
+            TuiAction::Refresh
+        ));
+        assert!(matches!(
+            app.handle_input(TuiInput::Refresh),
+            TuiAction::Refresh
+        ));
+
+        let _ = app.handle_input(TuiInput::Char('/'));
+        assert!(matches!(
+            app.handle_input(TuiInput::Char('f')),
+            TuiAction::None
+        ));
+        assert_eq!(app.query, "f");
+        assert!(matches!(
+            app.handle_input(TuiInput::Refresh),
+            TuiAction::Refresh
+        ));
+    }
+
+    #[test]
+    fn set_assets_preserves_selected_asset_when_new_assets_insert_above() {
+        let mut app = TuiApp::new(vec![
+            tagged_asset("openwrt", &["openwrt"]),
+            tagged_asset("pve", &["pve"]),
+        ]);
+        app.selected = 1;
+        assert_eq!(app.selected_asset().unwrap().name, "pve");
+
+        app.set_assets(vec![
+            tagged_asset("openwrt", &["openwrt"]),
+            tagged_asset("hk-edge", &["proxy"]),
+            tagged_asset("pve", &["pve"]),
+        ]);
+
+        assert_eq!(app.selected, 2);
+        assert_eq!(app.selected_asset().unwrap().name, "pve");
+    }
+
+    #[test]
+    fn untagged_group_sorts_after_all_tagged_groups_including_tags_after_u() {
+        let app = TuiApp::new(vec![
+            asset("raw-box"),
+            tagged_asset("west-node", &["west"]),
+            tagged_asset("blank-tag-box", &["   "]),
+            tagged_asset("alpha-node", &["alpha"]),
+        ]);
+
+        let groups: Vec<String> = app
+            .grouped_items()
+            .into_iter()
+            .filter_map(|item| match item {
+                AssetListItem::Group(label) => Some(label),
+                AssetListItem::Asset(_) => None,
+            })
+            .collect();
+
+        assert_eq!(groups, vec!["alpha", "west", "untagged"]);
     }
 }

@@ -59,7 +59,7 @@ cargo run --release -p hop-server -- --config ./hop.yaml serve
 ssh -p 2222 <asset-name>@<hop-host>
 ssh -p 2222 -L 15432:127.0.0.1:5432 <asset-name>@<hop-host>
 
-# 打开交互式 TUI 选择器（支持 / 搜索、#标签过滤、r 键测延迟；选机后 GUI 客户端 SFTP 自动跟随并在退出时同步回收）
+# 打开交互式 TUI 选择器（支持 / 搜索、#标签过滤、f 键刷新列表、r 键测延迟；选机后 GUI 客户端 SFTP 自动跟随并在退出时同步回收）
 ssh -p 2222 hop@<hop-host>
 
 # 新机密码登录一键洗密为 Ed25519 公钥凭据
@@ -74,7 +74,7 @@ Hop 的入口 SSH 只宣告 `publickey` 认证。未登记的公钥会直接得�
 
 ## 文档
 
-- [v0.3.0 发布说明](docs/releases/v0.3.0.zh-CN.md)
+- [v0.3.1 发布说明](docs/releases/v0.3.1.zh-CN.md)
 - [部署指南](docs/deployment.zh-CN.md)
 - [SSH 与 TCP 代理](docs/proxying.zh-CN.md)
 - [配置参考](docs/configuration.zh-CN.md)

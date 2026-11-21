@@ -49,11 +49,11 @@ docker compose up -d
 
 - `/data` 使用 `hop-data` 命名卷，保存数据库、主密钥和 SSH 主机密钥。
 - 唯一的 `hop.yaml` 只读挂载，容器不会修改它。
-- 两个镜像使用同一个 `HOP_VERSION` 标签，避免 API/面板版本漂移。
+- 后端与面板分别支持通过 `HOP_VERSION` 与 `HOP_PANEL_VERSION`（默认兼容 `v0.3.0`）固定镜像标签。
 
 ```bash
-HOP_VERSION=v0.3.0 docker compose pull
-HOP_VERSION=v0.3.0 docker compose up -d
+HOP_VERSION=v0.3.1 docker compose pull
+HOP_VERSION=v0.3.1 docker compose up -d
 ```
 
 升级前备份配置与数据卷。回滚时同时回滚 hop 与 panel 镜像。
@@ -78,7 +78,7 @@ docker run -d --name hop --restart unless-stopped \
   -p 2222:2222 \
   -v "$PWD/hop.yaml:/etc/hop/hop.yaml:ro" \
   -v hop-data:/data \
-  ghcr.io/oslo254804746/hop-rs:v0.3.0 \
+  ghcr.io/oslo254804746/hop-rs:v0.3.1 \
   hop-server --config /etc/hop/hop.yaml serve
 ```
 

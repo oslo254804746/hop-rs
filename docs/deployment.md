@@ -37,11 +37,11 @@ Open `http://<hop-host>:8080` and enter the webpage management Token. No API URL
 
 - The `hop-data` volume holds the database, encryption key, and SSH host key.
 - The YAML file is mounted read-only.
-- Hop and panel use the same `HOP_VERSION` image tag.
+- Hop uses `HOP_VERSION` and panel uses `HOP_PANEL_VERSION` (compatible `v0.3.0` default).
 
 ```bash
-HOP_VERSION=v0.3.0 docker compose pull
-HOP_VERSION=v0.3.0 docker compose up -d
+HOP_VERSION=v0.3.1 docker compose pull
+HOP_VERSION=v0.3.1 docker compose up -d
 ```
 
 Back up the YAML and data volume before upgrading. Roll back both images together.
@@ -66,7 +66,7 @@ docker run -d --name hop --restart unless-stopped \
   -p 2222:2222 \
   -v "$PWD/hop.yaml:/etc/hop/hop.yaml:ro" \
   -v hop-data:/data \
-  ghcr.io/oslo254804746/hop-rs:v0.3.0 \
+  ghcr.io/oslo254804746/hop-rs:v0.3.1 \
   hop-server --config /etc/hop/hop.yaml serve
 ```
 

@@ -4,6 +4,31 @@ All notable user-visible changes to Hop are recorded here.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-20
+
+### Added
+
+- Added instant catalog refresh in the interactive SSH TUI (`f` / `F`, `Ctrl+R`,
+  and `F5`) so newly added, edited, or deleted assets load immediately without
+  disconnecting or running network probes, while preserving the active selection
+  by asset ID.
+
+### Fixed
+
+- Accounted for group header rows when computing the TUI asset viewport and
+  scroll offset, preventing orphan group headers (such as a trailing `untagged`
+  heading with hidden items below) and allowing smooth scrolling through all
+  assets.
+- Sorted the `untagged` group consistently after all tagged groups, trimmed
+  blank tag entries, and rendered missing-credential connect notices in the TUI
+  status bar instead of writing raw text onto the alternate screen.
+
+### Compatibility and upgrade
+
+- No SQLite schema or configuration-format change is included; existing `v0.3.0`
+  deployments and the `v0.3.0` Web Panel (`hop-rs-frontend:v0.3.0`) remain
+  directly compatible. See the [full v0.3.1 release notes](docs/releases/v0.3.1.md).
+
 ## [0.3.0] - 2026-11-13
 
 ### Added
@@ -318,7 +343,8 @@ See the [full v0.1.6 release notes](docs/releases/v0.1.6.md).
 
 See the [full v0.1.5 release notes](docs/releases/v0.1.5.md).
 
-[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/oslo254804746/hop-rs/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/oslo254804746/hop-rs/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/oslo254804746/hop-rs/compare/v0.2.9...v0.3.0
 [0.2.9]: https://github.com/oslo254804746/hop-rs/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/oslo254804746/hop-rs/compare/v0.2.5...v0.2.8

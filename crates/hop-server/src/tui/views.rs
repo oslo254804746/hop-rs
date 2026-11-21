@@ -45,8 +45,12 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &TuiApp, list_height: u16
     } else {
         format!("{count} assets")
     };
-    let visible_count = visible_asset_count(list_height);
-    let right_text = if visible_count > 0 && count > visible_count {
+    let grouped = app.grouped_items();
+    let all_fit = count == 0
+        || (list_height > 0
+            && last_visible_asset_index(&grouped, 0, list_height as usize)
+                .is_some_and(|last| last + 1 >= count));
+    let right_text = if list_height > 0 && !all_fit {
         let selected = app.selected.min(count.saturating_sub(1)) + 1;
         format!("{count_text}  {selected}/{count}")
     } else {
@@ -120,32 +124,28 @@ fn draw_assets(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
     let filtered = app.filtered_assets();
     let grouped = app.grouped_items();
     let available_lines = area.height as usize;
-    let visible_count = visible_asset_count(area.height);
 
     if filtered.is_empty() {
         draw_empty_assets(frame, area, app);
         return;
     }
-    if visible_count == 0 {
+    if available_lines == 0 {
         return;
     }
 
     let selected = app.selected.min(filtered.len().saturating_sub(1));
-
-    let scroll_offset = if selected >= visible_count {
-        selected - visible_count + 1
-    } else {
-        0
-    };
+    let scroll_offset = compute_scroll_offset(&grouped, filtered.len(), selected, available_lines);
 
     let mut lines: Vec<Line<'_>> = Vec::new();
     let mut asset_idx = 0usize;
-    for item in grouped {
+    let mut active_group = "";
+    let mut rendered_group = "";
+    let mut rendered_any = false;
+
+    for item in &grouped {
         match item {
             AssetListItem::Group(label) => {
-                if asset_idx >= scroll_offset && lines.len() < available_lines {
-                    lines.push(group_line(&label, area.width));
-                }
+                active_group = label.as_str();
             }
             AssetListItem::Asset(asset) => {
                 let actual_idx = asset_idx;
@@ -153,14 +153,30 @@ fn draw_assets(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
                 if actual_idx < scroll_offset {
                     continue;
                 }
-                if lines.len() >= available_lines {
-                    break;
-                }
                 let is_selected = actual_idx == selected;
-                let (line1, line2) = asset_lines(&asset, is_selected, area.width);
-                lines.push(line1);
-                if lines.len() < available_lines {
+                if available_lines < 3 {
+                    if lines.len() >= available_lines {
+                        break;
+                    }
+                    let (line1, line2) = asset_lines(asset, is_selected, area.width);
+                    lines.push(line1);
+                    if lines.len() < available_lines {
+                        lines.push(line2);
+                    }
+                } else {
+                    let needs_header = !rendered_any || active_group != rendered_group;
+                    let needed = if needs_header { 3 } else { 2 };
+                    if lines.len() + needed > available_lines {
+                        break;
+                    }
+                    if needs_header {
+                        lines.push(group_line(active_group, area.width));
+                        rendered_group = active_group;
+                    }
+                    let (line1, line2) = asset_lines(asset, is_selected, area.width);
+                    lines.push(line1);
                     lines.push(line2);
+                    rendered_any = true;
                 }
             }
         }
@@ -331,6 +347,8 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
         Span::styled(" select  ", desc_style),
     ];
     if !app.searching {
+        spans.push(Span::styled("f", key_style));
+        spans.push(Span::styled(" refresh  ", desc_style));
         spans.push(Span::styled("r", key_style));
         spans.push(Span::styled(" probe  ", desc_style));
     }
@@ -349,8 +367,79 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect, app: &TuiApp) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn visible_asset_count(list_height: u16) -> usize {
-    (list_height as usize) / 2
+fn last_visible_asset_index(
+    grouped: &[AssetListItem],
+    start_idx: usize,
+    available_lines: usize,
+) -> Option<usize> {
+    if available_lines == 0 {
+        return None;
+    }
+
+    let mut asset_idx = 0usize;
+    let mut active_group = "";
+    let mut rendered_group = "";
+    let mut used_lines = 0usize;
+    let mut last_fit = None;
+
+    for item in grouped {
+        match item {
+            AssetListItem::Group(label) => {
+                active_group = label.as_str();
+            }
+            AssetListItem::Asset(_) => {
+                let actual_idx = asset_idx;
+                asset_idx += 1;
+                if actual_idx < start_idx {
+                    continue;
+                }
+                if available_lines < 3 {
+                    let per_asset = available_lines.min(2);
+                    if last_fit.is_some() && used_lines + per_asset > available_lines {
+                        break;
+                    }
+                    used_lines += per_asset;
+                    last_fit = Some(actual_idx);
+                    if used_lines >= available_lines {
+                        break;
+                    }
+                } else {
+                    let needs_header = last_fit.is_none() || active_group != rendered_group;
+                    let needed = if needs_header { 3 } else { 2 };
+                    if used_lines + needed > available_lines {
+                        break;
+                    }
+                    used_lines += needed;
+                    rendered_group = active_group;
+                    last_fit = Some(actual_idx);
+                }
+            }
+        }
+    }
+
+    last_fit
+}
+
+fn compute_scroll_offset(
+    grouped: &[AssetListItem],
+    total_assets: usize,
+    selected: usize,
+    available_lines: usize,
+) -> usize {
+    if total_assets == 0 || available_lines == 0 {
+        return 0;
+    }
+    let selected = selected.min(total_assets - 1);
+    let mut offset = selected.saturating_sub(available_lines / 2);
+    while offset < selected {
+        if last_visible_asset_index(grouped, offset, available_lines)
+            .is_some_and(|last| last >= selected)
+        {
+            break;
+        }
+        offset += 1;
+    }
+    offset
 }
 
 fn truncate_to_width(value: &str, max_width: usize) -> String {
@@ -389,6 +478,10 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     fn asset(name: &str) -> Asset {
+        tagged_asset(name, &[])
+    }
+
+    fn tagged_asset(name: &str, tags: &[&str]) -> Asset {
         Asset {
             id: name.to_string(),
             name: name.to_string(),
@@ -397,7 +490,7 @@ mod tests {
             port: 22,
             display_name: None,
             description: None,
-            tags: vec![],
+            tags: tags.iter().map(|tag| tag.to_string()).collect(),
             credential_id: None,
             via_asset_id: None,
             allow_tcp_forwarding: true,
@@ -485,6 +578,42 @@ mod tests {
     }
 
     #[test]
+    fn grouped_headers_account_for_line_height_without_orphan_bottom_group_and_scroll_to_end() {
+        let mut assets = vec![tagged_asset("openwrt", &["openwrt"])];
+        for idx in 1..=7 {
+            assets.push(tagged_asset(&format!("proxy-{idx}"), &["proxy"]));
+        }
+        for idx in 1..=3 {
+            assets.push(tagged_asset(&format!("pve-{idx}"), &["pve"]));
+        }
+        assets.push(asset("untagged-1"));
+        assets.push(asset("untagged-2"));
+        assert_eq!(assets.len(), 13);
+
+        // 30-row terminal -> 26-row list area: 3 group headers (3) + 11 assets (22) = 25 rows.
+        // Only 1 row remains, so `untagged` must not render as an orphan header, and header
+        // must indicate `1/13` because the 2 untagged assets overflow.
+        let mut app = TuiApp::new(assets);
+        let top_output = buffer_text(&app, 100, 30);
+        assert!(top_output.contains("13 assets  1/13"));
+        assert!(!top_output.contains("untagged"));
+        assert!(top_output.contains("f refresh"));
+
+        // Selecting the 12th and 13th assets must scroll `untagged` and both assets into view.
+        app.selected = 11;
+        let mid_output = buffer_text(&app, 100, 30);
+        assert!(mid_output.contains("13 assets  12/13"));
+        assert!(mid_output.contains("untagged"));
+        assert!(mid_output.contains("▸ untagged-1"));
+
+        app.selected = 12;
+        let bottom_output = buffer_text(&app, 100, 30);
+        assert!(bottom_output.contains("13 assets  13/13"));
+        assert!(bottom_output.contains("untagged-1"));
+        assert!(bottom_output.contains("▸ untagged-2"));
+    }
+
+    #[test]
     fn help_reflects_search_and_filter_state() {
         let mut app = TuiApp::new(vec![asset("web-prod-01")]);
         app.searching = true;
@@ -496,5 +625,6 @@ mod tests {
         assert!(output.contains("close"));
         assert!(output.contains("Ctrl+C"));
         assert!(output.contains("clear"));
+        assert!(!output.contains("refresh"));
     }
 }

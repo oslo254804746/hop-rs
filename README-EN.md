@@ -59,7 +59,7 @@ If `api.token` is missing or empty, only the Control API is disabled; SSH contin
 ssh -p 2222 <asset-name>@<hop-host>
 ssh -p 2222 -L 15432:127.0.0.1:5432 <asset-name>@<hop-host>
 
-# Interactive TUI selector (/ fuzzy search, #tag filter, r RTT probe, and parent-bound GUI SFTP follow)
+# Interactive TUI selector (/ fuzzy search, #tag filter, f refresh, r RTT probe, and parent-bound GUI SFTP follow)
 ssh -p 2222 hop@<hop-host>
 
 # Bootstrap an Ed25519 key onto a password-based server and rotate its vault credential
@@ -74,7 +74,7 @@ Hop ingress advertises `publickey` authentication only. An unregistered key rece
 
 ## Documentation
 
-- [v0.3.0 release notes](docs/releases/v0.3.0.md)
+- [v0.3.1 release notes](docs/releases/v0.3.1.md)
 - [Deployment](docs/deployment.md)
 - [Configuration reference (Chinese)](docs/configuration.zh-CN.md)
 - [Administrator guide](docs/admin-guide.md)
