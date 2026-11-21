@@ -1185,6 +1185,7 @@ impl server::Handler for HopSshHandler {
     ) -> Result<(), Self::Error> {
         let mut connect: Option<(Asset, TuiResources, Option<TuiTargetGuard>)> = None;
         let mut finish_tui: Option<(ActiveTuiSession, &'static str, Option<String>)> = None;
+        let mut refresh_tui = false;
         let mut probe_tui = false;
         let mut close = false;
         let mut output = Vec::new();
@@ -1217,6 +1218,9 @@ impl server::Handler for HopSshHandler {
                     }
                     close = true;
                 }
+                Some(TuiAction::Refresh) => {
+                    refresh_tui = true;
+                }
                 Some(TuiAction::ProbeAll) => {
                     if let Some(ChannelState::Tui { tui, .. }) = channels.get_mut(&channel) {
                         tui.app.status_notice = Some("Probing authorized assets...".to_string());
@@ -1226,9 +1230,13 @@ impl server::Handler for HopSshHandler {
                 }
                 Some(TuiAction::Connect(asset)) => {
                     if asset.credential_id.is_none() {
-                        output.extend_from_slice(
-                            b"\r\nAsset has no managed credential; use ProxyJump instead.\r\n",
-                        );
+                        if let Some(ChannelState::Tui { tui, .. }) = channels.get_mut(&channel) {
+                            tui.app.status_notice = Some(
+                                "Asset has no managed credential; use ProxyJump instead."
+                                    .to_string(),
+                            );
+                            output.append(&mut tui.render()?);
+                        }
                     } else if let Some(ChannelState::Tui { mut tui, audit, .. }) =
                         channels.remove(&channel)
                     {
@@ -1251,6 +1259,23 @@ impl server::Handler for HopSshHandler {
                         output.append(&mut tui.leave_screen()?);
                         finish_tui = Some((audit, "connected", None));
                         connect = Some((*asset, *tui, target_guard));
+                    }
+                }
+            }
+        }
+        if refresh_tui {
+            if let Some(auth) = self.auth_info() {
+                if let Ok(fresh) = self.db.list_assets_for_key(&auth.key_id).await {
+                    let count = fresh.len();
+                    let mut channels = self.channels.lock().await;
+                    if let Some(ChannelState::Tui { tui, .. }) = channels.get_mut(&channel) {
+                        tui.set_assets(fresh);
+                        tui.app.status_notice = Some(if count == 1 {
+                            "Refreshed (1 asset)".to_string()
+                        } else {
+                            format!("Refreshed ({count} assets)")
+                        });
+                        output.append(&mut tui.render()?);
                     }
                 }
             }
@@ -3288,5 +3313,127 @@ mod tests {
             .ok();
         hop_task.abort();
         target_task.abort();
+    }
+
+    #[tokio::test]
+    async fn tui_refresh_key_reloads_newly_added_assets_without_reconnecting() {
+        let db = Catalog::in_memory().await.unwrap();
+        let master_key = Arc::new(MasterKey::from_bytes([29; 32]));
+        db.add_asset(NewAsset::new("initial-box", "10.10.0.1", 22))
+            .await
+            .unwrap();
+
+        let client_key =
+            Arc::new(russh::keys::PrivateKey::random(&mut safe_rng(), Algorithm::Ed25519).unwrap());
+        let client_public_key = client_key.public_key();
+        db.add_authorized_key(NewAuthorizedKey::new(
+            "ops-laptop",
+            client_public_key.to_openssh().unwrap(),
+            key_fingerprint(client_public_key),
+        ))
+        .await
+        .unwrap();
+
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hop_addr = probe.local_addr().unwrap();
+        drop(probe);
+        let temp = tempfile::tempdir().unwrap();
+        let config = HopConfig {
+            listen: hop_addr.to_string(),
+            data_dir: temp.path().to_path_buf(),
+            ssh: hop_core::config::SshConfig {
+                banner: String::new(),
+                keepalive_interval: 0,
+                connect_timeout: 5,
+                ..hop_core::config::SshConfig::default()
+            },
+            ..HopConfig::default()
+        };
+        let (_shutdown_tx, shutdown) = watch::channel(false);
+        let hop_task = tokio::spawn(serve_ssh_with_shutdown(
+            hop_addr,
+            config,
+            db.clone(),
+            master_key,
+            ActiveSessionRegistry::default(),
+            shutdown,
+        ));
+
+        let mut client = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match russh::client::connect(
+                    Arc::new(russh::client::Config::default()),
+                    hop_addr,
+                    AcceptAnyServerKey,
+                )
+                .await
+                {
+                    Ok(client) => break Some(client),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let hash_alg = client.best_supported_rsa_hash().await.unwrap().flatten();
+        let auth = client
+            .authenticate_publickey(
+                "hop",
+                PrivateKeyWithHashAlg::new(Arc::clone(&client_key), hash_alg),
+            )
+            .await
+            .unwrap();
+        assert!(auth.success());
+
+        let mut tui_ch = client.channel_open_session().await.unwrap();
+        tui_ch
+            .request_pty(true, "xterm-256color", 100, 30, 0, 0, &[])
+            .await
+            .unwrap();
+        tui_ch.request_shell(true).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut buf = Vec::new();
+            while let Some(msg) = tui_ch.wait().await {
+                if let ChannelMsg::Data { data } = msg {
+                    buf.extend_from_slice(&data);
+                    if String::from_utf8_lossy(&buf).contains("initial-box") {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("initial TUI render should show initial-box");
+
+        db.add_asset(NewAsset::new("newly-added-box", "10.10.0.2", 22))
+            .await
+            .unwrap();
+
+        tui_ch.data(&b"f"[..]).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut buf = Vec::new();
+            while let Some(msg) = tui_ch.wait().await {
+                if let ChannelMsg::Data { data } = msg {
+                    buf.extend_from_slice(&data);
+                    let rendered = String::from_utf8_lossy(&buf);
+                    if rendered.contains("newly-added-box")
+                        && rendered.contains("Refreshed (2 assets)")
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("pressing f in TUI must reload newly added assets without reconnecting");
+
+        client
+            .disconnect(russh::Disconnect::ByApplication, "done", "en")
+            .await
+            .ok();
+        hop_task.abort();
     }
 }

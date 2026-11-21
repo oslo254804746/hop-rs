@@ -333,21 +333,17 @@ where
 }
 
 async fn check_v0_3_schema(pool: &SqlitePool) -> Result<bool> {
-    if !has_column(pool, "assets", "via_asset_id").await?
-        || !has_column(pool, "assets", "allow_tcp_forwarding").await?
-        || !has_table(pool, "asset_health").await?
-        || !has_column(pool, "asset_health", "consecutive_failures").await?
-        || !has_column(pool, "asset_health", "alert_firing").await?
-        || !has_column(pool, "asset_health", "last_alerted_at").await?
-        || !has_column(pool, "asset_health", "last_recovered_at").await?
-        || !has_table(pool, "asset_probe_samples").await?
-        || !has_table(pool, "probe_settings").await?
-        || !has_table(pool, "notification_channels").await?
-        || !has_table(pool, "audit_events").await?
-    {
-        return Ok(false);
-    }
-    Ok(true)
+    Ok(has_column(pool, "assets", "via_asset_id").await?
+        && has_column(pool, "assets", "allow_tcp_forwarding").await?
+        && has_table(pool, "asset_health").await?
+        && has_column(pool, "asset_health", "consecutive_failures").await?
+        && has_column(pool, "asset_health", "alert_firing").await?
+        && has_column(pool, "asset_health", "last_alerted_at").await?
+        && has_column(pool, "asset_health", "last_recovered_at").await?
+        && has_table(pool, "asset_probe_samples").await?
+        && has_table(pool, "probe_settings").await?
+        && has_table(pool, "notification_channels").await?
+        && has_table(pool, "audit_events").await?)
 }
 
 async fn ensure_v0_3_schema(pool: &SqlitePool) -> Result<()> {

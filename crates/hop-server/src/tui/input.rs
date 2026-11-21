@@ -9,6 +9,7 @@ pub enum TuiInput {
     Up,
     Down,
     CtrlC,
+    Refresh,
 }
 
 #[derive(Debug)]
@@ -37,6 +38,10 @@ fn map_event(event: InputEvent) -> Option<TuiInput> {
             KeyCode::Char('c') | KeyCode::Char('C') if key.modifiers.contains(Modifiers::CTRL) => {
                 Some(TuiInput::CtrlC)
             }
+            KeyCode::Char('r') | KeyCode::Char('R') if key.modifiers.contains(Modifiers::CTRL) => {
+                Some(TuiInput::Refresh)
+            }
+            KeyCode::Function(5) => Some(TuiInput::Refresh),
             KeyCode::Char(ch) if key.modifiers.is_empty() || key.modifiers == Modifiers::SHIFT => {
                 Some(TuiInput::Char(ch))
             }
@@ -64,6 +69,8 @@ mod tests {
         assert_eq!(input.parse(b"/"), vec![TuiInput::Char('/')]);
         assert_eq!(input.parse(b"\r"), vec![TuiInput::Enter]);
         assert_eq!(input.parse(b"\x03"), vec![TuiInput::CtrlC]);
+        assert_eq!(input.parse(b"\x12"), vec![TuiInput::Refresh]);
+        assert_eq!(input.parse(b"\x1b[15~"), vec![TuiInput::Refresh]);
         assert_eq!(input.parse(b"\x1b[A"), vec![TuiInput::Up]);
     }
 }
